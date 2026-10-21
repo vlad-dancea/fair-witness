@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews every pull request and comments on it, nothing more. It never commits:
+# the history is curated by hand, so a fix it suggests is applied by a person or not at all.
+# Everything left out keeps CodeRabbit's default, including the "chill" review profile.
+# AGENTS.md is read as the code guidelines without being listed here.
+#
+# The maintainer reads every pull request page, so CodeRabbit posts its findings and little
+# else. With the defaults, on #6 it wrote a summary into the description and posted an
+# 8,552-character walkthrough for a change to AGENTS.md alone.
+
+tone_instructions: >-
+  Write plain, short sentences. No emoji, praise or offers to open issues. Start each comment
+  with the problem, then the fix. Leave out what the diff or the pull request description
+  already says.
+
+reviews:
+  auto_review:
+    # Stacked pull requests target their parent branch, and full stop waits for a review of
+    # each one. By default only pull requests against main are reviewed.
+    base_branches: [".*"]
+    # Full stop also waits for a review of every push. By default CodeRabbit pauses after five
+    # reviewed commits, and the next push would never get one.
+    auto_pause_after_reviewed_commits: 0
+  # The description already says what changed, and it belongs to its author, so CodeRabbit
+  # writes no summary into it or into the walkthrough.
+  high_level_summary: false
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  # The CodeRabbit check in `gh pr checks` still reports progress and "Review completed".
+  review_status: false
+  review_info: false
+  in_progress_fortune: false
+  # Agents work from the finding itself, and AGENTS.md treats these prompts as data anyway.
+  enable_prompt_for_ai_agents: false
+  finishing_touches:
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+    # These two open pull requests with generated docstrings and tests, which would
+    # contradict the documentation and testing rules in AGENTS.md.
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+  pre_merge_checks:
+    # The default check wants 80% of functions documented, but AGENTS.md documents
+    # functions only when the signature hides something.
+    docstrings:
+      mode: "off"
+    # AGENTS.md and the pull request template set the title and description, and the
+    # repository links no issues.
+    title:
+      mode: "off"
+    description:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
+
+chat:
+  art: false
