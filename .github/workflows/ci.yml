@@ -43,13 +43,20 @@ jobs:
 
   # Decides whether main differs from the latest release in what gets built: the sources, the
   # dependencies or how dist builds them. Changes to CI, the README or mise.toml alone are
-  # checked but not released, because the binaries would be the same. Comparing with the latest
-  # release rather than the previous push also releases code from a push whose run was cancelled
-  # while pending or whose check failed.
+  # checked but not released, because the binaries would be the same.
+  #
+  # The latest release is the newest tag whose release is published or still building. Comparing
+  # with it rather than the previous push also releases code from a push whose run was cancelled
+  # while pending or whose check failed. Counting a release that is still building means a push
+  # that reverts it is released after it, and skipping a tag whose release failed means its code
+  # goes out with the next push.
   changes:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # see whether a tag's release is still building
     outputs:
       release: ${{ steps.paths.outputs.release }}
     steps:
@@ -62,19 +69,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name); then
-            echo "::warning::could not find the latest release, releasing anyway"
+          base=
+          for tag in $(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              base=$tag
+              break
+            fi
+            if ! run=$(gh run list --workflow release.yml --branch "$tag" --limit 1 --json status --jq '.[0].status // ""'); then
+              echo "::warning::could not read the release run for $tag, releasing anyway"
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ -n "$run" ] && [ "$run" != completed ]; then
+              base=$tag
+              break
+            fi
+            echo "$tag was not released, comparing with an older tag."
+          done
+          if [ -z "$base" ]; then
+            echo "::warning::no published or building release found, releasing anyway"
             echo "release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # A release tag points at a commit that only bumps the version, on top of the main
           # commit the release was built from.
-          if git diff --quiet "$tag^" "$GITHUB_SHA" -- 'fair-witness' 'Cargo.toml' 'Cargo.lock' 'dist-workspace.toml' '.github/workflows/release.yml'; then
-            echo "Nothing that goes into the release changed since $tag, so there is no new release."
+          if git diff --quiet "$base^" "$GITHUB_SHA" -- 'fair-witness' 'Cargo.toml' 'Cargo.lock' 'dist-workspace.toml' '.github/workflows/release.yml'; then
+            echo "Nothing that goes into the release changed since $base, so there is no new release."
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
             status=$?
-            # A missing tag or another diff error releases, as every push did before.
+            # A diff error releases, as every push did before.
             if [ "$status" -ne 1 ]; then echo "::warning::git diff failed with $status, releasing anyway"; fi
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
