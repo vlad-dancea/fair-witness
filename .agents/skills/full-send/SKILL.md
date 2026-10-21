@@ -27,10 +27,12 @@ as full stop does.
    `mergeCommit` is non-null. Use its `oid` as `<merge-sha>`. Wait for the `ci` run on `main`
    for that commit to appear with `gh run list --branch main --commit <merge-sha>`, then watch
    it until it finishes with `gh run watch <id>`.
-5. If its `publish` job ran, find the release run it started with
-   `gh run list --workflow release.yml --event workflow_dispatch`, watch it with
-   `gh run watch <id>`, then confirm with `gh release view <tag>` that the release is the latest
-   one and lists the installers.
+5. If its `publish` job ran, find the tag it pushed: run `git fetch --tags` and take the tag
+   whose commit's parent is `<merge-sha>` (`git rev-parse <tag>^`), because the tag points at a
+   version bump on top of it. Find the release run for exactly that tag with
+   `gh run list --workflow release.yml --branch <tag>`, watch it with `gh run watch <id>`, then
+   confirm with `gh release view <tag>` that the release is the latest one and lists the
+   installers.
 6. If the check, the publish job or the release fails, report at once with the run link and the
    failing step, and propose a fix or revert pull request. Do not push to `main`, re-run a failed
    release or delete a tag without the maintainer: re-running an older release makes it the
