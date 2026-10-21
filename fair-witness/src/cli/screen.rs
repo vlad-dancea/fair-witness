@@ -335,7 +335,7 @@ impl Screen {
                 .block(
                     Block::bordered()
                         .border_type(BorderType::Rounded)
-                        .title(" damap-helper ".bold()),
+                        .title(" fair-witness ".bold()),
                 ),
             header,
         );

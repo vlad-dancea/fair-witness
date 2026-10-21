@@ -1,4 +1,4 @@
-# damap-helper
+# fair-witness
 
 Watches a project folder and flags changes that contradict its data management plan (DMP) in [DAMAP](https://github.com/tuwien-csd/damap-backend).
 
@@ -14,16 +14,16 @@ Each time files in the folder are created, changed, renamed or deleted, an AI mo
 macOS and Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vlad-dancea/fair-witness/releases/latest/download/damap-helper-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vlad-dancea/fair-witness/releases/latest/download/fair-witness-installer.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/vlad-dancea/fair-witness/releases/latest/download/damap-helper-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/vlad-dancea/fair-witness/releases/latest/download/fair-witness-installer.ps1 | iex"
 ```
 
-Check that it works with `damap-helper --version`.
+Check that it works with `fair-witness --version`.
 
 ## Set up a folder
 
@@ -31,7 +31,7 @@ Go to the folder you want to watch and run `setup`:
 
 ```sh
 cd ~/research/my-project
-damap-helper setup
+fair-witness setup
 ```
 
 It asks four things, in order:
@@ -42,7 +42,7 @@ It asks four things, in order:
 4. **AI model.** Enter the API's URL (default Aqueduct) and, if it needs one, an API key. Aqueduct does. Then pick a model from the ones the API offers.
 
 ```
-$ damap-helper setup
+$ fair-witness setup
 DAMAP URL (as opened in the browser) [https://damap.it.tuwien.ac.at]:
 Connected to DAMAP Tool at https://damap.it.tuwien.ac.at
 To log in, open https://damap.it.tuwien.ac.at/auth/realms/damap/device?user_code=ABCD-EFGH
@@ -52,7 +52,7 @@ AI API URL (OpenAI-compatible) [https://aqueduct.ai.datalab.tuwien.ac.at/v1]:
 API key (empty for none): ********
 Model (type to filter): your-model
 Changes will be checked with your-model.
-Run `damap-helper run` to start watching this folder.
+Run `fair-witness run` to start watching this folder.
 ```
 
 Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in.
@@ -64,12 +64,12 @@ The DAMAP URL and the AI settings can also be passed as flags or environment var
 | Flag | Environment variable | |
 |---|---|---|
 | `--url` | | DAMAP URL |
-| `--ai-url` | `DAMAP_HELPER_AI_URL` | Base URL of the OpenAI-compatible API |
-| `--api-key` | `DAMAP_HELPER_API_KEY` | API key for it |
-| `--model` | `DAMAP_HELPER_MODEL` | Model to use |
+| `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
+| `--model` | `FAIR_WITNESS_MODEL` | Model to use |
 
 ```sh
-DAMAP_HELPER_API_KEY=sk-... damap-helper setup --url https://damap.example.org \
+FAIR_WITNESS_API_KEY=sk-... fair-witness setup --url https://damap.example.org \
   --ai-url https://api.openai.com/v1 --model gpt-5-mini
 ```
 
@@ -77,26 +77,26 @@ You still log in and pick the DMP interactively.
 
 ### What setup saves
 
-Everything goes into a `.damap-helper/` folder at the root of the project:
+Everything goes into a `.fair-witness/` folder at the root of the project:
 
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP, refreshed on every `run`.
 
-A `.gitignore` inside it keeps the last two out of git. You can run `damap-helper` from any subfolder; it finds `.damap-helper/` by looking upwards.
+A `.gitignore` inside it keeps the last two out of git. You can run `fair-witness` from any subfolder; it finds `.fair-witness/` by looking upwards.
 
 ## Tutorial: watching a folder
 
 ### 1. Start watching
 
 ```sh
-damap-helper run
+fair-witness run
 ```
 
 The DMP is downloaded and the screen opens:
 
 ```
-╭ damap-helper ─────────────────────────────────────────────────────╮
+╭ fair-witness ─────────────────────────────────────────────────────╮
 │Watching /home/you/research/my-project                             │
 │Comparing changes with project #3 - Soil samples 2026.             │
 │Using your-model from https://aqueduct.ai.datalab.tuwien.ac.at/v1. │
@@ -130,7 +130,7 @@ created: data/patients.csv                                       #1
   ↳ checking against the DMP… 4s
 ```
 
-Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Changes inside `.damap-helper/` are ignored.
+Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Changes inside `.fair-witness/` are ignored.
 
 ### 3. Read the verdict
 
@@ -148,7 +148,7 @@ created: data/patients.csv                                       #1
 - **`contradicts the DMP`** (red): the AI names the DMP field it clashes with and explains why. You also get a **desktop notification**, so you see it even when the terminal is in the background.
 - **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it.
 
-To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or into `.damap-helper/`.
+To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or into `.fair-witness/`.
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
 
@@ -170,7 +170,7 @@ Press `m` to change the model without restarting:
 - `Tab` switches to the **effort** column (`default`, `none`, `low`, `medium`, `high`) for models that support reasoning effort.
 - `Enter` uses the choice from the next change set on and saves it to `config.toml`. `Esc` cancels.
 
-To use a different API or key, quit and run `damap-helper setup`.
+To use a different API or key, quit and run `fair-witness setup`.
 
 ### 6. Stop
 
@@ -193,16 +193,16 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 
 | Command | Does |
 |---|---|
-| `damap-helper setup` | Set up the current folder, or change its DAMAP login, DMP or model |
-| `damap-helper run` | Watch the folder and check changes against the DMP |
-| `damap-helper run --dmp <id>` | Check against another DMP this time only, without changing the saved choice |
-| `damap-helper logout` | Forget the saved DAMAP login for this folder |
+| `fair-witness setup` | Set up the current folder, or change its DAMAP login, DMP or model |
+| `fair-witness run` | Watch the folder and check changes against the DMP |
+| `fair-witness run --dmp <id>` | Check against another DMP this time only, without changing the saved choice |
+| `fair-witness logout` | Forget the saved DAMAP login for this folder |
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
 ## Troubleshooting
 
-- **"this folder is not set up yet"**: run `damap-helper setup` in the folder, or in one of its parent folders.
+- **"this folder is not set up yet"**: run `fair-witness setup` in the folder, or in one of its parent folders.
 - **"Is DAMAP running?"**: the saved DAMAP URL can't be reached. Start DAMAP, or run `setup` to change the URL.
 - **"… does not look like an OpenAI-compatible API"**: the AI URL usually needs to end in `/v1`.
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
@@ -221,7 +221,7 @@ docker compose up -d --wait   # DAMAP at http://localhost:8085
 docker compose down           # to stop it
 ```
 
-Then run `damap-helper setup --url http://localhost:8085` and log in as `user` with password `user`.
+Then run `fair-witness setup --url http://localhost:8085` and log in as `user` with password `user`.
 
 ## Development
 
@@ -229,7 +229,7 @@ Then run `damap-helper setup --url http://localhost:8085` and log in as `user` w
 
 ```sh
 mise install            # the pinned Rust toolchain, with clippy and rustfmt
-mise run dev -- setup   # run damap-helper from source
+mise run dev -- setup   # run fair-witness from source
 mise run format         # format the sources
 mise run check          # everything CI checks: formatting, clippy, tests
 ```
@@ -238,6 +238,6 @@ Clippy warnings fail the check.
 
 ## Releasing
 
-Every push to `main` publishes a release once `mise run check` passes on it. The `publish` job in `.github/workflows/ci.yml` tags the next version (the `version` in `damap-helper/Cargo.toml`, or the next patch if that is already released) and starts `release.yml`, which builds the binaries and installers for Linux, macOS and Windows and attaches them to a GitHub release. To start a new minor or major line, bump `version` in `damap-helper/Cargo.toml`.
+Every push to `main` publishes a release once `mise run check` passes on it. The `publish` job in `.github/workflows/ci.yml` tags the next version (the `version` in `fair-witness/Cargo.toml`, or the next patch if that is already released) and starts `release.yml`, which builds the binaries and installers for Linux, macOS and Windows and attaches them to a GitHub release. To start a new minor or major line, bump `version` in `fair-witness/Cargo.toml`.
 
 The release workflow is generated by [dist](https://github.com/axodotdev/cargo-dist); after changing `dist-workspace.toml`, run `dist generate`.

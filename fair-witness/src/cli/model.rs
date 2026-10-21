@@ -13,20 +13,20 @@ const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 pub struct ModelArgs {
     #[arg(
         long,
-        env = "DAMAP_HELPER_AI_URL",
+        env = "FAIR_WITNESS_AI_URL",
         help = "Base URL of an OpenAI-compatible API for the model; asked for if not given"
     )]
     pub ai_url: Option<String>,
     #[arg(
         long,
-        env = "DAMAP_HELPER_API_KEY",
+        env = "FAIR_WITNESS_API_KEY",
         hide_env_values = true,
         help = "API key for it, if it needs one; asked for along with the URL"
     )]
     pub api_key: Option<String>,
     #[arg(
         long,
-        env = "DAMAP_HELPER_MODEL",
+        env = "FAIR_WITNESS_MODEL",
         help = "The model to use; chosen from the ones the API offers if not given"
     )]
     pub model: Option<String>,

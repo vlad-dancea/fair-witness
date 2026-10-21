@@ -1,4 +1,4 @@
-# Continuous integration and releases for damap-helper.
+# Continuous integration and releases for fair-witness.
 #
 # Runs the `check` task developers run before pushing: rustfmt, clippy with every warning as an
 # error, and the tests. mise installs the Rust toolchain pinned in mise.toml, so CI builds with
@@ -41,7 +41,7 @@ jobs:
 
       - run: mise run check
 
-  # Picks the next version (the version in damap-helper/Cargo.toml, or the patch after the
+  # Picks the next version (the version in fair-witness/Cargo.toml, or the patch after the
   # latest tag if that is already released), commits the bump on a detached release commit,
   # tags it and starts release.yml on that tag. main itself is never written to.
   publish:
@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest=damap-helper/Cargo.toml
+          manifest=fair-witness/Cargo.toml
           current=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
           latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
           latest=${latest#v}
@@ -82,9 +82,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" damap-helper/Cargo.toml
+          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" fair-witness/Cargo.toml
           # Keep Cargo.lock in step with the new version.
-          sed -i "/^name = \"damap-helper\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
+          sed -i "/^name = \"fair-witness\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit --allow-empty -am "Release v$VERSION"

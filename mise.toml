@@ -23,5 +23,5 @@ description = "Everything CI checks: formatting, clippy, tests"
 depends = ["format:check", "lint", "test"]
 
 [tasks.dev]
-description = "Run damap-helper from source, with arguments after --, such as `mise run dev -- setup`"
-run = "cargo run -p damap-helper --"
+description = "Run fair-witness from source, with arguments after --, such as `mise run dev -- setup`"
+run = "cargo run -p fair-witness --"

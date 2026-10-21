@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-const DIR_NAME: &str = ".damap-helper";
+const DIR_NAME: &str = ".fair-witness";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";

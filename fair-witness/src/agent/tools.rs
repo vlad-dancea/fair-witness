@@ -75,7 +75,7 @@ impl Tools {
         let Ok(relative) = resolved.strip_prefix(&self.root) else {
             return Err(format!("{path} is outside the project folder"));
         };
-        if relative.starts_with(".damap-helper") {
+        if relative.starts_with(".fair-witness") {
             return Err(format!("{path} is not part of the research data"));
         }
         Ok(resolved)
@@ -94,7 +94,7 @@ fn list_dir(path: &Path) -> Result<String, String> {
                 Err(_) => name,
             }
         })
-        .filter(|line| line != ".damap-helper/")
+        .filter(|line| line != ".fair-witness/")
         .collect();
     lines.sort();
     let total = lines.len();
@@ -140,8 +140,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("data")).unwrap();
         fs::write(dir.path().join("data/a.csv"), "id,name\n1,x\n").unwrap();
-        fs::create_dir(dir.path().join(".damap-helper")).unwrap();
-        fs::write(dir.path().join(".damap-helper/credentials.toml"), "secret").unwrap();
+        fs::create_dir(dir.path().join(".fair-witness")).unwrap();
+        fs::write(dir.path().join(".fair-witness/credentials.toml"), "secret").unwrap();
         let tools = Tools::new(dir.path()).unwrap();
         (dir, tools)
     }
@@ -186,12 +186,12 @@ mod tests {
     #[test]
     fn refuses_our_own_state() {
         let (_dir, tools) = project();
-        assert!(call(&tools, "read_file", ".damap-helper/credentials.toml").is_err());
+        assert!(call(&tools, "read_file", ".fair-witness/credentials.toml").is_err());
         assert!(
             call(
                 &tools,
                 "read_file",
-                "data/../.damap-helper/credentials.toml"
+                "data/../.fair-witness/credentials.toml"
             )
             .is_err()
         );
