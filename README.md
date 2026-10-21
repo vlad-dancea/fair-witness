@@ -14,13 +14,13 @@ Each time files in the folder are created, changed, renamed or deleted, an AI mo
 macOS and Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vlad-dancea/damap-helper/releases/latest/download/damap-helper-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vlad-dancea/fair-witness/releases/latest/download/damap-helper-installer.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/vlad-dancea/damap-helper/releases/latest/download/damap-helper-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/vlad-dancea/fair-witness/releases/latest/download/damap-helper-installer.ps1 | iex"
 ```
 
 Check that it works with `damap-helper --version`.
