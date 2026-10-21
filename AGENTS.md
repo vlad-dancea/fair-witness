@@ -45,6 +45,10 @@ lists by name live next to the code. Leave them alone and never commit them.
 - Keep the rest of CI that way when editing workflows: steps that call mise tasks, read-only
   default permissions, write permissions only on the job that needs them, timeouts, and actions
   pinned to full commit SHAs with the release in a trailing comment.
+- Renovate opens dependency pull requests every Monday morning, Vienna time, for releases at
+  least three days old, as configured in `.github/renovate.json5`. Minor and patch updates
+  share one pull request, except minor updates of 0.x crates, which Cargo treats as breaking.
+  It leaves `release.yml` alone, so dist and its actions are updated by hand.
 
 ## Branches, commits and pull requests
 
