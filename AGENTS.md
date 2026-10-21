@@ -75,8 +75,8 @@ lists by name live next to the code. Leave them alone and never commit them.
   `gh pr create`. The description follows `.github/pull_request_template.md`: what works after
   the pull request that did not before and the problem it solves, in a sentence or two, a "TBD"
   section numbering the decisions left to the maintainer (only when there are some), at most
-  five bullets on what changed and why, and a "Verification" section listing what ran and what
-  it showed. The pull request title becomes the squash commit title, so write it like a commit
+  five bullets on what changed and why, most important first, and a "Verification" section
+  listing what ran and what it showed. The pull request title becomes the squash commit title, so write it like a commit
   title.
 - When `main` moves, run `git fetch` and `git merge origin/main` on the branch, run
   `mise run check` again and push. Never rebase or force-push a branch with an open pull
