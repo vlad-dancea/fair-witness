@@ -49,7 +49,10 @@ lists by name live next to the code. Leave them alone and never commit them.
 ## Branches, commits and pull requests
 
 - Commit, push or open a pull request only when asked.
-- Changes reach `main` only through pull requests.
+- Changes reach `main` only through pull requests. The "Protect main" ruleset enforces this on
+  GitHub: `main` cannot be pushed to, force-pushed or deleted, and a pull request merges only
+  by squash, once the `check` job passes, the branch contains the latest `main` and every
+  review thread is resolved. Nobody can bypass it.
 - Several agents may work in this repository at the same time, so each piece of work gets its
   own worktree with its own branch from `origin/main`. `t3.json` makes T3 Code create one for
   every new thread. If you started in such a worktree, work there and keep the branch T3 Code
@@ -85,7 +88,7 @@ lists by name live next to the code. Leave them alone and never commit them.
   `gh pr merge <number> --squash --subject "<title> (#<number>)" --body-file <file>`, where
   the body follows the commit message rules. GitHub adds the number only to its own default
   title, so the subject carries it. Do not enable auto-merge unless asked.
-- After the merge, delete the remote branch. Remove a worktree you created with
+- GitHub deletes the remote branch after the merge. Remove a worktree you created with
   `git worktree remove <path>`, then delete its local branch with `git branch -D <branch>`,
   because a squash-merged branch never looks merged to git. Leave a T3 Code worktree and its
   branch to T3 Code, because the thread still runs in it.
