@@ -82,9 +82,15 @@ jobs:
             fi
             # Asked only after the run is seen completed: a run publishes its release before it
             # completes, so a release that finished in between is not mistaken for a failed one.
-            if gh release view "$tag" >/dev/null 2>&1; then
+            if found=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .tag_name 2>&1); then
               base=$tag
               break
+            fi
+            # Only a confirmed 404 means no release. An outage or rate limit must not skip the tag.
+            if ! grep -q "HTTP 404" <<<"$found"; then
+              echo "::warning::could not read the release for $tag ($found), releasing anyway"
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
             echo "$tag was not released, comparing with an older tag."
           done
