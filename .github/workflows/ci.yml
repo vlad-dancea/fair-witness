@@ -1,0 +1,98 @@
+# Continuous integration and releases for damap-helper.
+#
+# Runs the `check` task developers run before pushing: rustfmt, clippy with every warning as an
+# error, and the tests. mise installs the Rust toolchain pinned in mise.toml, so CI builds with
+# exactly the toolchain used locally. On main, a passing check publishes the next release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Only the newest commit of a pull request matters, so a new push cancels the run before it.
+# Runs on main finish, so that every commit on main is released.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege: jobs only read the repository, unless they ask for more.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    # A hung build fails after 20 minutes instead of GitHub's 6-hour default.
+    timeout-minutes: 20
+    steps:
+      # Actions are pinned to a full commit SHA: a tag can be moved to different code, a
+      # commit cannot. The trailing comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No later step pushes, so the token is not left behind in .git/config.
+          persist-credentials: false
+
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+
+      # Caches the dependencies' build output between runs. Releases are built by
+      # release.yml, which does not use this cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - run: mise run check
+
+  # Picks the next version (the version in damap-helper/Cargo.toml, or the patch after the
+  # latest tag if that is already released), commits the bump on a detached release commit,
+  # tags it and starts release.yml on that tag. main itself is never written to.
+  publish:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the release tag
+      actions: write # start release.yml
+    steps:
+      # Keeps the token in .git/config, because this job pushes the tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Pick the next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=damap-helper/Cargo.toml
+          current=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
+          latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+          latest=${latest#v}
+          if [ -z "$latest" ] || [ "$(printf '%s\n%s\n' "$latest" "$current" | sort -V | tail -1)" != "$latest" ]; then
+            next=$current
+          else
+            IFS=. read -r major minor patch <<<"${latest%%-*}"
+            next="$major.$minor.$((patch + 1))"
+          fi
+          echo "Releasing $next (Cargo.toml: $current, latest tag: ${latest:-none})"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Tag a release commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" damap-helper/Cargo.toml
+          # Keep Cargo.lock in step with the new version.
+          sed -i "/^name = \"damap-helper\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -am "Release v$VERSION"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Start the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh workflow run release.yml --ref "v$VERSION" -f tag="v$VERSION"
