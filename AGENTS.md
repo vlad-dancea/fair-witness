@@ -89,6 +89,13 @@ lists by name live next to the code. Leave them alone and never commit them.
   because a squash-merged branch never looks merged to git. Leave a T3 Code worktree and its
   branch to T3 Code, because the thread still runs in it.
 
+## Skills
+
+`.agents/skills/` holds the repository's skills, and `.claude/skills` links to it for Claude
+Code. `sol-loop` has a second model review the change, `full-stop` takes work to a reviewed pull
+request that is ready to merge, and `full-send` also merges it and watches the release. Each
+runs only when the maintainer says its name, and `AGENTS.md` wins when a skill disagrees with it.
+
 ## Documentation and tests
 
 - Document new public types in one concise sentence with `///`. Document functions only when
