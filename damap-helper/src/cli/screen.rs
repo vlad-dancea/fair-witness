@@ -93,7 +93,10 @@ fn wrap_hanging(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         if let Some(last) = row.last_mut() {
             *last = Span::styled(last.content.trim_end().to_string(), last.style);
         }
-        rows.push(Line::from(std::mem::replace(row, vec![Span::raw(" ".repeat(indent))])));
+        rows.push(Line::from(std::mem::replace(
+            row,
+            vec![Span::raw(" ".repeat(indent))],
+        )));
         *row_width = indent;
     };
     for span in &line.spans {
@@ -290,9 +293,9 @@ impl Screen {
                 "in line with the DMP:".fg(IN_LINE_GREEN),
                 Span::raw(format!(" {}", verdict.explanation)),
             ])),
-            Update::Verdict(Err(e)) => self
-                .log
-                .push(LogLine::verdict(vec![format!("review failed: {e:#}").red()])),
+            Update::Verdict(Err(e)) => self.log.push(LogLine::verdict(vec![
+                format!("review failed: {e:#}").red(),
+            ])),
             Update::WatchErrors(errors) => {
                 for e in errors {
                     self.log
@@ -398,8 +401,11 @@ impl Screen {
             return;
         }
         let width = block.inner(area).width as usize;
-        let mut lines: Vec<Line<'static>> =
-            self.log.iter().flat_map(|line| line.render(width)).collect();
+        let mut lines: Vec<Line<'static>> = self
+            .log
+            .iter()
+            .flat_map(|line| line.render(width))
+            .collect();
         if let Some(since) = self.reviewing_since {
             let elapsed = since.elapsed();
             let frame = SPINNER[(elapsed.as_millis() / TICK.as_millis()) as usize % SPINNER.len()];
@@ -518,7 +524,13 @@ mod tests {
         let rows: Vec<String> = line.render(16).iter().map(text).collect();
         assert_eq!(
             rows,
-            [" ↳ in line: the", "   file is fine", "   and", "   verylongwordh", "   ere"]
+            [
+                " ↳ in line: the",
+                "   file is fine",
+                "   and",
+                "   verylongwordh",
+                "   ere"
+            ]
         );
     }
 }
