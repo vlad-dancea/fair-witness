@@ -1,0 +1,62 @@
+// Renovate keeps the pinned versions in the repository current: the crates in Cargo.toml and
+// Cargo.lock, the GitHub Actions in ci.yml and the Rust toolchain in mise.toml. It proposes each
+// update as a pull request, so CI proves the update builds before it is merged.
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // The Renovate maintainers' recommended setup. Among other things it pins GitHub Actions
+  // to commit SHAs and keeps them pinned, and opens a Dependency Dashboard issue that lists every
+  // pending update.
+  extends: ['config:best-practices'],
+
+  // Updates arrive in one weekly batch instead of whenever something is released.
+  timezone: 'Europe/Vienna',
+  schedule: ['* 0-8 * * 1'],
+
+  // A release is proposed only once it is three days old. A compromised or broken release
+  // is usually found and pulled within that time.
+  minimumReleaseAge: '3 days',
+  // Without this, Renovate opens the pull request right away and only marks it as pending.
+  internalChecksFilter: 'strict',
+
+  // The preset refreshes Cargo.lock weekly with `cargo update`, which takes every crate's newest
+  // release regardless of its age. Its pull request would also wait for the release age
+  // forever, because a refresh has no release date. Crates deeper in the tree move when a
+  // direct dependency's update needs them to.
+  lockFileMaintenance: { enabled: false },
+
+  // AGENTS.md wants commit titles without a type prefix, and the pull request title becomes
+  // the squash commit title.
+  semanticCommits: 'disabled',
+
+  packageRules: [
+    {
+      // Minor and patch updates rarely need individual attention, so they share one pull
+      // request. Major updates stay separate: they can break things and deserve a look.
+      groupName: 'all non-major dependencies',
+      matchUpdateTypes: ['minor', 'patch', 'digest'],
+    },
+    {
+      // An update within the range in Cargo.toml only moves Cargo.lock, to exactly the version
+      // that passed the release age. Raising the range instead makes Renovate run a plain
+      // `cargo update`, which locks the newest compatible release, however young. This also
+      // overrides the preset that would pin dev-dependencies with "=".
+      matchManagers: ['cargo'],
+      rangeStrategy: 'update-lockfile',
+    },
+    {
+      // Cargo treats 0.6 to 0.7 as a breaking change, like a major update, so it gets its own
+      // pull request as well.
+      matchManagers: ['cargo'],
+      matchCurrentVersion: '<1.0.0',
+      matchUpdateTypes: ['minor'],
+      groupName: null,
+    },
+    {
+      // dist generates release.yml, and `dist plan` fails when the file differs from what it
+      // would generate. Its actions and the dist version change only through
+      // dist-workspace.toml and `dist generate`, which Renovate cannot run.
+      matchFileNames: ['.github/workflows/release.yml'],
+      enabled: false,
+    },
+  ],
+}
