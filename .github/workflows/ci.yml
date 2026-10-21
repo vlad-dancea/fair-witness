@@ -71,16 +71,18 @@ jobs:
         run: |
           base=
           for tag in $(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
-            if gh release view "$tag" >/dev/null 2>&1; then
-              base=$tag
-              break
-            fi
             if ! run=$(gh run list --workflow release.yml --branch "$tag" --limit 1 --json status --jq '.[0].status // ""'); then
               echo "::warning::could not read the release run for $tag, releasing anyway"
               echo "release=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [ -n "$run" ] && [ "$run" != completed ]; then
+              base=$tag
+              break
+            fi
+            # Asked only after the run is seen completed: a run publishes its release before it
+            # completes, so a release that finished in between is not mistaken for a failed one.
+            if gh release view "$tag" >/dev/null 2>&1; then
               base=$tag
               break
             fi
