@@ -15,5 +15,5 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
 # Whether to install an updater program
 install-updater = false
-# Releases are started by .github/workflows/publish.yml on every push to main
+# Releases are started by the publish job in .github/workflows/ci.yml on every push to main
 dispatch-releases = true
