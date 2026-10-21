@@ -212,16 +212,18 @@ If `run` finds no DMP or no model, it still watches and lists changes, but does 
 
 ## Running DAMAP locally
 
-For development, the DAMAP repositories are cloned next to `damap-helper` (`damap-backend/`, `damap-frontend/`; both gitignored). With [mise](https://mise.jdx.dev) and Docker installed:
+With Docker installed, start DAMAP's development setup from a clone of [damap-backend](https://github.com/tuwien-csd/damap-backend):
 
 ```sh
-mise run damap-start   # DAMAP at http://localhost:8085
-mise run damap-stop
+git clone https://github.com/tuwien-csd/damap-backend
+cd damap-backend
+docker compose up -d --wait   # DAMAP at http://localhost:8085
+docker compose down           # to stop it
 ```
 
 Then run `damap-helper setup --url http://localhost:8085` and log in as `user` with password `user`.
 
-To build `damap-helper` from source: `cargo run -p damap-helper -- setup`.
+To build `damap-helper` from source: `cargo run -p damap-helper -- setup`. With [mise](https://mise.jdx.dev), `mise install` sets up the Rust toolchain.
 
 ## Releasing
 
