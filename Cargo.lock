@@ -688,29 +688,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "damap-helper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dialoguer",
- "genai",
- "jiff",
- "notify",
- "notify-debouncer-full",
- "notify-rust",
- "open",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "unicode-width",
-]
-
-[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -985,6 +962,29 @@ dependencies = [
  "futures-core",
  "nom",
  "pin-project-lite",
+]
+
+[[package]]
+name = "fair-witness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dialoguer",
+ "genai",
+ "jiff",
+ "notify",
+ "notify-debouncer-full",
+ "notify-rust",
+ "open",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "unicode-width",
 ]
 
 [[package]]

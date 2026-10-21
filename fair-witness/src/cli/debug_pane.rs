@@ -27,7 +27,7 @@ enum Entry {
         text: String,
         tools: Vec<String>,
     },
-    /// A message from damap-helper to the AI.
+    /// A message from fair-witness to the AI.
     Prompt(String),
     Turn(Turn),
     Failed(String),
@@ -266,7 +266,7 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
             }
         }
         Entry::Prompt(text) => {
-            lines.push(badge("DAMAP-HELPER", Color::Blue, "to the AI"));
+            lines.push(badge("FAIR-WITNESS", Color::Blue, "to the AI"));
             push_body(lines, &indent, &prompt_lines(text, collapsed), width);
         }
         Entry::Turn(turn) => render_turn(turn, width, collapsed, lines),
@@ -673,7 +673,7 @@ mod tests {
                 " SYSTEM PROMPT   how the AI should judge",
                 "  ⋯ 2 lines hidden (c to expand)",
                 "",
-                " DAMAP-HELPER   to the AI",
+                " FAIR-WITNESS   to the AI",
                 "  The DMP:",
                 "  ⋯ 2 json lines hidden (c to expand)",
                 "  Changed: a.csv",

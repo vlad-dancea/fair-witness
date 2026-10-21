@@ -10,7 +10,7 @@ pub fn run(url: Option<String>, model: ModelArgs) -> Result<()> {
     let damap = connect::setup(url)?;
     choose_dmp(&damap)?;
     model::setup(model)?;
-    println!("Run `damap-helper run` to start watching this folder.");
+    println!("Run `fair-witness run` to start watching this folder.");
     Ok(())
 }
 
@@ -19,7 +19,7 @@ fn choose_dmp(damap: &Damap) -> Result<()> {
     let dmps = damap.list_dmps()?;
     if dmps.is_empty() {
         println!(
-            "Logged in. You have no DMPs yet; create one at {}, then run `damap-helper setup` again.",
+            "Logged in. You have no DMPs yet; create one at {}, then run `fair-witness setup` again.",
             damap.url()
         );
         config.damap.dmp_id = None;

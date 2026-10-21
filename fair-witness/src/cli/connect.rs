@@ -40,7 +40,7 @@ pub fn setup(url: Option<String>) -> Result<Damap> {
 
 pub fn resume() -> Result<Damap> {
     let Some(config) = Config::load()? else {
-        bail!("this folder is not set up yet; run `damap-helper setup` first");
+        bail!("this folder is not set up yet; run `fair-witness setup` first");
     };
     let http = http_client()?;
     let (damap, instance) = reach(&http, &config.damap.frontend_url)?;
@@ -83,7 +83,7 @@ pub(super) fn web_url(input: &str) -> Result<String> {
 
 pub(super) fn http_client() -> Result<Client> {
     Ok(Client::builder()
-        .user_agent(concat!("damap-helper/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(15))
         .build()?)
 }
@@ -121,7 +121,7 @@ fn save_session(mut damap: Damap, tokens: Tokens) -> Result<Damap> {
 fn reach(http: &Client, url: &str) -> Result<(Damap, InstanceConfig)> {
     let damap = Damap::new(http.clone(), url);
     let instance = damap.instance_config().map_err(|e| {
-        anyhow!("{e:#}\nIs DAMAP running? To use a different URL, run `damap-helper setup`.")
+        anyhow!("{e:#}\nIs DAMAP running? To use a different URL, run `fair-witness setup`.")
     })?;
     Ok((damap, instance))
 }

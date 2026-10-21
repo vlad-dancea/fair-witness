@@ -43,13 +43,13 @@ pub fn run(dmp: Option<i64>) -> Result<()> {
             (Some(Review { reviewer, dmp }), Some(settings), status)
         }
         (Some(_), None) if dmp.is_some() => {
-            bail!("no AI model to check with; choose one with `damap-helper setup`")
+            bail!("no AI model to check with; choose one with `fair-witness setup`")
         }
         (None, Some(_)) => (
             None,
             None,
             vec![
-                "No DMP chosen, so changes are not checked; choose one with `damap-helper setup`."
+                "No DMP chosen, so changes are not checked; choose one with `fair-witness setup`."
                     .to_string(),
             ],
         ),
@@ -131,7 +131,7 @@ fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
     let updates = updates.clone();
     thread::spawn(move || {
         let shown = Notification::new()
-            .appname("damap-helper")
+            .appname("fair-witness")
             .summary(&summary)
             .body(&body)
             .show();
@@ -143,5 +143,5 @@ fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
 
 fn in_damap_dir(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
-        .is_ok_and(|p| p.starts_with(".damap-helper"))
+        .is_ok_and(|p| p.starts_with(".fair-witness"))
 }
