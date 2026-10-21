@@ -54,9 +54,10 @@ lists by name live next to the code. Leave them alone and never commit them.
 - Changes reach `main` only through pull requests. The "Protect main" ruleset enforces this on
   GitHub: `main` cannot be pushed to, force-pushed or deleted, and a pull request merges only
   by squash, once the `check` job passes, the branch contains the latest `main` and every
-  review thread is resolved. Nobody can bypass it. `.github/rulesets/main.json` holds a copy,
-  but editing the file does not change GitHub. `.github/rulesets/README.md` explains how to
-  apply it.
+  review thread is resolved. Nobody can bypass it, but an administrator can change it, so
+  change the live ruleset only when the maintainer asks. `.github/rulesets/main.json` holds a
+  copy, but editing the file does not change GitHub. `.github/rulesets/README.md` explains how
+  to apply it.
 - Several agents may work in this repository at the same time, so each piece of work gets its
   own worktree with its own branch from `origin/main`. `t3.json` makes T3 Code create one for
   every new thread. If you started in such a worktree, work there and keep the branch T3 Code
