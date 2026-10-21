@@ -1,1 +1,5 @@
 /target/
+
+# Personal thesis notes kept next to the code, not part of the repository.
+/eosc-arena-context.md
+/thesis-proposal-template.pdf
