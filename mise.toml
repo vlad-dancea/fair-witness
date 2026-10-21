@@ -1,2 +1,27 @@
 [tools]
-rust = "1.99.0"
+# clippy and rustfmt are listed so `check` finds them whatever rustup profile installs Rust.
+rust = { version = "1.99.0", components = "clippy,rustfmt" }
+
+[tasks.format]
+description = "Format the Rust sources"
+run = "cargo fmt"
+
+[tasks."format:check"]
+description = "Check that the Rust sources are formatted"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Run clippy on all targets, with every warning as an error"
+run = "cargo clippy --all-targets --locked -- -D warnings"
+
+[tasks.test]
+description = "Run the tests"
+run = "cargo test --locked"
+
+[tasks.check]
+description = "Everything CI checks: formatting, clippy, tests"
+depends = ["format:check", "lint", "test"]
+
+[tasks.dev]
+description = "Run damap-helper from source, with arguments after --, such as `mise run dev -- setup`"
+run = "cargo run -p damap-helper --"

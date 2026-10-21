@@ -223,7 +223,18 @@ docker compose down           # to stop it
 
 Then run `damap-helper setup --url http://localhost:8085` and log in as `user` with password `user`.
 
-To build `damap-helper` from source: `cargo run -p damap-helper -- setup`. With [mise](https://mise.jdx.dev), `mise install` sets up the Rust toolchain.
+## Development
+
+[mise](https://mise.jdx.dev) pins the Rust toolchain and defines the tasks, and CI runs the same ones:
+
+```sh
+mise install            # the pinned Rust toolchain, with clippy and rustfmt
+mise run dev -- setup   # run damap-helper from source
+mise run format         # format the sources
+mise run check          # everything CI checks: formatting, clippy, tests
+```
+
+Clippy warnings fail the check.
 
 ## Releasing
 
