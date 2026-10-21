@@ -1,0 +1,19 @@
+// Zed settings for this repository, applied on top of each person's own.
+{
+  "languages": {
+    "Rust": {
+      // rust-analyzer formats with rustfmt, the same formatter `mise run check` enforces.
+      "format_on_save": "on"
+    }
+  },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        // Clippy instead of `cargo check`, so the editor shows the warnings that fail the check.
+        "check": {
+          "command": "clippy"
+        }
+      }
+    }
+  }
+}
