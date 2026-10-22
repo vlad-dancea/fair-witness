@@ -266,9 +266,9 @@ impl Screen {
         }
         match update {
             Update::Changes(set, changes) => {
-                for listed in watcher::summarize(&self.root, &changes) {
+                for listed in watcher::summarize(&changes) {
                     self.log.push(LogLine {
-                        line: change_line(&self.root, &listed),
+                        line: change_line(&listed),
                         set: Some(set),
                         verdict: false,
                     });
@@ -464,7 +464,7 @@ fn draw_scrolled(
     frame.render_widget(paragraph.scroll((top, 0)).block(block), area);
 }
 
-fn change_line(root: &Path, listed: &Listed) -> Line<'static> {
+fn change_line(listed: &Listed) -> Line<'static> {
     let kind = listed.kind();
     let color = match kind {
         Kind::Created => Color::Green,
@@ -474,7 +474,7 @@ fn change_line(root: &Path, listed: &Listed) -> Line<'static> {
     };
     Line::from(vec![
         format!("{}:", kind.verb()).fg(color),
-        Span::raw(format!(" {}", listed.describe(root))),
+        Span::raw(format!(" {}", listed.describe())),
     ])
 }
 

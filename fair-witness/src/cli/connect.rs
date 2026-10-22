@@ -6,20 +6,27 @@ use reqwest::Url;
 use reqwest::blocking::Client;
 
 use crate::auth::{Oidc, Tokens};
-use crate::config::{self, Config, Credentials, DamapConfig};
 use crate::damap::{Damap, InstanceConfig};
+use crate::project::{Config, DamapConfig, Project};
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
 
-pub fn setup(url: Option<String>) -> Result<Damap> {
+pub fn setup(around: Option<&Project>, project: &Project, url: Option<String>) -> Result<Damap> {
     let http = http_client()?;
-    let previous_url = Config::load()?.map(|c| c.damap.frontend_url);
+    let previous_url = match around {
+        Some(around) => around.config()?.map(|c| c.damap.frontend_url),
+        None => None,
+    };
     let (damap, instance) = match url {
         Some(url) => reach(&http, &web_url(&url)?)?,
         None => ask_for_damap(&http, previous_url.clone())?,
     };
     let oidc = discover(http, &damap, &instance)?;
-    let session = match Credentials::load()?.refresh_token {
+    let refresh_token = match around {
+        Some(around) => around.credentials()?.refresh_token,
+        None => None,
+    };
+    let session = match refresh_token {
         Some(token) if previous_url.as_deref() == Some(damap.url()) => oidc.refresh(&token).ok(),
         _ => None,
     };
@@ -34,18 +41,18 @@ pub fn setup(url: Option<String>) -> Result<Damap> {
         }
         _ => oidc.login()?,
     };
-    config::create_here()?;
-    save_session(damap, tokens)
+    project.create()?;
+    save_session(project, damap, tokens)
 }
 
-pub fn resume() -> Result<Damap> {
-    let Some(config) = Config::load()? else {
-        bail!("this folder is not set up yet; run `fair-witness setup` first");
+pub fn resume(project: &Project) -> Result<Damap> {
+    let Some(config) = project.config()? else {
+        bail!(super::NOT_SET_UP);
     };
     let http = http_client()?;
     let (damap, instance) = reach(&http, &config.damap.frontend_url)?;
     let oidc = discover(http, &damap, &instance)?;
-    let tokens = match Credentials::load()?.refresh_token {
+    let tokens = match project.credentials()?.refresh_token {
         Some(refresh_token) => match oidc.refresh(&refresh_token) {
             Ok(tokens) => tokens,
             Err(e) => {
@@ -58,7 +65,7 @@ pub fn resume() -> Result<Damap> {
             oidc.login()?
         }
     };
-    save_session(damap, tokens)
+    save_session(project, damap, tokens)
 }
 
 /// Reads a web address as typed: `https://` is assumed when no scheme is given.
@@ -94,21 +101,20 @@ fn discover(http: Client, damap: &Damap, instance: &InstanceConfig) -> Result<Oi
     Oidc::discover(http, &instance.issuer, &instance.client_id, &instance.scope)
 }
 
-fn save_session(mut damap: Damap, tokens: Tokens) -> Result<Damap> {
-    let previous = Config::load()?;
-    Config {
+fn save_session(project: &Project, mut damap: Damap, tokens: Tokens) -> Result<Damap> {
+    let previous = project.config()?;
+    project.save_config(&Config {
         damap: DamapConfig {
             frontend_url: damap.url().to_string(),
             dmp_id: previous.as_ref().and_then(|config| config.damap.dmp_id),
         },
         ai: previous.and_then(|config| config.ai),
-    }
-    .save()?;
+    })?;
     match tokens.refresh_token {
         Some(refresh_token) => {
-            let mut credentials = Credentials::load()?;
+            let mut credentials = project.credentials()?;
             credentials.refresh_token = Some(refresh_token);
-            credentials.save()?
+            project.save_credentials(&credentials)?
         }
         None => println!(
             "The login server issued no refresh token; you will have to log in again next time."

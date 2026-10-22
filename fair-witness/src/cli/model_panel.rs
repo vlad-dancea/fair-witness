@@ -14,9 +14,10 @@ use ratatui::widgets::{
 
 use super::connect::http_client;
 use crate::agent::{self, ModelChoice, Reviewer};
-use crate::config::{Config, Effort};
+use crate::project::{Effort, Project};
 
 pub struct ModelSettings {
+    pub project: Project,
     pub reviewer: Arc<Reviewer>,
     pub url: String,
     pub api_key: Option<String>,
@@ -25,14 +26,17 @@ pub struct ModelSettings {
 impl ModelSettings {
     pub fn apply(&self, choice: ModelChoice) -> Result<()> {
         self.reviewer.set_choice(choice.clone());
-        let mut config = Config::load()?.context("this folder is not set up any more")?;
+        let mut config = self
+            .project
+            .config()?
+            .context("this folder is not set up any more")?;
         let ai = config
             .ai
             .as_mut()
             .context("no AI model is set up any more")?;
         ai.model = choice.model;
         ai.effort = choice.effort;
-        config.save()
+        self.project.save_config(&config)
     }
 }
 

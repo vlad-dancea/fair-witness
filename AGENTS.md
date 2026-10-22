@@ -146,7 +146,9 @@ disagrees with it.
 
 - `cli/` holds the clap commands and the ratatui interface, `agent/` the reviewer that asks the
   model for a verdict through tool calls, `watcher/` the folder watcher, `damap.rs` the DAMAP
-  API client, `auth.rs` the OIDC login and `config.rs` the `.fair-witness/` folder.
+  API client, `auth.rs` the OIDC login and `project.rs` the project folder and its
+  `.fair-witness/`. Only `cli/` reads the working directory, once at startup, and passes the
+  `Project` it finds to the rest.
 - Only `cli/` knows about the terminal. `agent/`, `watcher/` and the rest never import from
   `cli/` or ratatui, so the review logic can run without the interface.
 - The model reads research data only through `agent/tools.rs`, which keeps every path inside

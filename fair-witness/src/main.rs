@@ -1,8 +1,8 @@
 mod agent;
 mod auth;
 mod cli;
-mod config;
 mod damap;
+mod project;
 mod watcher;
 
 fn main() {

@@ -3,19 +3,27 @@ use dialoguer::FuzzySelect;
 
 use super::connect;
 use super::model::{self, ModelArgs};
-use crate::config::Config;
 use crate::damap::{Damap, DmpListItem};
+use crate::project::Project;
 
-pub fn run(url: Option<String>, model: ModelArgs) -> Result<()> {
-    let damap = connect::setup(url)?;
-    choose_dmp(&damap)?;
-    model::setup(model)?;
+/// Sets up `project`, offering the DAMAP URL and login of the project around it, if any.
+pub fn run(
+    around: Option<&Project>,
+    project: Project,
+    url: Option<String>,
+    model: ModelArgs,
+) -> Result<()> {
+    let damap = connect::setup(around, &project, url)?;
+    choose_dmp(&project, &damap)?;
+    model::setup(&project, model)?;
     println!("Run `fair-witness run` to start watching this folder.");
     Ok(())
 }
 
-fn choose_dmp(damap: &Damap) -> Result<()> {
-    let mut config = Config::load()?.context("logging in did not save the config")?;
+fn choose_dmp(project: &Project, damap: &Damap) -> Result<()> {
+    let mut config = project
+        .config()?
+        .context("logging in did not save the config")?;
     let dmps = damap.list_dmps()?;
     if dmps.is_empty() {
         println!(
@@ -23,7 +31,7 @@ fn choose_dmp(damap: &Damap) -> Result<()> {
             damap.url()
         );
         config.damap.dmp_id = None;
-        return config.save();
+        return project.save_config(&config);
     }
     let labels: Vec<String> = dmps.iter().map(label).collect();
     let default = config
@@ -37,7 +45,7 @@ fn choose_dmp(damap: &Damap) -> Result<()> {
         .default(default)
         .interact()?;
     config.damap.dmp_id = Some(dmps[index].id);
-    config.save()
+    project.save_config(&config)
 }
 
 fn label(dmp: &DmpListItem) -> String {

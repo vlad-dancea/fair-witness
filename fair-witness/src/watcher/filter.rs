@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::config::{DIR_NAME, IGNORE_FILE};
+use crate::project::{DIR_NAME, IGNORE_FILE};
 
 /// Folders tools fill on their own and files editors and file managers leave
 /// behind. The project's `.gitignore` is deliberately not read: data kept out

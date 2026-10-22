@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::config::{AiConfig, Effort};
+use crate::project::{AiConfig, Effort};
 use crate::watcher::{self, Change, Listed};
 use tools::Tools;
 
@@ -117,10 +117,10 @@ impl Reviewer {
         trace: &mut dyn FnMut(Trace),
     ) -> Result<Verdict> {
         let tools = Tools::new(root)?;
-        let listed = watcher::summarize(root, changes);
+        let listed = watcher::summarize(changes);
         let lines: Vec<String> = listed
             .iter()
-            .map(|listed| format!("{}: {}", listed.kind().verb(), listed.describe(root)))
+            .map(|listed| format!("{}: {}", listed.kind().verb(), listed.describe()))
             .collect();
         let mut prompt = format!(
             "The DMP:\n```json\n{dmp}\n```\n\nWhat changed in the project folder:\n{}",
@@ -428,7 +428,7 @@ mod tests {
             .review(
                 root.path(),
                 r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
-                &[Change::Created(root.path().join("data/patients.csv"))],
+                &[Change::Created("data/patients.csv".into())],
                 &mut |trace| traces.push(trace),
             )
             .unwrap();
@@ -482,7 +482,7 @@ mod tests {
             json!({ "contradicts": false, "explanation": "Survey answers, as planned." }),
         )]);
         let changes: Vec<Change> = (0..60)
-            .map(|i| Change::Created(root.path().join(format!("data/raw/{i}.csv"))))
+            .map(|i| Change::Created(format!("data/raw/{i}.csv").into()))
             .collect();
 
         reviewer(endpoint)

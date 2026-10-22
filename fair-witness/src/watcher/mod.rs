@@ -20,6 +20,7 @@ pub use summary::{Listed, summarize};
 
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A change in the watched folder, with paths relative to its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Created(PathBuf),
@@ -64,11 +65,28 @@ impl Change {
             Change::Renamed { to, .. } => to,
         }
     }
+
+    fn relative_to(self, root: &Path) -> Self {
+        let relative = |path: PathBuf| match path.strip_prefix(root) {
+            Ok(rest) => rest.to_path_buf(),
+            Err(_) => path,
+        };
+        match self {
+            Change::Created(path) => Change::Created(relative(path)),
+            Change::Changed(path) => Change::Changed(relative(path)),
+            Change::Renamed { from, to } => Change::Renamed {
+                from: relative(from),
+                to: relative(to),
+            },
+            Change::Deleted(path) => Change::Deleted(relative(path)),
+        }
+    }
 }
 
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     events: Receiver<DebounceEventResult>,
+    root: PathBuf,
     known: BTreeSet<PathBuf>,
     filter: Filter,
 }
@@ -86,6 +104,7 @@ impl FolderWatcher {
         Ok(Self {
             _debouncer: debouncer,
             events,
+            root: root.to_path_buf(),
             known,
             filter,
         })
@@ -138,7 +157,9 @@ impl FolderWatcher {
 
     fn rename(&mut self, from: &Path, to: &Path, changes: &mut Vec<Change>) {
         let to_dir = fs::symlink_metadata(to).is_ok_and(|metadata| metadata.is_dir());
-        if self.filter.skips(to, to_dir) {
+        // A move out of the project is a deletion, as when only its source is
+        // reported.
+        if !to.starts_with(&self.root) || self.filter.skips(to, to_dir) {
             self.forget(from, changes);
             return;
         }
@@ -173,7 +194,10 @@ impl FolderWatcher {
         for event in &result? {
             self.apply(event, &mut changes);
         }
-        Ok(changes)
+        Ok(changes
+            .into_iter()
+            .map(|change| change.relative_to(&self.root))
+            .collect())
     }
 
     fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
@@ -219,6 +243,7 @@ fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::time::Instant;
 
     use super::*;
 
@@ -270,7 +295,7 @@ mod tests {
 
         assert_eq!(
             drain(&mut watcher),
-            [Change::Created(root.join("results.csv"))]
+            [Change::Created(PathBuf::from("results.csv"))]
         );
     }
 
@@ -300,7 +325,7 @@ mod tests {
 
         assert_eq!(
             created(&drain(&mut watcher)),
-            ["analysis", "data", "data/a.csv"].map(|p| root.join(p)),
+            ["analysis", "data", "data/a.csv"].map(PathBuf::from),
         );
     }
 
@@ -317,8 +342,27 @@ mod tests {
 
         assert_eq!(
             drain(&mut watcher),
-            [Change::Deleted(root.join("data/a.csv"))]
+            [Change::Deleted(PathBuf::from("data/a.csv"))]
         );
+    }
+
+    #[test]
+    fn reports_a_file_moved_out_of_the_project_as_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(root.join("a.csv"), "a").unwrap();
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        // Some platforms report both ends of a move out of the watched folder.
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root.join("a.csv"))
+            .add_path(outside.path().join("a.csv"));
+        let changes = watcher
+            .handle(Ok(vec![DebouncedEvent::new(event, Instant::now())]))
+            .unwrap();
+
+        assert_eq!(changes, [Change::Deleted(PathBuf::from("a.csv"))]);
     }
 
     #[test]
@@ -336,8 +380,8 @@ mod tests {
         assert_eq!(
             drain(&mut watcher),
             [Change::Renamed {
-                from: root.join("data"),
-                to: root.join("archive"),
+                from: PathBuf::from("data"),
+                to: PathBuf::from("archive"),
             }]
         );
         fs::write(root.join("archive/a.csv"), "b").unwrap();
@@ -345,7 +389,7 @@ mod tests {
 
         assert_eq!(
             drain(&mut watcher),
-            [Change::Changed(root.join("archive/notes.txt"))]
+            [Change::Changed(PathBuf::from("archive/notes.txt"))]
         );
     }
 
@@ -361,7 +405,7 @@ mod tests {
 
         assert_eq!(
             created(&drain(&mut watcher)),
-            ["data", "data/a.csv", "data/raw", "data/raw/b.csv"].map(|p| root.join(p)),
+            ["data", "data/a.csv", "data/raw", "data/raw/b.csv"].map(PathBuf::from),
         );
     }
 
@@ -378,7 +422,7 @@ mod tests {
 
         assert_eq!(
             created(&drain(&mut watcher)),
-            ["survey", "survey/answers.csv"].map(|p| root.join(p)),
+            ["survey", "survey/answers.csv"].map(PathBuf::from),
         );
     }
 
@@ -395,8 +439,8 @@ mod tests {
         assert_eq!(
             drain(&mut watcher),
             [Change::Renamed {
-                from: root.join("data"),
-                to: root.join("dataset"),
+                from: PathBuf::from("data"),
+                to: PathBuf::from("dataset"),
             }],
         );
     }
@@ -413,7 +457,7 @@ mod tests {
 
         let changes = drain(&mut watcher);
         assert!(
-            changes.contains(&Change::Deleted(root.join("data"))),
+            changes.contains(&Change::Deleted(PathBuf::from("data"))),
             "{changes:?}"
         );
         assert!(created(&changes).is_empty(), "{changes:?}");
@@ -430,7 +474,7 @@ mod tests {
 
         assert_eq!(
             drain(&mut watcher),
-            [Change::Changed(root.join("notes.txt"))]
+            [Change::Changed(PathBuf::from("notes.txt"))]
         );
     }
 }
