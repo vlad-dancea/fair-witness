@@ -5,7 +5,7 @@ use reqwest::blocking::Client;
 
 use super::connect::{http_client, web_url};
 use crate::agent;
-use crate::config::{AiConfig, Config, Credentials};
+use crate::project::{AiConfig, Project};
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 
@@ -32,11 +32,11 @@ pub struct ModelArgs {
     pub model: Option<String>,
 }
 
-pub fn setup(args: ModelArgs) -> Result<()> {
-    let mut config = Config::load()?.context("this folder is not set up yet")?;
+pub fn setup(project: &Project, args: ModelArgs) -> Result<()> {
+    let mut config = project.config()?.context("this folder is not set up yet")?;
     let http = http_client()?;
     let previous = config.ai.take();
-    let saved_key = Credentials::load()?.api_key;
+    let saved_key = project.credentials()?.api_key;
     let (url, api_key, models) = match args.ai_url {
         Some(url) => {
             let url = web_url(&url)?;
@@ -54,13 +54,12 @@ pub fn setup(args: ModelArgs) -> Result<()> {
     let effort = previous.as_ref().and_then(|ai| ai.effort);
     let model = choose_model(&url, models, args.model, previous.map(|ai| ai.model))?;
 
-    let mut credentials = Credentials::load()?;
+    let mut credentials = project.credentials()?;
     credentials.api_key = api_key;
-    credentials.save()?;
+    project.save_credentials(&credentials)?;
     println!("Changes will be checked with {model}.");
     config.ai = Some(AiConfig { url, model, effort });
-    config.save()?;
-    Ok(())
+    project.save_config(&config)
 }
 
 fn ask_for_api(

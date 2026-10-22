@@ -9,7 +9,7 @@ use super::connect;
 use super::model_panel::ModelSettings;
 use super::screen::{Screen, Update};
 use crate::agent::Reviewer;
-use crate::config::{self, Config, Credentials};
+use crate::project::{self, Project};
 use crate::watcher::{Change, FolderWatcher};
 
 struct Review {
@@ -17,14 +17,14 @@ struct Review {
     dmp: String,
 }
 
-pub fn run(dmp: Option<i64>) -> Result<()> {
-    let damap = connect::resume()?;
-    let root = config::project_root()?.context("this folder is not set up yet")?;
+pub fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
+    let damap = connect::resume(project)?;
+    let root = project.root().to_path_buf();
 
-    let config = Config::load()?.context("this folder is not set up yet")?;
+    let config = project.config()?.context("this folder is not set up yet")?;
     let (review, settings, status) = match (dmp.or(config.damap.dmp_id), config.ai) {
         (Some(id), Some(ai)) => {
-            let api_key = Credentials::load()?.api_key;
+            let api_key = project.credentials()?.api_key;
             let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone())?);
             let name = damap
                 .list_dmps()?
@@ -33,9 +33,10 @@ pub fn run(dmp: Option<i64>) -> Result<()> {
                 .and_then(|listed| listed.name().map(str::to_string))
                 .unwrap_or_else(|| "(untitled)".to_string());
             let dmp = serde_json::to_string_pretty(&damap.madmp(id)?)?;
-            config::save_madmp(&dmp)?;
+            project.save_madmp(&dmp)?;
             let status = vec![format!("Comparing changes with project #{id} - {name}.")];
             let settings = ModelSettings {
+                project: project.clone(),
                 reviewer: reviewer.clone(),
                 url: ai.url,
                 api_key,
@@ -143,5 +144,5 @@ fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
 
 fn in_damap_dir(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
-        .is_ok_and(|p| p.starts_with(".fair-witness"))
+        .is_ok_and(|p| p.starts_with(project::DIR_NAME))
 }

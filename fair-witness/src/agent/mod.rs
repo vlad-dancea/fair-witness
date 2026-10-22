@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::config::{AiConfig, Effort};
+use crate::project::{AiConfig, Effort};
 use crate::watcher::Change;
 use tools::Tools;
 

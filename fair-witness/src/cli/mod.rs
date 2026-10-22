@@ -6,10 +6,14 @@ mod run;
 mod screen;
 mod setup;
 
-use anyhow::Result;
+use std::env;
+
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::config::Credentials;
+use crate::project::Project;
+
+const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 
 #[derive(Parser)]
 #[command(
@@ -47,13 +51,22 @@ enum Command {
 }
 
 pub fn run() -> Result<()> {
-    match Cli::parse().command {
-        Command::Setup { url, model } => setup::run(url, model),
-        Command::Run { dmp } => run::run(dmp),
+    let command = Cli::parse().command;
+    let here = env::current_dir().context("could not determine the current directory")?;
+    let project = Project::find(&here);
+    match command {
+        Command::Setup { url, model } => {
+            setup::run(project.as_ref(), Project::new(here), url, model)
+        }
+        Command::Run { dmp } => run::run(&project.context(NOT_SET_UP)?, dmp),
         Command::Logout => {
-            let mut credentials = Credentials::load()?;
+            let Some(project) = project else {
+                println!("Not logged in.");
+                return Ok(());
+            };
+            let mut credentials = project.credentials()?;
             if credentials.refresh_token.take().is_some() {
-                credentials.save()?;
+                project.save_credentials(&credentials)?;
                 println!("Logged out.");
             } else {
                 println!("Not logged in.");
