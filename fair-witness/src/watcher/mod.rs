@@ -1,3 +1,6 @@
+mod filter;
+mod summary;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::ops::Bound;
@@ -12,6 +15,9 @@ use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
 
+use filter::Filter;
+pub use summary::{Listed, summarize};
+
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,11 +28,40 @@ pub enum Change {
     Deleted(PathBuf),
 }
 
-impl Change {
-    pub fn paths(&self) -> Vec<&Path> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Created,
+    Changed,
+    Renamed,
+    Deleted,
+}
+
+impl Kind {
+    pub fn verb(self) -> &'static str {
         match self {
-            Change::Created(path) | Change::Changed(path) | Change::Deleted(path) => vec![path],
-            Change::Renamed { from, to } => vec![from, to],
+            Kind::Created => "created",
+            Kind::Changed => "changed",
+            Kind::Renamed => "renamed",
+            Kind::Deleted => "deleted",
+        }
+    }
+}
+
+impl Change {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Change::Created(_) => Kind::Created,
+            Change::Changed(_) => Kind::Changed,
+            Change::Renamed { .. } => Kind::Renamed,
+            Change::Deleted(_) => Kind::Deleted,
+        }
+    }
+
+    /// Where the change left things: the new name of a renamed path.
+    pub fn path(&self) -> &Path {
+        match self {
+            Change::Created(path) | Change::Changed(path) | Change::Deleted(path) => path,
+            Change::Renamed { to, .. } => to,
         }
     }
 }
@@ -35,21 +70,24 @@ pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     events: Receiver<DebounceEventResult>,
     known: BTreeSet<PathBuf>,
+    filter: Filter,
 }
 
 impl FolderWatcher {
     pub fn new(root: &Path) -> Result<Self> {
+        let filter = Filter::new(root)?;
         let (tx, events) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, tx)?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
-        walk(root, &mut |path| {
+        walk(root, &filter, &mut |path| {
             known.insert(path);
         });
         Ok(Self {
             _debouncer: debouncer,
             events,
             known,
+            filter,
         })
     }
 
@@ -85,7 +123,7 @@ impl FolderWatcher {
     }
 
     fn discover(&mut self, path: &Path, changes: &mut Vec<Change>) {
-        walk(path, &mut |found| {
+        walk(path, &self.filter, &mut |found| {
             if self.known.insert(found.clone()) {
                 changes.push(Change::Created(found));
             }
@@ -99,6 +137,11 @@ impl FolderWatcher {
     }
 
     fn rename(&mut self, from: &Path, to: &Path, changes: &mut Vec<Change>) {
+        let to_dir = fs::symlink_metadata(to).is_ok_and(|metadata| metadata.is_dir());
+        if self.filter.skips(to, to_dir) {
+            self.forget(from, changes);
+            return;
+        }
         let moved = self.take_subtree(from);
         if moved.is_empty() {
             self.discover(to, changes);
@@ -108,11 +151,15 @@ impl FolderWatcher {
             let rest = old
                 .strip_prefix(from)
                 .expect("subtree paths start with its root");
-            self.known.insert(if rest.as_os_str().is_empty() {
+            let new = if rest.as_os_str().is_empty() {
                 to.to_path_buf()
             } else {
                 to.join(rest)
-            });
+            };
+            let is_dir = fs::symlink_metadata(&new).is_ok_and(|metadata| metadata.is_dir());
+            if !self.filter.skips(&new, is_dir) {
+                self.known.insert(new);
+            }
         }
         changes.push(Change::Renamed {
             from: from.to_path_buf(),
@@ -152,22 +199,27 @@ impl Iterator for FolderWatcher {
     }
 }
 
-fn walk(path: &Path, visit: &mut impl FnMut(PathBuf)) {
+fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };
+    if filter.skips(path, metadata.is_dir()) {
+        return;
+    }
     visit(path.to_path_buf());
     if metadata.is_dir()
         && let Ok(entries) = fs::read_dir(path)
     {
         for entry in entries.flatten() {
-            walk(&entry.path(), visit);
+            walk(&entry.path(), filter, visit);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     const QUIET: Duration = Duration::from_secs(4);
@@ -190,6 +242,111 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.org"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn skips_a_commit_in_a_git_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::write(root.join("notes.txt"), "a").unwrap();
+        git(root, &["init", "-q"]);
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "Add notes"]);
+        fs::write(root.join("results.csv"), "x").unwrap();
+
+        assert_eq!(
+            drain(&mut watcher),
+            [Change::Created(root.join("results.csv"))]
+        );
+    }
+
+    #[test]
+    fn skips_folders_tools_fill_and_files_the_researcher_ignores() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::create_dir(root.join(".fair-witness")).unwrap();
+        fs::write(root.join(".fair-witness/ignore"), "scratch/\n").unwrap();
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        for path in [
+            ".venv/lib/site.py",
+            "node_modules/plot/index.js",
+            "analysis/__pycache__/clean.pyc",
+            "analysis/.ipynb_checkpoints/explore.ipynb",
+            "data/.a.csv.swp",
+            "data/a.csv",
+            ".DS_Store",
+            "scratch/tmp.csv",
+            ".fair-witness/madmp.json",
+        ] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+
+        assert_eq!(
+            created(&drain(&mut watcher)),
+            ["analysis", "data", "data/a.csv"].map(|p| root.join(p)),
+        );
+    }
+
+    #[test]
+    fn reports_a_file_moved_into_an_ignored_folder_as_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::create_dir(root.join("data")).unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(root.join("data/a.csv"), "a").unwrap();
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        fs::rename(root.join("data/a.csv"), root.join("node_modules/a.csv")).unwrap();
+
+        assert_eq!(
+            drain(&mut watcher),
+            [Change::Deleted(root.join("data/a.csv"))]
+        );
+    }
+
+    #[test]
+    fn stops_watching_files_a_renamed_folder_brings_under_a_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::create_dir(root.join(".fair-witness")).unwrap();
+        fs::write(root.join(".fair-witness/ignore"), "archive/*.csv\n").unwrap();
+        fs::create_dir(root.join("data")).unwrap();
+        fs::write(root.join("data/a.csv"), "a").unwrap();
+        fs::write(root.join("data/notes.txt"), "a").unwrap();
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        fs::rename(root.join("data"), root.join("archive")).unwrap();
+        assert_eq!(
+            drain(&mut watcher),
+            [Change::Renamed {
+                from: root.join("data"),
+                to: root.join("archive"),
+            }]
+        );
+        fs::write(root.join("archive/a.csv"), "b").unwrap();
+        fs::write(root.join("archive/notes.txt"), "b").unwrap();
+
+        assert_eq!(
+            drain(&mut watcher),
+            [Change::Changed(root.join("archive/notes.txt"))]
+        );
     }
 
     #[test]

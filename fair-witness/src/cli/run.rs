@@ -72,10 +72,7 @@ fn watch(
     let mut set = 0;
     for batch in watcher {
         let changes: Vec<Change> = match batch {
-            Ok(changes) => changes
-                .into_iter()
-                .filter(|change| !change.paths().into_iter().all(|p| in_damap_dir(root, p)))
-                .collect(),
+            Ok(changes) => changes,
             Err(errors) => {
                 let errors = errors.iter().map(ToString::to_string).collect();
                 if updates.send(Update::WatchErrors(errors)).is_err() {
@@ -139,9 +136,4 @@ fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
             let _ = updates.send(Update::NotifyFailed(e.to_string()));
         }
     });
-}
-
-fn in_damap_dir(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .is_ok_and(|p| p.starts_with(".fair-witness"))
 }
