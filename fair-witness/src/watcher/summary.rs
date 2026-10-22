@@ -11,11 +11,13 @@ pub const MAX_LISTED: usize = 50;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Listed<'a> {
     One(&'a Change),
-    /// `count` changes of one kind under `folder`, relative to the project root.
+    /// `count` changes of one kind under `folder`, relative to the project
+    /// root. Renames also name the folder they came `from`.
     Many {
         kind: Kind,
         count: usize,
         folder: PathBuf,
+        from: Option<PathBuf>,
     },
 }
 
@@ -36,6 +38,12 @@ impl Listed<'_> {
                 relative(root, to).display()
             ),
             Listed::One(change) => relative(root, change.path()).display().to_string(),
+            Listed::Many {
+                count,
+                folder,
+                from: Some(from),
+                ..
+            } => format!("{count} paths from {} to {}", label(from), label(folder)),
             Listed::Many { count, folder, .. } if folder.as_os_str().is_empty() => {
                 format!("{count} paths in the project folder")
             }
@@ -86,17 +94,20 @@ fn group<'a>(root: &Path, changes: &'a [Change], by_folder: bool) -> Vec<Listed<
             _ => Listed::Many {
                 kind,
                 count: members.len(),
-                folder: common_folder(root, &members),
+                folder: common_folder(members.iter().map(|change| relative(root, change.path()))),
+                from: (kind == Kind::Renamed).then(|| {
+                    common_folder(members.iter().filter_map(|change| match change {
+                        Change::Renamed { from, .. } => Some(relative(root, from)),
+                        _ => None,
+                    }))
+                }),
             },
         })
         .collect()
 }
 
-fn common_folder(root: &Path, members: &[&Change]) -> PathBuf {
-    let paths: Vec<&Path> = members
-        .iter()
-        .map(|change| relative(root, change.path()))
-        .collect();
+fn common_folder<'a>(paths: impl Iterator<Item = &'a Path>) -> PathBuf {
+    let paths: Vec<&Path> = paths.collect();
     let mut common: PathBuf = paths[0].iter().collect();
     for path in &paths[1..] {
         common = common
@@ -111,6 +122,14 @@ fn common_folder(root: &Path, members: &[&Change]) -> PathBuf {
         common.pop();
     }
     common
+}
+
+fn label(folder: &Path) -> String {
+    if folder.as_os_str().is_empty() {
+        "the project folder".to_string()
+    } else {
+        format!("{}/", folder.display())
+    }
 }
 
 fn relative<'a>(root: &Path, path: &'a Path) -> &'a Path {
@@ -130,6 +149,10 @@ mod tests {
         ];
         changes.extend((0..60).map(|i| Change::Created(root.join(format!("data/raw/{i}.csv")))));
         changes.extend((0..3).map(|i| Change::Deleted(root.join(format!("old/{i}.csv")))));
+        changes.extend((0..2).map(|i| Change::Renamed {
+            from: root.join(format!("raw/{i}.csv")),
+            to: root.join(format!("archive/2026/{i}.csv")),
+        }));
 
         let lines: Vec<String> = summarize(root, &changes)
             .iter()
@@ -141,6 +164,7 @@ mod tests {
             [
                 "created: 61 paths under data/",
                 "changed: notes.txt",
+                "renamed: 2 paths from raw/ to archive/2026/",
                 "deleted: 3 paths under old/",
             ]
         );
@@ -164,6 +188,7 @@ mod tests {
                 kind: Kind::Created,
                 count: 120,
                 folder: PathBuf::new(),
+                from: None,
             }]
         );
     }
