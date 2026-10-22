@@ -2,12 +2,13 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, Input};
+use fair_witness_core::damap::{Damap, InstanceConfig};
+use fair_witness_core::project::{Config, DamapConfig, Project};
 use reqwest::Url;
 use reqwest::blocking::Client;
 
 use crate::auth::{Oidc, Tokens};
-use crate::damap::{Damap, InstanceConfig};
-use crate::project::{Config, DamapConfig, Project};
+use crate::commands::NOT_SET_UP;
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
 
@@ -47,7 +48,7 @@ pub fn setup(around: Option<&Project>, project: &Project, url: Option<String>) -
 
 pub fn resume(project: &Project) -> Result<Damap> {
     let Some(config) = project.config()? else {
-        bail!(super::NOT_SET_UP);
+        bail!(NOT_SET_UP);
     };
     let http = http_client()?;
     let (damap, instance) = reach(&http, &config.damap.frontend_url)?;
@@ -69,7 +70,7 @@ pub fn resume(project: &Project) -> Result<Damap> {
 }
 
 /// Reads a web address as typed: `https://` is assumed when no scheme is given.
-pub(super) fn web_url(input: &str) -> Result<String> {
+pub fn web_url(input: &str) -> Result<String> {
     let input = input.trim();
     let with_scheme = if input.contains("://") {
         input.to_string()
@@ -88,7 +89,7 @@ pub(super) fn web_url(input: &str) -> Result<String> {
     }
 }
 
-pub(super) fn http_client() -> Result<Client> {
+pub fn http_client() -> Result<Client> {
     Ok(Client::builder()
         .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(15))

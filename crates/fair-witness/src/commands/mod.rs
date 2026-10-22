@@ -1,19 +1,16 @@
-mod connect;
-mod debug_pane;
-mod model;
-mod model_panel;
+mod logout;
 mod run;
-mod screen;
 mod setup;
 
 use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use fair_witness_core::project::Project;
 
-use crate::project::Project;
+use crate::setup::model;
 
-const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
+pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 
 #[derive(Parser)]
 #[command(
@@ -59,19 +56,6 @@ pub fn run() -> Result<()> {
             setup::run(project.as_ref(), Project::new(here), url, model)
         }
         Command::Run { dmp } => run::run(&project.context(NOT_SET_UP)?, dmp),
-        Command::Logout => {
-            let Some(project) = project else {
-                println!("Not logged in.");
-                return Ok(());
-            };
-            let mut credentials = project.credentials()?;
-            if credentials.refresh_token.take().is_some() {
-                project.save_credentials(&credentials)?;
-                println!("Logged out.");
-            } else {
-                println!("Not logged in.");
-            }
-            Ok(())
-        }
+        Command::Logout => logout::run(project.as_ref()),
     }
 }

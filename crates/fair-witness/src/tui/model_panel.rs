@@ -3,6 +3,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use anyhow::{Context, Result};
+use fair_witness_core::project::{Effort, Project};
+use fair_witness_core::review::{self, ModelChoice, Reviewer};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -12,9 +14,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
 };
 
-use super::connect::http_client;
-use crate::agent::{self, ModelChoice, Reviewer};
-use crate::project::{Effort, Project};
+use crate::setup::damap::http_client;
 
 pub struct ModelSettings {
     pub project: Project,
@@ -89,7 +89,7 @@ impl ModelPanel {
         let api_key = settings.api_key.clone();
         thread::spawn(move || {
             let listed =
-                http_client().and_then(|http| agent::list_models(&http, &url, api_key.as_deref()));
+                http_client().and_then(|http| review::list_models(&http, &url, api_key.as_deref()));
             let _ = sender.send(listed);
         });
         let current = settings.reviewer.choice();

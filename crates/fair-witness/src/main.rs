@@ -1,12 +1,10 @@
-mod agent;
 mod auth;
-mod cli;
-mod damap;
-mod project;
-mod watcher;
+mod commands;
+mod setup;
+mod tui;
 
 fn main() {
-    if let Err(e) = cli::run() {
+    if let Err(e) = commands::run() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }

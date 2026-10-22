@@ -1000,21 +1000,32 @@ dependencies = [
  "anyhow",
  "clap",
  "dialoguer",
- "genai",
- "ignore",
+ "fair-witness-core",
  "jiff",
- "notify",
- "notify-debouncer-full",
  "notify-rust",
  "open",
  "ratatui",
  "reqwest",
  "serde",
  "serde_json",
+ "unicode-width",
+]
+
+[[package]]
+name = "fair-witness-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "genai",
+ "ignore",
+ "notify",
+ "notify-debouncer-full",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
- "unicode-width",
 ]
 
 [[package]]

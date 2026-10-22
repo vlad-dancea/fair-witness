@@ -9,20 +9,12 @@ repository = "https://github.com/vlad-dancea/fair-witness"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dialoguer = { version = "0.12.0", features = ["fuzzy-select"] }
-genai = "0.6.5"
-ignore = "0.4.33"
+fair-witness-core = { path = "../fair-witness-core" }
 jiff = "0.2.37"
-notify = "8.2.0"
-notify-debouncer-full = "0.7.0"
 notify-rust = "4.18.1"
 open = "5.4.4"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "form", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1.53.2", features = ["rt"] }
-toml = "1.1.6"
 unicode-width = "0.2.2"
-
-[dev-dependencies]
-tempfile = "3.27.0"

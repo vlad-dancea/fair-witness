@@ -16,7 +16,7 @@ going. Everything else follows `AGENTS.md`, which wins over this skill when the 
 ## Steps
 
 1. Finish the work and prove it. Run `mise run check` and the verification `AGENTS.md` asks for,
-   such as a run against a local DAMAP for changes to `damap.rs` or `auth.rs`.
+   such as a run against a local DAMAP for changes to `damap/` or `auth.rs`.
 2. Run the `sol-loop` skill on the change. Stop here and ask if a high finding stays disputed.
 3. Commit in small commits that each pass `mise run check`, push, and open the pull request
    against `main` as described in `AGENTS.md`. Never open a draft, because CodeRabbit skips

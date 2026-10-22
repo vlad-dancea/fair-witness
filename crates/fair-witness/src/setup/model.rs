@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
+use fair_witness_core::project::{AiConfig, Project};
+use fair_witness_core::review;
 use reqwest::blocking::Client;
 
-use super::connect::{http_client, web_url};
-use crate::agent;
-use crate::project::{AiConfig, Project};
+use super::damap::{http_client, web_url};
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 
@@ -41,7 +41,7 @@ pub fn setup(project: &Project, args: ModelArgs) -> Result<()> {
         Some(url) => {
             let url = web_url(&url)?;
             let api_key = args.api_key.or(saved_key);
-            let models = agent::list_models(&http, &url, api_key.as_deref())?;
+            let models = review::list_models(&http, &url, api_key.as_deref())?;
             (url, api_key, models)
         }
         None => ask_for_api(
@@ -97,7 +97,7 @@ fn ask_for_api(
                     .or_else(|| saved_key.clone())
             }
         };
-        match agent::list_models(http, &url, api_key.as_deref()) {
+        match review::list_models(http, &url, api_key.as_deref()) {
             Ok(models) => return Ok((url, api_key, models)),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }
