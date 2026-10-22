@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
-use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -60,11 +60,12 @@ impl Damap {
         self.access_token = Some(token);
     }
 
-    pub fn instance_config(&self) -> Result<InstanceConfig> {
+    pub async fn instance_config(&self) -> Result<InstanceConfig> {
         let response = self
             .http
             .get(format!("{}/api/config", self.url))
             .send()
+            .await
             .with_context(|| format!("could not reach {}", self.url))?;
         if !response.status().is_success() {
             bail!(
@@ -75,20 +76,21 @@ impl Damap {
         }
         response
             .json()
+            .await
             .with_context(|| format!("{} does not look like DAMAP", self.url))
     }
 
-    pub fn list_dmps(&self) -> Result<Vec<DmpListItem>> {
-        self.get_json("/api/dmps/list")
+    pub async fn list_dmps(&self) -> Result<Vec<DmpListItem>> {
+        self.get_json("/api/dmps/list").await
     }
 
-    pub fn madmp(&self, id: i64) -> Result<serde_json::Value> {
-        self.get_json(&format!("/api/madmp/{id}"))
+    pub async fn madmp(&self, id: i64) -> Result<serde_json::Value> {
+        self.get_json(&format!("/api/madmp/{id}")).await
     }
 
-    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let request = self.http.get(format!("{}{path}", self.url));
-        send_json(self.authorize(request), path)
+        send_json(self.authorize(request), path).await
     }
 
     fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
@@ -99,13 +101,15 @@ impl Damap {
     }
 }
 
-fn send_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) -> Result<T> {
+async fn send_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) -> Result<T> {
     let response = request
         .send()
+        .await
         .with_context(|| format!("request to {path} failed"))?;
     match response.status() {
         status if status.is_success() => response
             .json()
+            .await
             .with_context(|| format!("unexpected response from {path}")),
         StatusCode::UNAUTHORIZED => bail!("DAMAP rejected the login token on {path}"),
         StatusCode::FORBIDDEN => bail!("not allowed to access {path}"),

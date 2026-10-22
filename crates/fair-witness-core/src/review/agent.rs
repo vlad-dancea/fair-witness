@@ -8,7 +8,6 @@ use genai::chat::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::runtime::Runtime;
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::openai_compatible;
@@ -56,7 +55,6 @@ pub enum Trace {
 }
 
 pub struct Reviewer {
-    runtime: Runtime,
     client: Client,
     choice: Mutex<ModelChoice>,
 }
@@ -68,18 +66,14 @@ pub struct ModelChoice {
 }
 
 impl Reviewer {
-    pub fn new(config: &AiConfig, api_key: Option<String>) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        Ok(Self {
-            runtime,
+    pub fn new(config: &AiConfig, api_key: Option<String>) -> Self {
+        Self {
             client: openai_compatible(&config.url, api_key),
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
                 effort: config.effort,
             }),
-        })
+        }
     }
 
     pub fn choice(&self) -> ModelChoice {
@@ -93,26 +87,16 @@ impl Reviewer {
         *self.choice.lock().unwrap_or_else(PoisonError::into_inner) = choice;
     }
 
-    pub fn review(
+    pub async fn review(
         &self,
         root: &Path,
         dmp: &str,
         changes: &[Change],
-        trace: &mut dyn FnMut(Trace),
+        trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
         let tools = Tools::new(root)?;
         let prompt = prompt::user_message(dmp, changes);
-        self.runtime
-            .block_on(self.run(&self.choice(), &tools, prompt, trace))
-    }
-
-    async fn run(
-        &self,
-        choice: &ModelChoice,
-        tools: &Tools,
-        prompt: String,
-        trace: &mut dyn FnMut(Trace),
-    ) -> Result<Verdict> {
+        let choice = self.choice();
         let mut definitions = Tools::definitions();
         definitions.push(verdict_tool());
         let tool_names: Vec<String> = definitions
@@ -269,11 +253,10 @@ mod tests {
             },
             Some("sk-test".to_string()),
         )
-        .unwrap()
     }
 
-    #[test]
-    fn runs_tools_until_the_model_reports_a_verdict() {
+    #[tokio::test]
+    async fn runs_tools_until_the_model_reports_a_verdict() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("data")).unwrap();
         fs::write(root.path().join("data/patients.csv"), "name,diagnosis\n").unwrap();
@@ -290,14 +273,15 @@ mod tests {
         ]);
         let reviewer = reviewer(endpoint);
 
-        let mut traces = Vec::new();
+        let traces = Mutex::new(Vec::new());
         let verdict = reviewer
             .review(
                 root.path(),
                 r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
                 &[Change::Created("data/patients.csv".into())],
-                &mut |trace| traces.push(trace),
+                &|trace| traces.lock().unwrap().push(trace),
             )
+            .await
             .unwrap();
 
         assert!(verdict.contradicts);
@@ -318,6 +302,8 @@ mod tests {
         assert_eq!(tool_message["content"], "name,diagnosis\n");
 
         let kinds: Vec<String> = traces
+            .into_inner()
+            .unwrap()
             .iter()
             .map(|trace| match trace {
                 Trace::Sent { role, .. } => format!("sent {role}"),
@@ -341,8 +327,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sends_a_long_change_set_per_folder() {
+    #[tokio::test]
+    async fn sends_a_long_change_set_per_folder() {
         let root = tempfile::tempdir().unwrap();
         let (endpoint, server) = fake_model(vec![tool_call(
             "report_verdict",
@@ -353,7 +339,8 @@ mod tests {
             .collect();
 
         reviewer(endpoint)
-            .review(root.path(), "{}", &changes, &mut |_| {})
+            .review(root.path(), "{}", &changes, &|_| {})
+            .await
             .unwrap();
 
         let body = &server.join().unwrap()[0].1;

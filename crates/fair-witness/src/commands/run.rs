@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
@@ -7,6 +7,8 @@ use fair_witness_core::project::Project;
 use fair_witness_core::review::Reviewer;
 use fair_witness_core::watcher::{Change, FolderWatcher};
 use notify_rust::Notification;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::setup::damap;
 use crate::tui::app::{Screen, Update};
@@ -17,22 +19,23 @@ struct Review {
     dmp: String,
 }
 
-pub fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
-    let damap = damap::resume(project)?;
+pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
+    let damap = damap::resume(project).await?;
     let root = project.root().to_path_buf();
 
     let config = project.config()?.context("this folder is not set up yet")?;
     let (review, settings, status) = match (dmp.or(config.damap.dmp_id), config.ai) {
         (Some(id), Some(ai)) => {
             let api_key = project.credentials()?.api_key;
-            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone())?);
+            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone()));
             let name = damap
-                .list_dmps()?
+                .list_dmps()
+                .await?
                 .into_iter()
                 .find(|listed| listed.id == id)
                 .and_then(|listed| listed.name().map(str::to_string))
                 .unwrap_or_else(|| "(untitled)".to_string());
-            let dmp = serde_json::to_string_pretty(&damap.madmp(id)?)?;
+            let dmp = serde_json::to_string_pretty(&damap.madmp(id).await?)?;
             project.save_madmp(&dmp)?;
             let status = vec![format!("Comparing changes with project #{id} - {name}.")];
             let settings = ModelSettings {
@@ -58,17 +61,19 @@ pub fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
     };
 
     let watcher = FolderWatcher::new(&root)?;
-    let (updates, received) = mpsc::channel();
+    let (updates, received) = mpsc::unbounded_channel();
     let watched = root.clone();
-    thread::spawn(move || watch(&watched, watcher, review.as_ref(), &updates));
-    Screen::new(&root, status, settings).run(received)
+    let runtime = Handle::current();
+    thread::spawn(move || watch(&watched, watcher, review.as_ref(), &updates, &runtime));
+    Screen::new(&root, status, settings).run(received).await
 }
 
 fn watch(
     root: &Path,
     watcher: FolderWatcher,
     review: Option<&Review>,
-    updates: &mpsc::Sender<Update>,
+    updates: &UnboundedSender<Update>,
+    runtime: &Handle,
 ) {
     let mut set = 0;
     for batch in watcher {
@@ -93,11 +98,14 @@ fn watch(
             if updates.send(Update::Reviewing(set)).is_err() {
                 return;
             }
-            let verdict = review
-                .reviewer
-                .review(root, &review.dmp, &changes, &mut |trace| {
+            let verdict = runtime.block_on(review.reviewer.review(
+                root,
+                &review.dmp,
+                &changes,
+                &|trace| {
                     let _ = updates.send(Update::Trace(trace));
-                });
+                },
+            ));
             match &verdict {
                 Ok(verdict) if verdict.contradicts => {
                     let field = verdict
@@ -125,7 +133,7 @@ fn watch(
     }
 }
 
-fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
+fn notify(summary: String, body: String, updates: &UnboundedSender<Update>) {
     let updates = updates.clone();
     thread::spawn(move || {
         let shown = Notification::new()

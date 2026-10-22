@@ -4,31 +4,37 @@ use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, Input};
 use fair_witness_core::damap::{Damap, InstanceConfig};
 use fair_witness_core::project::{Config, DamapConfig, Project};
+use reqwest::Client;
 use reqwest::Url;
-use reqwest::blocking::Client;
 
 use crate::auth::{Oidc, Tokens};
 use crate::commands::NOT_SET_UP;
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
 
-pub fn setup(around: Option<&Project>, project: &Project, url: Option<String>) -> Result<Damap> {
+pub async fn setup(
+    around: Option<&Project>,
+    project: &Project,
+    url: Option<String>,
+) -> Result<Damap> {
     let http = http_client()?;
     let previous_url = match around {
         Some(around) => around.config()?.map(|c| c.damap.frontend_url),
         None => None,
     };
     let (damap, instance) = match url {
-        Some(url) => reach(&http, &web_url(&url)?)?,
-        None => ask_for_damap(&http, previous_url.clone())?,
+        Some(url) => reach(&http, &web_url(&url)?).await?,
+        None => ask_for_damap(&http, previous_url.clone()).await?,
     };
-    let oidc = discover(http, &damap, &instance)?;
+    let oidc = discover(http, &damap, &instance).await?;
     let refresh_token = match around {
         Some(around) => around.credentials()?.refresh_token,
         None => None,
     };
     let session = match refresh_token {
-        Some(token) if previous_url.as_deref() == Some(damap.url()) => oidc.refresh(&token).ok(),
+        Some(token) if previous_url.as_deref() == Some(damap.url()) => {
+            oidc.refresh(&token).await.ok()
+        }
         _ => None,
     };
     let tokens = match session {
@@ -40,30 +46,30 @@ pub fn setup(around: Option<&Project>, project: &Project, url: Option<String>) -
         {
             tokens
         }
-        _ => oidc.login()?,
+        _ => oidc.login().await?,
     };
     project.create()?;
     save_session(project, damap, tokens)
 }
 
-pub fn resume(project: &Project) -> Result<Damap> {
+pub async fn resume(project: &Project) -> Result<Damap> {
     let Some(config) = project.config()? else {
         bail!(NOT_SET_UP);
     };
     let http = http_client()?;
-    let (damap, instance) = reach(&http, &config.damap.frontend_url)?;
-    let oidc = discover(http, &damap, &instance)?;
+    let (damap, instance) = reach(&http, &config.damap.frontend_url).await?;
+    let oidc = discover(http, &damap, &instance).await?;
     let tokens = match project.credentials()?.refresh_token {
-        Some(refresh_token) => match oidc.refresh(&refresh_token) {
+        Some(refresh_token) => match oidc.refresh(&refresh_token).await {
             Ok(tokens) => tokens,
             Err(e) => {
                 println!("{e}. Please log in again.");
-                oidc.login()?
+                oidc.login().await?
             }
         },
         None => {
             println!("Not logged in.");
-            oidc.login()?
+            oidc.login().await?
         }
     };
     save_session(project, damap, tokens)
@@ -96,10 +102,10 @@ pub fn http_client() -> Result<Client> {
         .build()?)
 }
 
-fn discover(http: Client, damap: &Damap, instance: &InstanceConfig) -> Result<Oidc> {
+async fn discover(http: Client, damap: &Damap, instance: &InstanceConfig) -> Result<Oidc> {
     let title = instance.app_title.as_deref().unwrap_or("DAMAP");
     println!("Connected to {title} at {}", damap.url());
-    Oidc::discover(http, &instance.issuer, &instance.client_id, &instance.scope)
+    Oidc::discover(http, &instance.issuer, &instance.client_id, &instance.scope).await
 }
 
 fn save_session(project: &Project, mut damap: Damap, tokens: Tokens) -> Result<Damap> {
@@ -125,15 +131,15 @@ fn save_session(project: &Project, mut damap: Damap, tokens: Tokens) -> Result<D
     Ok(damap)
 }
 
-fn reach(http: &Client, url: &str) -> Result<(Damap, InstanceConfig)> {
+async fn reach(http: &Client, url: &str) -> Result<(Damap, InstanceConfig)> {
     let damap = Damap::new(http.clone(), url);
-    let instance = damap.instance_config().map_err(|e| {
+    let instance = damap.instance_config().await.map_err(|e| {
         anyhow!("{e:#}\nIs DAMAP running? To use a different URL, run `fair-witness setup`.")
     })?;
     Ok((damap, instance))
 }
 
-fn ask_for_damap(http: &Client, previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
+async fn ask_for_damap(http: &Client, previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
     let mut default = previous.unwrap_or_else(|| DEFAULT_URL.to_string());
     loop {
         let input: String = Input::new()
@@ -148,7 +154,7 @@ fn ask_for_damap(http: &Client, previous: Option<String>) -> Result<(Damap, Inst
             }
         };
         let damap = Damap::new(http.clone(), &url);
-        match damap.instance_config() {
+        match damap.instance_config().await {
             Ok(instance) => return Ok((damap, instance)),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }

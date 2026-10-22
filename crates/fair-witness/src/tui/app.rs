@@ -1,16 +1,17 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use fair_witness_core::review::{ModelChoice, Trace, Verdict};
 use fair_witness_core::watcher::{self, Change, Kind, Listed};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use futures::StreamExt;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugLog;
@@ -155,33 +156,45 @@ impl Screen {
         }
     }
 
-    pub fn run(mut self, updates: Receiver<Update>) -> Result<()> {
-        ratatui::run(|terminal| self.event_loop(terminal, updates))
+    pub async fn run(mut self, updates: UnboundedReceiver<Update>) -> Result<()> {
+        let mut terminal = ratatui::init();
+        let result = self.event_loop(&mut terminal, updates).await;
+        ratatui::restore();
+        result
     }
 
-    fn event_loop(
+    async fn event_loop(
         &mut self,
         terminal: &mut DefaultTerminal,
-        updates: Receiver<Update>,
+        mut updates: UnboundedReceiver<Update>,
     ) -> Result<()> {
+        let mut terminal_events = EventStream::new();
+        // Redraws the spinner and the model list while it loads.
+        let mut tick = tokio::time::interval(TICK);
+        let mut watching = true;
         while !self.quit {
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(TICK)?
-                && let Event::Key(key) = event::read()?
-                && key.is_press()
-            {
-                self.handle_key(key);
-            }
-            loop {
-                match updates.try_recv() {
-                    Ok(update) => self.apply(update),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
+            tokio::select! {
+                event = terminal_events.next() => match event {
+                    Some(Ok(Event::Key(key))) if key.is_press() => self.handle_key(key),
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Ok(()),
+                },
+                update = updates.recv(), if watching => match update {
+                    Some(update) => {
+                        self.apply(update);
+                        while let Ok(update) = updates.try_recv() {
+                            self.apply(update);
+                        }
+                    }
+                    None => {
+                        watching = false;
                         self.reviewing_since = None;
                         self.log.push(Line::from("Stopped watching.".red()).into());
-                        break;
                     }
-                }
+                },
+                _ = tick.tick() => {}
             }
         }
         Ok(())

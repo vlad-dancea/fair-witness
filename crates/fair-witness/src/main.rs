@@ -3,8 +3,9 @@ mod commands;
 mod setup;
 mod tui;
 
-fn main() {
-    if let Err(e) = commands::run() {
+#[tokio::main]
+async fn main() {
+    if let Err(e) = commands::run().await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }

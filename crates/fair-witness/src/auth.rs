@@ -1,9 +1,8 @@
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Input, Password};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::Deserialize;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -54,7 +53,12 @@ pub struct Oidc {
 }
 
 impl Oidc {
-    pub fn discover(http: Client, issuer: &str, client_id: &str, scope: &str) -> Result<Self> {
+    pub async fn discover(
+        http: Client,
+        issuer: &str,
+        client_id: &str,
+        scope: &str,
+    ) -> Result<Self> {
         let url = format!(
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
@@ -62,9 +66,11 @@ impl Oidc {
         let discovery: Discovery = http
             .get(&url)
             .send()
+            .await
             .and_then(|r| r.error_for_status())
             .with_context(|| format!("could not reach the login server at {issuer}"))?
             .json()
+            .await
             .with_context(|| format!("unexpected OpenID configuration at {url}"))?;
         Ok(Self {
             http,
@@ -75,18 +81,19 @@ impl Oidc {
         })
     }
 
-    pub fn refresh(&self, refresh_token: &str) -> Result<Tokens> {
+    pub async fn refresh(&self, refresh_token: &str) -> Result<Tokens> {
         self.token_request(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-        ])?
+        ])
+        .await?
         .map_err(|e| anyhow::anyhow!("session could not be refreshed: {e}"))
     }
 
-    pub fn login(&self) -> Result<Tokens> {
+    pub async fn login(&self) -> Result<Tokens> {
         if let Some(endpoint) = &self.device_endpoint {
-            match self.start_device_flow(endpoint)? {
-                Ok(authorization) => return self.finish_device_flow(authorization),
+            match self.start_device_flow(endpoint).await? {
+                Ok(authorization) => return self.finish_device_flow(authorization).await,
                 Err(e) if e.error == "unauthorized_client" => {
                     println!(
                         "Browser login is not enabled for Keycloak client \"{}\"; \
@@ -97,10 +104,13 @@ impl Oidc {
                 Err(e) => bail!("login failed: {e}"),
             }
         }
-        self.password_login()
+        self.password_login().await
     }
 
-    fn start_device_flow(&self, endpoint: &str) -> Result<Result<DeviceAuthorization, OAuthError>> {
+    async fn start_device_flow(
+        &self,
+        endpoint: &str,
+    ) -> Result<Result<DeviceAuthorization, OAuthError>> {
         let response = self
             .http
             .post(endpoint)
@@ -109,15 +119,16 @@ impl Oidc {
                 ("scope", self.scope.as_str()),
             ])
             .send()
+            .await
             .context("could not start the login")?;
         if response.status().is_success() {
-            Ok(Ok(response.json()?))
+            Ok(Ok(response.json().await?))
         } else {
-            Ok(Err(response.json()?))
+            Ok(Err(response.json().await?))
         }
     }
 
-    fn finish_device_flow(&self, authorization: DeviceAuthorization) -> Result<Tokens> {
+    async fn finish_device_flow(&self, authorization: DeviceAuthorization) -> Result<Tokens> {
         let link = authorization
             .verification_uri_complete
             .as_deref()
@@ -129,11 +140,13 @@ impl Oidc {
         let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
         let mut interval = Duration::from_secs(authorization.interval.unwrap_or(5));
         while Instant::now() < deadline {
-            thread::sleep(interval);
-            let result = self.token_request(&[
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", &authorization.device_code),
-            ])?;
+            tokio::time::sleep(interval).await;
+            let result = self
+                .token_request(&[
+                    ("grant_type", DEVICE_CODE_GRANT),
+                    ("device_code", &authorization.device_code),
+                ])
+                .await?;
             match result {
                 Ok(tokens) => return Ok(tokens),
                 Err(e) if e.error == "authorization_pending" => {}
@@ -144,18 +157,19 @@ impl Oidc {
         bail!("login timed out; please try again")
     }
 
-    fn password_login(&self) -> Result<Tokens> {
+    async fn password_login(&self) -> Result<Tokens> {
         let username: String = Input::new().with_prompt("Username").interact_text()?;
         let password = Password::new().with_prompt("Password").interact()?;
         self.token_request(&[
             ("grant_type", "password"),
             ("username", &username),
             ("password", &password),
-        ])?
+        ])
+        .await?
         .map_err(|e| anyhow::anyhow!("login failed: {e}"))
     }
 
-    fn token_request(&self, params: &[(&str, &str)]) -> Result<Result<Tokens, OAuthError>> {
+    async fn token_request(&self, params: &[(&str, &str)]) -> Result<Result<Tokens, OAuthError>> {
         let mut form = vec![
             ("client_id", self.client_id.as_str()),
             ("scope", self.scope.as_str()),
@@ -166,12 +180,17 @@ impl Oidc {
             .post(&self.token_endpoint)
             .form(&form)
             .send()
+            .await
             .context("could not reach the login server")?;
         if response.status().is_success() {
-            Ok(Ok(response.json().context("unexpected token response")?))
+            Ok(Ok(response
+                .json()
+                .await
+                .context("unexpected token response")?))
         } else {
             Ok(Err(response
                 .json()
+                .await
                 .context("unexpected error from the login server")?))
         }
     }
