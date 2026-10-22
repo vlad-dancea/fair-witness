@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 use crate::project::{AiConfig, Effort};
-use crate::watcher::Change;
+use crate::watcher::{self, Change, Listed};
 use tools::Tools;
 
 const MAX_TURNS: usize = 12;
@@ -117,21 +117,24 @@ impl Reviewer {
         trace: &mut dyn FnMut(Trace),
     ) -> Result<Verdict> {
         let tools = Tools::new(root)?;
-        let changes: Vec<String> = changes
+        let listed = watcher::summarize(changes);
+        let lines: Vec<String> = listed
             .iter()
-            .map(|change| match change {
-                Change::Created(path) => format!("created: {}", path.display()),
-                Change::Changed(path) => format!("changed: {}", path.display()),
-                Change::Renamed { from, to } => {
-                    format!("renamed: {} -> {}", from.display(), to.display())
-                }
-                Change::Deleted(path) => format!("deleted: {}", path.display()),
-            })
+            .map(|listed| format!("{}: {}", listed.kind().verb(), listed.describe()))
             .collect();
-        let prompt = format!(
+        let mut prompt = format!(
             "The DMP:\n```json\n{dmp}\n```\n\nWhat changed in the project folder:\n{}",
-            changes.join("\n")
+            lines.join("\n")
         );
+        if listed
+            .iter()
+            .any(|listed| matches!(listed, Listed::Many { .. }))
+        {
+            prompt.push_str(
+                "\n\nThere were too many changes to name each path. list_dir shows the \
+                 paths that still exist; deleted ones are gone.",
+            );
+        }
         self.runtime
             .block_on(self.run(&self.choice(), &tools, prompt, trace))
     }
@@ -390,6 +393,18 @@ mod tests {
         })
     }
 
+    fn reviewer(url: String) -> Reviewer {
+        Reviewer::new(
+            &AiConfig {
+                url,
+                model: "test".to_string(),
+                effort: Some(Effort::Low),
+            },
+            Some("sk-test".to_string()),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn runs_tools_until_the_model_reports_a_verdict() {
         let root = tempfile::tempdir().unwrap();
@@ -406,15 +421,7 @@ mod tests {
                 }),
             ),
         ]);
-        let reviewer = Reviewer::new(
-            &AiConfig {
-                url: endpoint,
-                model: "test".to_string(),
-                effort: Some(Effort::Low),
-            },
-            Some("sk-test".to_string()),
-        )
-        .unwrap();
+        let reviewer = reviewer(endpoint);
 
         let mut traces = Vec::new();
         let verdict = reviewer
@@ -464,6 +471,34 @@ mod tests {
                 "request 2",
                 "reply 2: report_verdict",
             ]
+        );
+    }
+
+    #[test]
+    fn sends_a_long_change_set_per_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_model(vec![tool_call(
+            "report_verdict",
+            json!({ "contradicts": false, "explanation": "Survey answers, as planned." }),
+        )]);
+        let changes: Vec<Change> = (0..60)
+            .map(|i| Change::Created(format!("data/raw/{i}.csv").into()))
+            .collect();
+
+        reviewer(endpoint)
+            .review(root.path(), "{}", &changes, &mut |_| {})
+            .unwrap();
+
+        let body = &server.join().unwrap()[0].1;
+        let prompt = body["messages"][1]["content"].as_str().unwrap();
+        assert!(
+            prompt.ends_with(
+                "What changed in the project folder:\n\
+                 created: 60 paths under data/raw/\n\n\
+                 There were too many changes to name each path. list_dir shows the paths \
+                 that still exist; deleted ones are gone."
+            ),
+            "{prompt}"
         );
     }
 

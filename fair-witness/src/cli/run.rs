@@ -9,7 +9,7 @@ use super::connect;
 use super::model_panel::ModelSettings;
 use super::screen::{Screen, Update};
 use crate::agent::Reviewer;
-use crate::project::{self, Project};
+use crate::project::Project;
 use crate::watcher::{Change, FolderWatcher};
 
 struct Review {
@@ -73,15 +73,7 @@ fn watch(
     let mut set = 0;
     for batch in watcher {
         let changes: Vec<Change> = match batch {
-            Ok(changes) => changes
-                .into_iter()
-                .filter(|change| {
-                    !change
-                        .paths()
-                        .into_iter()
-                        .all(|path| path.starts_with(project::DIR_NAME))
-                })
-                .collect(),
+            Ok(changes) => changes,
             Err(errors) => {
                 let errors = errors.iter().map(ToString::to_string).collect();
                 if updates.send(Update::WatchErrors(errors)).is_err() {

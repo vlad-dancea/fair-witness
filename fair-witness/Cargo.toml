@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dialoguer = { version = "0.12.0", features = ["fuzzy-select"] }
 genai = "0.6.5"
+ignore = "0.4.33"
 jiff = "0.2.37"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
