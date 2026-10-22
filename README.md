@@ -153,6 +153,8 @@ created: data/patients.csv                                       #1
 
 Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Files that are not research data are left out, as described in [What is ignored](#what-is-ignored).
 
+A set of more than 50 changes is listed per folder instead, for you and for the AI, such as `created: 412 paths under data/raw/`. The AI can still list the folder to see what is in it.
+
 ### 3. Read the verdict
 
 When the AI is done, its verdict appears under the set it belongs to:

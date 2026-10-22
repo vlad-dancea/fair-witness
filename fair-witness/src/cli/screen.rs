@@ -14,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::debug_pane::DebugLog;
 use super::model_panel::{self, ModelPanel, ModelSettings, Outcome};
 use crate::agent::{ModelChoice, Trace, Verdict};
-use crate::watcher::Change;
+use crate::watcher::{self, Change, Kind, Listed};
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.
@@ -266,9 +266,9 @@ impl Screen {
         }
         match update {
             Update::Changes(set, changes) => {
-                for change in &changes {
+                for listed in watcher::summarize(&self.root, &changes) {
                     self.log.push(LogLine {
-                        line: change_line(&self.root, change),
+                        line: change_line(&self.root, &listed),
                         set: Some(set),
                         verdict: false,
                     });
@@ -464,24 +464,18 @@ fn draw_scrolled(
     frame.render_widget(paragraph.scroll((top, 0)).block(block), area);
 }
 
-fn change_line(root: &Path, change: &Change) -> Line<'static> {
-    let relative = |path: &Path| {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
+fn change_line(root: &Path, listed: &Listed) -> Line<'static> {
+    let kind = listed.kind();
+    let color = match kind {
+        Kind::Created => Color::Green,
+        Kind::Changed => Color::Blue,
+        Kind::Renamed => Color::Yellow,
+        Kind::Deleted => Color::Red,
     };
-    let (label, color, text) = match change {
-        Change::Created(path) => ("created:", Color::Green, relative(path)),
-        Change::Changed(path) => ("changed:", Color::Blue, relative(path)),
-        Change::Renamed { from, to } => (
-            "renamed:",
-            Color::Yellow,
-            format!("{} -> {}", relative(from), relative(to)),
-        ),
-        Change::Deleted(path) => ("deleted:", Color::Red, relative(path)),
-    };
-    Line::from(vec![label.fg(color), Span::raw(format!(" {text}"))])
+    Line::from(vec![
+        format!("{}:", kind.verb()).fg(color),
+        Span::raw(format!(" {}", listed.describe(root))),
+    ])
 }
 
 #[cfg(test)]

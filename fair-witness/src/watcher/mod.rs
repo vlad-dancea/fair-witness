@@ -1,4 +1,5 @@
 mod filter;
+mod summary;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -15,6 +16,7 @@ use notify_debouncer_full::{
 };
 
 use filter::Filter;
+pub use summary::{Listed, summarize};
 
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -24,6 +26,44 @@ pub enum Change {
     Changed(PathBuf),
     Renamed { from: PathBuf, to: PathBuf },
     Deleted(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Created,
+    Changed,
+    Renamed,
+    Deleted,
+}
+
+impl Kind {
+    pub fn verb(self) -> &'static str {
+        match self {
+            Kind::Created => "created",
+            Kind::Changed => "changed",
+            Kind::Renamed => "renamed",
+            Kind::Deleted => "deleted",
+        }
+    }
+}
+
+impl Change {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Change::Created(_) => Kind::Created,
+            Change::Changed(_) => Kind::Changed,
+            Change::Renamed { .. } => Kind::Renamed,
+            Change::Deleted(_) => Kind::Deleted,
+        }
+    }
+
+    /// Where the change left things: the new name of a renamed path.
+    pub fn path(&self) -> &Path {
+        match self {
+            Change::Created(path) | Change::Changed(path) | Change::Deleted(path) => path,
+            Change::Renamed { to, .. } => to,
+        }
+    }
 }
 
 pub struct FolderWatcher {
