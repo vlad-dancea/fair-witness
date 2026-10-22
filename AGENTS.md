@@ -2,9 +2,11 @@
 
 A command-line tool that watches a research project folder and has an AI model check each change
 against the project's data management plan (DMP) in DAMAP. The repository root is a Cargo
-workspace with one crate, in `fair-witness/`.
+workspace with two crates in `crates/`: the library `fair-witness-core` and the binary
+`fair-witness`.
 
-The tool, the crate, the binary and the repository are all called fair-witness. History before
+The tool, the binary crate, the binary and the repository are all called fair-witness, and the
+library is fair-witness-core. History before
 #2 uses an earlier name, which must not come back in code, documentation, commit messages or
 pull requests. DAMAP, TU Wien's DMP tool that fair-witness talks to, keeps its own name.
 
@@ -34,7 +36,7 @@ lists by name live next to the code. Leave them alone and never commit them.
   mean a passing `check` job. When CI fails where the local check passed, find the difference
   before retrying.
 - A push to `main` publishes a release once the check passes, if `main` differs from the
-  latest release in `fair-witness/`, `Cargo.toml`, `Cargo.lock`, `dist-workspace.toml` or
+  latest release in `crates/`, `Cargo.toml`, `Cargo.lock`, `dist-workspace.toml` or
   `.github/workflows/release.yml`. The `changes` job decides, and `publish` tags the next
   version and starts `release.yml`, which builds the binaries and installers and attaches them
   to a GitHub release that everyone installing fair-witness then gets. Other changes are
@@ -137,21 +139,26 @@ disagrees with it.
 - Write few, meaningful tests in a `#[cfg(test)] mod tests` beside the code they cover. Avoid
   trivial construction and accessor tests. Assert whole values or messages where practical and
   verify tests fail when behavior breaks.
-- When changing `damap.rs` or `auth.rs`, try the change against a running DAMAP. The README
+- When changing `damap/` or `auth.rs`, try the change against a running DAMAP. The README
   explains how to start one locally.
 - Update the README when a command, option, environment variable or file in `.fair-witness/`
   changes. It is the user documentation.
 
 ## Code
 
-- `cli/` holds the clap commands and the ratatui interface, `agent/` the reviewer that asks the
-  model for a verdict through tool calls, `watcher/` the folder watcher, `damap.rs` the DAMAP
-  API client, `auth.rs` the OIDC login and `project.rs` the project folder and its
-  `.fair-witness/`. Only `cli/` reads the working directory, once at startup, and passes the
+- `fair-witness-core` holds what runs without a terminal. `review/` is the reviewer that asks
+  the model for a verdict through tool calls, with the tool loop in `agent.rs`, the system
+  prompt and first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and
+  the model's tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API
+  client and `project.rs` the project folder and its `.fair-witness/`.
+- `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,
+  `setup/` the questions `setup` asks, `tui/` the ratatui interface and `auth.rs` the OIDC
+  login. Only `commands/` reads the working directory, once at startup, and passes the
   `Project` it finds to the rest.
-- Only `cli/` knows about the terminal. `agent/`, `watcher/` and the rest never import from
-  `cli/` or ratatui, so the review logic can run without the interface.
-- The model reads research data only through `agent/tools.rs`, which keeps every path inside
+- Only the binary knows about the terminal. The core never depends on ratatui, crossterm,
+  dialoguer or notify-rust (`cargo tree -p fair-witness-core` shows none of them) and never
+  prompts or prints, so the review logic can run without the interface.
+- The model reads research data only through `review/tools.rs`, which keeps every path inside
   the project folder and away from `.fair-witness/`, where the login and API key are stored. A
   new tool keeps both limits and gets a test like the existing ones.
 - Errors use anyhow with context. A message the user sees says what went wrong and, when there

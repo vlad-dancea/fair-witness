@@ -1,5 +1,5 @@
 [workspace]
-members = ["fair-witness"]
+members = ["crates/*"]
 resolver = "3"
 
 # The profile that 'dist' will build with

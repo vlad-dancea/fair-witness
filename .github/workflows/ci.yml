@@ -101,7 +101,7 @@ jobs:
           fi
           # A release tag points at a commit that only bumps the version, on top of the main
           # commit the release was built from.
-          if git diff --quiet "$base^" "$GITHUB_SHA" -- 'fair-witness' 'Cargo.toml' 'Cargo.lock' 'dist-workspace.toml' '.github/workflows/release.yml'; then
+          if git diff --quiet "$base^" "$GITHUB_SHA" -- 'crates' 'Cargo.toml' 'Cargo.lock' 'dist-workspace.toml' '.github/workflows/release.yml'; then
             echo "Nothing that goes into the release changed since $base, so there is no new release."
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
@@ -111,8 +111,8 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # Picks the next version (the version in fair-witness/Cargo.toml, or the patch after the
-  # latest tag if that is already released), commits the bump on a detached release commit,
+  # Picks the next version (the version in crates/fair-witness/Cargo.toml, or the patch after
+  # the latest tag if that is already released), commits the bump on a detached release commit,
   # tags it and starts release.yml on that tag. main itself is never written to.
   publish:
     needs: [check, changes]
@@ -133,7 +133,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest=fair-witness/Cargo.toml
+          manifest=crates/fair-witness/Cargo.toml
           current=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
           latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
           latest=${latest#v}
@@ -152,7 +152,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" fair-witness/Cargo.toml
+          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" crates/fair-witness/Cargo.toml
           # Keep Cargo.lock in step with the new version.
           sed -i "/^name = \"fair-witness\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
           git config user.name "github-actions[bot]"

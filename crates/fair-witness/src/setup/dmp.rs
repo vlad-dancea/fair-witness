@@ -1,26 +1,9 @@
 use anyhow::{Context, Result};
 use dialoguer::FuzzySelect;
+use fair_witness_core::damap::{Damap, DmpListItem};
+use fair_witness_core::project::Project;
 
-use super::connect;
-use super::model::{self, ModelArgs};
-use crate::damap::{Damap, DmpListItem};
-use crate::project::Project;
-
-/// Sets up `project`, offering the DAMAP URL and login of the project around it, if any.
-pub fn run(
-    around: Option<&Project>,
-    project: Project,
-    url: Option<String>,
-    model: ModelArgs,
-) -> Result<()> {
-    let damap = connect::setup(around, &project, url)?;
-    choose_dmp(&project, &damap)?;
-    model::setup(&project, model)?;
-    println!("Run `fair-witness run` to start watching this folder.");
-    Ok(())
-}
-
-fn choose_dmp(project: &Project, damap: &Damap) -> Result<()> {
+pub fn choose(project: &Project, damap: &Damap) -> Result<()> {
     let mut config = project
         .config()?
         .context("logging in did not save the config")?;

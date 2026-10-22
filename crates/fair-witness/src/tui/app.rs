@@ -3,6 +3,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use fair_witness_core::review::{ModelChoice, Trace, Verdict};
+use fair_witness_core::watcher::{self, Change, Kind, Listed};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -13,8 +15,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugLog;
 use super::model_panel::{self, ModelPanel, ModelSettings, Outcome};
-use crate::agent::{ModelChoice, Trace, Verdict};
-use crate::watcher::{self, Change, Kind, Listed};
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.

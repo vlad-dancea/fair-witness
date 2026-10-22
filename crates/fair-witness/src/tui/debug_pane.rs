@@ -1,10 +1,10 @@
+use fair_witness_core::review::{ModelChoice, Trace, Verdict};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::model_panel;
-use crate::agent::{ModelChoice, Trace, Verdict};
 
 /// Oldest entries go first once the pane holds this many, so a long session
 /// does not slow down drawing.

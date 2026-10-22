@@ -3,14 +3,14 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use fair_witness_core::project::Project;
+use fair_witness_core::review::Reviewer;
+use fair_witness_core::watcher::{Change, FolderWatcher};
 use notify_rust::Notification;
 
-use super::connect;
-use super::model_panel::ModelSettings;
-use super::screen::{Screen, Update};
-use crate::agent::Reviewer;
-use crate::project::Project;
-use crate::watcher::{Change, FolderWatcher};
+use crate::setup::damap;
+use crate::tui::app::{Screen, Update};
+use crate::tui::model_panel::ModelSettings;
 
 struct Review {
     reviewer: Arc<Reviewer>,
@@ -18,7 +18,7 @@ struct Review {
 }
 
 pub fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
-    let damap = connect::resume(project)?;
+    let damap = damap::resume(project)?;
     let root = project.root().to_path_buf();
 
     let config = project.config()?.context("this folder is not set up yet")?;
