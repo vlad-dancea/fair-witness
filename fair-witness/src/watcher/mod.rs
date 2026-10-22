@@ -157,7 +157,9 @@ impl FolderWatcher {
 
     fn rename(&mut self, from: &Path, to: &Path, changes: &mut Vec<Change>) {
         let to_dir = fs::symlink_metadata(to).is_ok_and(|metadata| metadata.is_dir());
-        if self.filter.skips(to, to_dir) {
+        // A move out of the project is a deletion, as when only its source is
+        // reported.
+        if !to.starts_with(&self.root) || self.filter.skips(to, to_dir) {
             self.forget(from, changes);
             return;
         }
@@ -241,6 +243,7 @@ fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::time::Instant;
 
     use super::*;
 
@@ -341,6 +344,25 @@ mod tests {
             drain(&mut watcher),
             [Change::Deleted(PathBuf::from("data/a.csv"))]
         );
+    }
+
+    #[test]
+    fn reports_a_file_moved_out_of_the_project_as_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(root.join("a.csv"), "a").unwrap();
+        let mut watcher = FolderWatcher::new(root).unwrap();
+
+        // Some platforms report both ends of a move out of the watched folder.
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root.join("a.csv"))
+            .add_path(outside.path().join("a.csv"));
+        let changes = watcher
+            .handle(Ok(vec![DebouncedEvent::new(event, Instant::now())]))
+            .unwrap();
+
+        assert_eq!(changes, [Change::Deleted(PathBuf::from("a.csv"))]);
     }
 
     #[test]
