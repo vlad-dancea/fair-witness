@@ -85,6 +85,27 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 
 A `.gitignore` inside it keeps the last two out of git. You can run `fair-witness` from any subfolder; it finds `.fair-witness/` by looking upwards.
 
+### What is ignored
+
+Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to:
+
+- `.fair-witness/` itself
+- `.git`, so a commit does not count as a change
+- folders tools fill on their own: `.venv/`, `venv/`, `__pycache__/`, `node_modules/` and `.ipynb_checkpoints/`
+- editor swap and backup files (`*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`) and `.DS_Store`
+
+To ignore more, list it in `.fair-witness/ignore`, in the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one:
+
+```gitignore
+# scratch output of the analysis scripts
+scratch/
+*.log
+# this project keeps data in a folder called venv
+!venv/
+```
+
+The file is read when `run` starts, so restart it after a change. The project's own `.gitignore` is not used, because data kept out of git is often exactly the data the DMP is about.
+
 ## Tutorial: watching a folder
 
 ### 1. Start watching
@@ -130,7 +151,7 @@ created: data/patients.csv                                       #1
   ↳ checking against the DMP… 4s
 ```
 
-Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Changes inside `.fair-witness/` are ignored.
+Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Files that are not research data are left out, as described in [What is ignored](#what-is-ignored).
 
 ### 3. Read the verdict
 
