@@ -1,8 +1,12 @@
-<!-- The problem in a sentence or two: what was wrong or missing, and for whom. -->
+<!-- What works after this pull request that did not before, then the problem it solves, in a sentence or two. -->
+
+## TBD
+
+<!-- Decisions the maintainer has to make, numbered, one question each with the recommended answer. Delete the section when there are none. -->
 
 ## Changes
 
-<!-- What changed and why. Leave out what the diff already says. -->
+<!-- At most five bullets, most important first: what changed and why. Leave out what the diff already says. -->
 
 ## Verification
 
