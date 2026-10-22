@@ -268,7 +268,7 @@ impl Screen {
             Update::Changes(set, changes) => {
                 for change in &changes {
                     self.log.push(LogLine {
-                        line: change_line(&self.root, change),
+                        line: change_line(change),
                         set: Some(set),
                         verdict: false,
                     });
@@ -464,22 +464,16 @@ fn draw_scrolled(
     frame.render_widget(paragraph.scroll((top, 0)).block(block), area);
 }
 
-fn change_line(root: &Path, change: &Change) -> Line<'static> {
-    let relative = |path: &Path| {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
-    };
+fn change_line(change: &Change) -> Line<'static> {
     let (label, color, text) = match change {
-        Change::Created(path) => ("created:", Color::Green, relative(path)),
-        Change::Changed(path) => ("changed:", Color::Blue, relative(path)),
+        Change::Created(path) => ("created:", Color::Green, path.display().to_string()),
+        Change::Changed(path) => ("changed:", Color::Blue, path.display().to_string()),
         Change::Renamed { from, to } => (
             "renamed:",
             Color::Yellow,
-            format!("{} -> {}", relative(from), relative(to)),
+            format!("{} -> {}", from.display(), to.display()),
         ),
-        Change::Deleted(path) => ("deleted:", Color::Red, relative(path)),
+        Change::Deleted(path) => ("deleted:", Color::Red, path.display().to_string()),
     };
     Line::from(vec![label.fg(color), Span::raw(format!(" {text}"))])
 }

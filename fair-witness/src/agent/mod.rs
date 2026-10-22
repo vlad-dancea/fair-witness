@@ -117,21 +117,15 @@ impl Reviewer {
         trace: &mut dyn FnMut(Trace),
     ) -> Result<Verdict> {
         let tools = Tools::new(root)?;
-        let relative = |path: &Path| {
-            path.strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        };
         let changes: Vec<String> = changes
             .iter()
             .map(|change| match change {
-                Change::Created(path) => format!("created: {}", relative(path)),
-                Change::Changed(path) => format!("changed: {}", relative(path)),
+                Change::Created(path) => format!("created: {}", path.display()),
+                Change::Changed(path) => format!("changed: {}", path.display()),
                 Change::Renamed { from, to } => {
-                    format!("renamed: {} -> {}", relative(from), relative(to))
+                    format!("renamed: {} -> {}", from.display(), to.display())
                 }
-                Change::Deleted(path) => format!("deleted: {}", relative(path)),
+                Change::Deleted(path) => format!("deleted: {}", path.display()),
             })
             .collect();
         let prompt = format!(
@@ -427,7 +421,7 @@ mod tests {
             .review(
                 root.path(),
                 r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
-                &[Change::Created(root.path().join("data/patients.csv"))],
+                &[Change::Created("data/patients.csv".into())],
                 &mut |trace| traces.push(trace),
             )
             .unwrap();

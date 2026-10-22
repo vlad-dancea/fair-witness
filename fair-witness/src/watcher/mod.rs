@@ -14,6 +14,7 @@ use notify_debouncer_full::{
 
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A change in the watched folder, with paths relative to its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Created(PathBuf),
@@ -29,11 +30,28 @@ impl Change {
             Change::Renamed { from, to } => vec![from, to],
         }
     }
+
+    fn relative_to(self, root: &Path) -> Self {
+        let relative = |path: PathBuf| match path.strip_prefix(root) {
+            Ok(rest) => rest.to_path_buf(),
+            Err(_) => path,
+        };
+        match self {
+            Change::Created(path) => Change::Created(relative(path)),
+            Change::Changed(path) => Change::Changed(relative(path)),
+            Change::Renamed { from, to } => Change::Renamed {
+                from: relative(from),
+                to: relative(to),
+            },
+            Change::Deleted(path) => Change::Deleted(relative(path)),
+        }
+    }
 }
 
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     events: Receiver<DebounceEventResult>,
+    root: PathBuf,
     known: BTreeSet<PathBuf>,
 }
 
@@ -49,6 +67,7 @@ impl FolderWatcher {
         Ok(Self {
             _debouncer: debouncer,
             events,
+            root: root.to_path_buf(),
             known,
         })
     }
@@ -126,7 +145,10 @@ impl FolderWatcher {
         for event in &result? {
             self.apply(event, &mut changes);
         }
-        Ok(changes)
+        Ok(changes
+            .into_iter()
+            .map(|change| change.relative_to(&self.root))
+            .collect())
     }
 
     fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
@@ -204,7 +226,7 @@ mod tests {
 
         assert_eq!(
             created(&drain(&mut watcher)),
-            ["data", "data/a.csv", "data/raw", "data/raw/b.csv"].map(|p| root.join(p)),
+            ["data", "data/a.csv", "data/raw", "data/raw/b.csv"].map(PathBuf::from),
         );
     }
 
@@ -221,7 +243,7 @@ mod tests {
 
         assert_eq!(
             created(&drain(&mut watcher)),
-            ["survey", "survey/answers.csv"].map(|p| root.join(p)),
+            ["survey", "survey/answers.csv"].map(PathBuf::from),
         );
     }
 
@@ -238,8 +260,8 @@ mod tests {
         assert_eq!(
             drain(&mut watcher),
             [Change::Renamed {
-                from: root.join("data"),
-                to: root.join("dataset"),
+                from: PathBuf::from("data"),
+                to: PathBuf::from("dataset"),
             }],
         );
     }
@@ -256,7 +278,7 @@ mod tests {
 
         let changes = drain(&mut watcher);
         assert!(
-            changes.contains(&Change::Deleted(root.join("data"))),
+            changes.contains(&Change::Deleted(PathBuf::from("data"))),
             "{changes:?}"
         );
         assert!(created(&changes).is_empty(), "{changes:?}");
@@ -273,7 +295,7 @@ mod tests {
 
         assert_eq!(
             drain(&mut watcher),
-            [Change::Changed(root.join("notes.txt"))]
+            [Change::Changed(PathBuf::from("notes.txt"))]
         );
     }
 }

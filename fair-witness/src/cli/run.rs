@@ -75,7 +75,12 @@ fn watch(
         let changes: Vec<Change> = match batch {
             Ok(changes) => changes
                 .into_iter()
-                .filter(|change| !change.paths().into_iter().all(|p| in_damap_dir(root, p)))
+                .filter(|change| {
+                    !change
+                        .paths()
+                        .into_iter()
+                        .all(|path| path.starts_with(project::DIR_NAME))
+                })
                 .collect(),
             Err(errors) => {
                 let errors = errors.iter().map(ToString::to_string).collect();
@@ -140,9 +145,4 @@ fn notify(summary: String, body: String, updates: &mpsc::Sender<Update>) {
             let _ = updates.send(Update::NotifyFailed(e.to_string()));
         }
     });
-}
-
-fn in_damap_dir(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .is_ok_and(|p| p.starts_with(project::DIR_NAME))
 }
