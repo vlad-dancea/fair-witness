@@ -131,7 +131,8 @@ impl Reviewer {
             .any(|listed| matches!(listed, Listed::Many { .. }))
         {
             prompt.push_str(
-                "\n\nThere were too many changes to name each path; use list_dir to see them.",
+                "\n\nThere were too many changes to name each path. list_dir shows the \
+                 paths that still exist; deleted ones are gone.",
             );
         }
         self.runtime
@@ -494,7 +495,8 @@ mod tests {
             prompt.ends_with(
                 "What changed in the project folder:\n\
                  created: 60 paths under data/raw/\n\n\
-                 There were too many changes to name each path; use list_dir to see them."
+                 There were too many changes to name each path. list_dir shows the paths \
+                 that still exist; deleted ones are gone."
             ),
             "{prompt}"
         );
