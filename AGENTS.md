@@ -2,7 +2,7 @@
 
 A command-line tool that watches a research project folder and has an AI model check each change
 against the project's data management plan (DMP) in DAMAP. The repository root is a Cargo
-workspace with one crate, in `fair-witness/`.
+workspace with one crate, in `crates/fair-witness/`.
 
 The tool, the crate, the binary and the repository are all called fair-witness. History before
 #2 uses an earlier name, which must not come back in code, documentation, commit messages or
@@ -34,7 +34,7 @@ lists by name live next to the code. Leave them alone and never commit them.
   mean a passing `check` job. When CI fails where the local check passed, find the difference
   before retrying.
 - A push to `main` publishes a release once the check passes, if `main` differs from the
-  latest release in `fair-witness/`, `Cargo.toml`, `Cargo.lock`, `dist-workspace.toml` or
+  latest release in `crates/`, `Cargo.toml`, `Cargo.lock`, `dist-workspace.toml` or
   `.github/workflows/release.yml`. The `changes` job decides, and `publish` tags the next
   version and starts `release.yml`, which builds the binaries and installers and attaches them
   to a GitHub release that everyone installing fair-witness then gets. Other changes are
