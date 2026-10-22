@@ -1,4 +1,3 @@
-mod auth;
 mod commands;
 mod setup;
 mod tui;

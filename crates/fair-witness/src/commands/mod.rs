@@ -6,11 +6,9 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fair_witness_core::project::Project;
+use fair_witness_core::project::{NOT_SET_UP, Project};
 
 use crate::setup::model;
-
-pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 
 #[derive(Parser)]
 #[command(

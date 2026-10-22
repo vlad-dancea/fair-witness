@@ -1,9 +1,17 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use dialoguer::{Input, Password};
 use reqwest::Client;
 use serde::Deserialize;
+
+/// What logging in to DAMAP asks of the person in front of the screen.
+pub trait Prompts {
+    /// Tells them how the login goes, such as which DAMAP it reached.
+    fn notice(&self, message: &str);
+    /// Asks them to confirm `code` at `link` in the browser.
+    fn confirm_code(&self, link: &str, code: &str);
+    fn username_and_password(&self) -> Result<(String, String)>;
+}
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -90,21 +98,23 @@ impl Oidc {
         .map_err(|e| anyhow::anyhow!("session could not be refreshed: {e}"))
     }
 
-    pub async fn login(&self) -> Result<Tokens> {
+    pub async fn login(&self, prompts: &dyn Prompts) -> Result<Tokens> {
         if let Some(endpoint) = &self.device_endpoint {
             match self.start_device_flow(endpoint).await? {
-                Ok(authorization) => return self.finish_device_flow(authorization).await,
+                Ok(authorization) => {
+                    return self.finish_device_flow(authorization, prompts).await;
+                }
                 Err(e) if e.error == "unauthorized_client" => {
-                    println!(
+                    prompts.notice(&format!(
                         "Browser login is not enabled for Keycloak client \"{}\"; \
                          using username and password instead.",
                         self.client_id
-                    );
+                    ));
                 }
                 Err(e) => bail!("login failed: {e}"),
             }
         }
-        self.password_login().await
+        self.password_login(prompts).await
     }
 
     async fn start_device_flow(
@@ -128,14 +138,16 @@ impl Oidc {
         }
     }
 
-    async fn finish_device_flow(&self, authorization: DeviceAuthorization) -> Result<Tokens> {
+    async fn finish_device_flow(
+        &self,
+        authorization: DeviceAuthorization,
+        prompts: &dyn Prompts,
+    ) -> Result<Tokens> {
         let link = authorization
             .verification_uri_complete
             .as_deref()
             .unwrap_or(&authorization.verification_uri);
-        println!("To log in, open {link}");
-        println!("and confirm the code {}", authorization.user_code);
-        let _ = open::that(link);
+        prompts.confirm_code(link, &authorization.user_code);
 
         let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
         let mut interval = Duration::from_secs(authorization.interval.unwrap_or(5));
@@ -157,9 +169,8 @@ impl Oidc {
         bail!("login timed out; please try again")
     }
 
-    async fn password_login(&self) -> Result<Tokens> {
-        let username: String = Input::new().with_prompt("Username").interact_text()?;
-        let password = Password::new().with_prompt("Password").interact()?;
+    async fn password_login(&self, prompts: &dyn Prompts) -> Result<Tokens> {
+        let (username, password) = prompts.username_and_password()?;
         self.token_request(&[
             ("grant_type", "password"),
             ("username", &username),

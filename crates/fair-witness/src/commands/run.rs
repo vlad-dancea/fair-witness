@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use fair_witness_core::damap;
 use fair_witness_core::project::Project;
 use fair_witness_core::review::Reviewer;
 use fair_witness_core::watcher::{Change, FolderWatcher};
@@ -10,7 +11,7 @@ use notify_rust::Notification;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::setup::damap;
+use crate::setup::damap::{TerminalPrompts, http_client};
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::ModelSettings;
 
@@ -20,7 +21,7 @@ struct Review {
 }
 
 pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
-    let damap = damap::resume(project).await?;
+    let damap = damap::resume(project, http_client()?, &TerminalPrompts).await?;
     let root = project.root().to_path_buf();
 
     let config = project.config()?.context("this folder is not set up yet")?;

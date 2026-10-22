@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const DIR_NAME: &str = ".fair-witness";
+pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
