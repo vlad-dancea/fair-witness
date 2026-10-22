@@ -9,13 +9,14 @@ the GitHub Actions app passes on a branch that contains the latest `main` and ev
 thread is resolved. Deletion, force pushes and non-linear history are blocked, and nobody can
 bypass the ruleset, the repository owner included.
 
-No approving review is required, because the maintainer works alone and GitHub does not let
-the author of a pull request approve it. When a second reviewer joins, set
+No approving review is required, because the maintainer works alone and GitHub does not let the
+author of a pull request approve it. When a second reviewer joins, set
 `required_approving_review_count` to `1` and `require_last_push_approval` to `true`. Stale
-approvals are already dismissed. From then on, a pull request that Copilot opens without a person
-behind it needs one approval more, because `require_extra_approval_for_unattributed_changes` is
-on. With no approvals required, that setting has no effect. CodeRabbit is not a required check, but its review threads
-have to be resolved like any other.
+approvals are already dismissed. From then on, a pull request that Copilot opens without a
+person behind it needs one approval more, because
+`require_extra_approval_for_unattributed_changes` is on. With no approvals required, that
+setting has no effect. CodeRabbit is not a required check, but its review threads have to be
+resolved like any other.
 
 `check` is the only required check. dist's `plan` job runs on every pull request too, but it is
 not required. The `publish` job pushes `v*` tags, which this branch ruleset does not cover.
