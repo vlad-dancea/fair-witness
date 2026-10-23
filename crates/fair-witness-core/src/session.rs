@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Result;
-use jiff::Timestamp;
+use jiff::{Timestamp, Unit};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -111,10 +111,7 @@ impl Session {
             .map(project::append_private)
             .transpose()?;
         let (sender, received) = mpsc::unbounded_channel();
-        let events = Events {
-            sender,
-            log: Mutex::new(log),
-        };
+        let events = Events::new(sender, log);
         tokio::spawn(async move {
             tokio::select! {
                 () = self.watch(watcher, &events) => {}
@@ -169,18 +166,30 @@ impl Session {
     }
 }
 
-/// Stamps each event with the time, logs it and passes it on.
+/// Stamps each event with the time, logs it and passes it on, leaving out what a review
+/// repeats from the one before.
 struct Events {
     sender: UnboundedSender<Record>,
     log: Mutex<Option<File>>,
+    last_setup: Mutex<Option<Trace>>,
+    last_model: Mutex<Option<Trace>>,
 }
 
 impl Events {
+    fn new(sender: UnboundedSender<Record>, log: Option<File>) -> Self {
+        Self {
+            sender,
+            log: Mutex::new(log),
+            last_setup: Mutex::new(None),
+            last_model: Mutex::new(None),
+        }
+    }
+
     fn send(&self, event: Event) {
-        let record = Record {
-            time: Timestamp::now(),
-            event,
-        };
+        if self.repeats(&event) {
+            return;
+        }
+        let record = Record { time: now(), event };
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(file) = log.as_mut() {
             let end = file.metadata().map(|metadata| metadata.len());
@@ -204,7 +213,7 @@ impl Events {
                     error: e.to_string(),
                 };
                 let _ = self.sender.send(Record {
-                    time: Timestamp::now(),
+                    time: now(),
                     event: stopped,
                 });
                 return;
@@ -212,6 +221,33 @@ impl Events {
         }
         let _ = self.sender.send(record);
     }
+
+    /// Whether `event` is the setup or model of a review that the last one already reported.
+    fn repeats(&self, event: &Event) -> bool {
+        let (last, trace) = match event {
+            Event::Trace {
+                trace: trace @ Trace::Setup { .. },
+                ..
+            } => (&self.last_setup, trace),
+            Event::Trace {
+                trace: trace @ Trace::Model(_),
+                ..
+            } => (&self.last_model, trace),
+            _ => return false,
+        };
+        let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref() == Some(trace) {
+            return true;
+        }
+        *last = Some(trace.clone());
+        false
+    }
+}
+
+/// The time to the millisecond, which is as fine as the log needs.
+fn now() -> Timestamp {
+    let now = Timestamp::now();
+    now.round(Unit::Millisecond).unwrap_or(now)
 }
 
 #[cfg(test)]
@@ -251,8 +287,13 @@ mod tests {
             Event::Changes { set, changes } => format!("#{set} changes {changes:?}"),
             Event::Reviewing { set } => format!("#{set} reviewing"),
             Event::Trace { set, trace } => match trace {
-                Trace::Sent { role, .. } => format!("#{set} sent {role}"),
-                Trace::Request { turn, .. } => format!("#{set} request {turn}"),
+                Trace::Setup { dmp, .. } => format!("#{set} setup with DMP {dmp}"),
+                Trace::Model(choice) => format!("#{set} model {}", choice.model),
+                Trace::Prompt(text) => {
+                    format!("#{set} prompt {}", text.lines().nth(1).unwrap_or(""))
+                }
+                Trace::Sent(text) => format!("#{set} sent {text}"),
+                Trace::Request { turn } => format!("#{set} request {turn}"),
                 Trace::Reply { turn, calls, .. } => format!("#{set} reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output } => format!("#{set} {name}: {output}"),
                 Trace::Failed(e) => format!("#{set} failed: {e}"),
@@ -273,10 +314,7 @@ mod tests {
         // Every write to /dev/full fails as if the disk were full.
         let full = File::options().write(true).open("/dev/full").unwrap();
         let (sender, mut received) = mpsc::unbounded_channel();
-        let events = Events {
-            sender,
-            log: Mutex::new(Some(full)),
-        };
+        let events = Events::new(sender, Some(full));
 
         events.send(Event::Reviewing { set: 1 });
         events.send(Event::Reviewing { set: 2 });
@@ -343,15 +381,15 @@ mod tests {
             [
                 r#"#1 changes [Created("notes.txt")]"#,
                 "#1 reviewing",
-                "#1 sent system",
-                "#1 sent user",
+                "#1 setup with DMP {}",
+                "#1 model test",
+                "#1 prompt created: notes.txt",
                 "#1 request 1",
                 "#1 reply 1: report_verdict",
                 "#1 verdict: contradicts false (None): Notes are not data.",
                 r#"#2 changes [Created("patients.csv")]"#,
                 "#2 reviewing",
-                "#2 sent system",
-                "#2 sent user",
+                "#2 prompt created: patients.csv",
                 "#2 request 1",
                 "#2 reply 1: read_file",
                 "#2 read_file: name\nAnna Muster\n",
@@ -375,6 +413,24 @@ mod tests {
         assert_eq!(
             first,
             json!({ "event": "changes", "set": 1, "changes": [{ "created": "notes.txt" }] })
+        );
+        let mut reply = serde_json::to_value(&seen[6].event).unwrap();
+        reply["trace"]["reply"]
+            .as_object_mut()
+            .unwrap()
+            .remove("elapsed_ms")
+            .unwrap();
+        assert_eq!(
+            reply,
+            json!({ "event": "trace", "set": 1, "trace": { "reply": {
+                "turn": 1,
+                "calls": [["report_verdict", {
+                    "contradicts": false, "explanation": "Notes are not data."
+                }]],
+                "stop_reason": "tool_calls",
+                "tokens_in": 1,
+                "tokens_out": 1
+            } } })
         );
     }
 }

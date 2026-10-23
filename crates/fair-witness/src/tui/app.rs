@@ -554,18 +554,20 @@ mod tests {
             Event::Reviewing { set: 1 },
             Event::Trace {
                 set: 1,
-                trace: Trace::Sent {
-                    role: "system".to_string(),
-                    text: "Judge each change against the DMP.\nAnswer with report_verdict."
+                trace: Trace::Setup {
+                    system: "Judge each change against the DMP.\nAnswer with report_verdict."
                         .to_string(),
+                    dmp: "{}".to_string(),
+                    tools: vec!["read_file".to_string(), "report_verdict".to_string()],
                 },
             },
             Event::Trace {
                 set: 1,
-                trace: Trace::Sent {
-                    role: "user".to_string(),
-                    text: "The DMP:\n```json\n{}\n```\nCreated: notes.md".to_string(),
-                },
+                trace: Trace::Model(choice),
+            },
+            Event::Trace {
+                set: 1,
+                trace: Trace::Prompt("Created: notes.md".to_string()),
             },
             Event::Verdict {
                 set: 1,
@@ -585,11 +587,11 @@ mod tests {
             Event::Reviewing { set: 2 },
             Event::Trace {
                 set: 2,
-                trace: Trace::Request {
-                    turn: 1,
-                    choice: choice.clone(),
-                    tools: vec!["read_file".to_string(), "report_verdict".to_string()],
-                },
+                trace: Trace::Prompt("Created: data/participants.csv".to_string()),
+            },
+            Event::Trace {
+                set: 2,
+                trace: Trace::Request { turn: 1 },
             },
             Event::Trace {
                 set: 2,
@@ -609,11 +611,7 @@ mod tests {
             },
             Event::Trace {
                 set: 2,
-                trace: Trace::Request {
-                    turn: 2,
-                    choice,
-                    tools: Vec::new(),
-                },
+                trace: Trace::Request { turn: 2 },
             },
             Event::Trace {
                 set: 2,

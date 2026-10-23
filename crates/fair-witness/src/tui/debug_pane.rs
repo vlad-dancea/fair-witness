@@ -1,4 +1,4 @@
-use fair_witness_core::review::{ModelChoice, Trace, Verdict};
+use fair_witness_core::review::{ModelChoice, Trace, Verdict, first_message};
 use fair_witness_core::session::{Event, Record};
 use jiff::tz::TimeZone;
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -92,6 +92,15 @@ pub struct DebugLog {
     entries: Vec<Entry>,
     collapsed: bool,
     rendered: Option<(u16, Vec<Line<'static>>)>,
+    /// The last setup and model a session reported, which it does not repeat for each review.
+    setup: Option<Setup>,
+    model: Option<ModelChoice>,
+}
+
+struct Setup {
+    system: String,
+    dmp: String,
+    tools: Vec<String>,
 }
 
 impl Default for DebugLog {
@@ -100,6 +109,8 @@ impl Default for DebugLog {
             entries: Vec::new(),
             collapsed: true,
             rendered: None,
+            setup: None,
+            model: None,
         }
     }
 }
@@ -135,28 +146,28 @@ impl DebugLog {
 
     fn add_trace(&mut self, trace: Trace) {
         match trace {
-            Trace::Sent { role, text } if role == "system" => self.push(Entry::Instructions {
-                text,
-                tools: Vec::new(),
-            }),
-            Trace::Sent { text, .. } => self.push(Entry::Prompt(text)),
-            Trace::Request {
-                turn,
-                choice,
-                tools,
-            } => {
-                if let Some(Entry::Instructions { tools: listed, .. }) = self
-                    .this_review()
-                    .find(|entry| matches!(entry, Entry::Instructions { .. }))
-                {
-                    *listed = tools;
-                }
-                self.push(Entry::Turn(Turn {
-                    number: turn,
-                    choice: Some(choice),
-                    reply: None,
-                }));
+            Trace::Setup { system, dmp, tools } => {
+                self.setup = Some(Setup { system, dmp, tools });
             }
+            Trace::Model(choice) => self.model = Some(choice),
+            Trace::Prompt(about_changes) => match &self.setup {
+                Some(setup) => {
+                    let instructions = Entry::Instructions {
+                        text: setup.system.clone(),
+                        tools: setup.tools.clone(),
+                    };
+                    let prompt = Entry::Prompt(first_message(&setup.dmp, &about_changes));
+                    self.push(instructions);
+                    self.push(prompt);
+                }
+                None => self.push(Entry::Prompt(about_changes)),
+            },
+            Trace::Sent(text) => self.push(Entry::Prompt(text)),
+            Trace::Request { turn } => self.push(Entry::Turn(Turn {
+                number: turn,
+                choice: self.model.clone(),
+                reply: None,
+            })),
             Trace::Reply {
                 turn,
                 reasoning,
@@ -674,14 +685,12 @@ mod tests {
 
     fn prompts() -> DebugLog {
         let mut log = DebugLog::default();
-        log.add_trace(Trace::Sent {
-            role: "system".to_string(),
-            text: "Be careful.\nBe brief.".to_string(),
+        log.add_trace(Trace::Setup {
+            system: "Be careful.\nBe brief.".to_string(),
+            dmp: "{\n}".to_string(),
+            tools: vec!["read_file".to_string()],
         });
-        log.add_trace(Trace::Sent {
-            role: "user".to_string(),
-            text: "The DMP:\n```json\n{\n}\n```\nChanged: a.csv".to_string(),
-        });
+        log.add_trace(Trace::Prompt("Changed: a.csv".to_string()));
         log
     }
 
@@ -693,10 +702,12 @@ mod tests {
             [
                 " SYSTEM PROMPT   how the AI should judge",
                 "  ⋯ 2 lines hidden (c to expand)",
+                "  tools: read_file",
                 "",
                 " FAIR-WITNESS   to the AI",
                 "  The DMP:",
                 "  ⋯ 2 json lines hidden (c to expand)",
+                "  ",
                 "  Changed: a.csv",
             ],
         );
@@ -719,11 +730,8 @@ mod tests {
             time: Timestamp::now(),
             event: Event::Reviewing { set: 3 },
         });
-        log.add_trace(Trace::Request {
-            turn: 1,
-            choice: choice.clone(),
-            tools: vec!["read_file".to_string()],
-        });
+        log.add_trace(Trace::Model(choice));
+        log.add_trace(Trace::Request { turn: 1 });
         let reply = |turn, text: &str, calls| Trace::Reply {
             turn,
             reasoning: None,
@@ -743,11 +751,7 @@ mod tests {
             name: "read_file".to_string(),
             output: "name,age".to_string(),
         });
-        log.add_trace(Trace::Request {
-            turn: 2,
-            choice,
-            tools: Vec::new(),
-        });
+        log.add_trace(Trace::Request { turn: 2 });
         let lines = texts(&mut log, 40);
         assert_eq!(
             &lines[lines.len() - 2..],
