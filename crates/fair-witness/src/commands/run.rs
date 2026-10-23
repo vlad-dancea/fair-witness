@@ -28,8 +28,11 @@ pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
                 .find(|listed| listed.id == id)
                 .and_then(|listed| listed.name().map(str::to_string))
                 .unwrap_or_else(|| "(untitled)".to_string());
-            let dmp = serde_json::to_string_pretty(&damap.madmp(id).await?)?;
-            project.save_madmp(&dmp)?;
+            let madmp = damap.madmp(id).await?;
+            if config.damap.dmp_id == Some(id) {
+                project.save_madmp(&config.damap.frontend_url, id, &madmp)?;
+            }
+            let dmp = serde_json::to_string_pretty(&madmp)?;
             session = session.reviewing(dmp, vec![reviewer.clone()]);
             let status = vec![format!("Comparing changes with project #{id} - {name}.")];
             let settings = ModelSettings {
