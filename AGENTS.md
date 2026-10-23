@@ -22,8 +22,8 @@ lists by name live next to the code. Leave them alone and never commit them.
   limitations, including changes that no check covers.
 - `fair-witness setup` asks questions and opens a browser to log in, and `fair-witness run` draws
   a full-screen terminal interface. Neither works without a terminal, so prove behavior with
-  tests and say which parts you could not run. Trying them against a real DAMAP and AI model
-  needs the maintainer's login and API key, so ask.
+  tests and say which parts you could not run. Trying them against a real AI model needs the
+  maintainer's API key, so ask.
 - Stop only processes you started, by the PID you captured. Never `pkill -f` a pattern that
   also appears in your own command line, because it kills your own shell.
 - Keep scratch files, test folders and plans outside the repository, in a `mktemp -d`
@@ -139,8 +139,9 @@ disagrees with it.
 - Write few, meaningful tests in a `#[cfg(test)] mod tests` beside the code they cover. Avoid
   trivial construction and accessor tests. Assert whole values or messages where practical and
   verify tests fail when behavior breaks.
-- When changing `damap/` or `auth.rs`, try the change against a running DAMAP. The README
-  explains how to start one locally.
+- When changing `damap/` or `auth.rs`, try the change against TU Wien's DAMAP at
+  `https://damap.it.tuwien.ac.at`, the default URL, logged in as `user` with password `user`.
+  Do not start a local DAMAP for it.
 - Update the README when a command, option, environment variable or file in `.fair-witness/`
   changes. It is the user documentation.
 
