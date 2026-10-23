@@ -493,7 +493,208 @@ fn change_line(listed: &Listed) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use fair_witness_core::project::{AiConfig, Effort, Project};
+    use fair_witness_core::review::{Reviewer, Trace, Verdict};
+    use fair_witness_core::watcher::Change;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use serde_json::json;
+
     use super::*;
+
+    fn screen() -> Screen {
+        let root = Path::new("/home/researcher/sleep-study");
+        let ai = AiConfig {
+            url: "http://localhost:11434/v1".to_string(),
+            model: "qwen3:8b".to_string(),
+            effort: Some(Effort::Medium),
+        };
+        let settings = ModelSettings {
+            project: Project::new(root.to_path_buf()),
+            reviewer: Arc::new(Reviewer::new(&ai, None)),
+            url: ai.url,
+            api_key: None,
+        };
+        let status = vec!["Comparing changes with project #7 - Sleep and screen time.".to_string()];
+        Screen::new(root, status, Some(settings))
+    }
+
+    /// Three change sets: one in line with the DMP, one that contradicts it after the model
+    /// read a file, and one whose review failed.
+    fn reviewed() -> Screen {
+        let mut screen = screen();
+        let choice = ModelChoice {
+            model: "qwen3:8b".to_string(),
+            effort: Some(Effort::Medium),
+        };
+        let reply = |turn, text: &str, name: &str, arguments| Trace::Reply {
+            turn,
+            reasoning: None,
+            texts: vec![text.to_string()],
+            calls: vec![(name.to_string(), arguments)],
+            stop_reason: Some("tool_calls".to_string()),
+            tokens_in: Some(1200),
+            tokens_out: Some(80),
+        };
+        let events = [
+            Event::Changes {
+                set: 1,
+                changes: vec![Change::Created("notes.md".into())],
+            },
+            Event::Reviewing { set: 1 },
+            Event::Trace {
+                set: 1,
+                trace: Trace::Sent {
+                    role: "system".to_string(),
+                    text: "Judge each change against the DMP.\nAnswer with report_verdict."
+                        .to_string(),
+                },
+            },
+            Event::Trace {
+                set: 1,
+                trace: Trace::Sent {
+                    role: "user".to_string(),
+                    text: "The DMP:\n```json\n{}\n```\nCreated: notes.md".to_string(),
+                },
+            },
+            Event::Verdict {
+                set: 1,
+                verdict: Verdict {
+                    contradicts: false,
+                    dmp_field: None,
+                    explanation: "Meeting notes are not research data.".to_string(),
+                },
+            },
+            Event::Changes {
+                set: 2,
+                changes: vec![
+                    Change::Created("data".into()),
+                    Change::Created("data/participants.csv".into()),
+                ],
+            },
+            Event::Reviewing { set: 2 },
+            Event::Trace {
+                set: 2,
+                trace: Trace::Request {
+                    turn: 1,
+                    choice: choice.clone(),
+                    tools: vec!["read_file".to_string(), "report_verdict".to_string()],
+                },
+            },
+            Event::Trace {
+                set: 2,
+                trace: reply(
+                    1,
+                    "A new table; let me see what it holds.",
+                    "read_file",
+                    json!({ "path": "data/participants.csv" }),
+                ),
+            },
+            Event::Trace {
+                set: 2,
+                trace: Trace::ToolResult {
+                    name: "read_file".to_string(),
+                    output: "name,born,sleep_hours\nAnna Muster,1990-04-02,6.5".to_string(),
+                },
+            },
+            Event::Trace {
+                set: 2,
+                trace: Trace::Request {
+                    turn: 2,
+                    choice,
+                    tools: Vec::new(),
+                },
+            },
+            Event::Trace {
+                set: 2,
+                trace: reply(
+                    2,
+                    "Names and birth dates are personal data.",
+                    "report_verdict",
+                    json!({
+                        "contradicts": true,
+                        "dmp_field": "dataset[0].personal_data",
+                        "explanation": "The table names participants with their birth dates, \
+                                        but the DMP says the project keeps no personal data."
+                    }),
+                ),
+            },
+            Event::Verdict {
+                set: 2,
+                verdict: Verdict {
+                    contradicts: true,
+                    dmp_field: Some("dataset[0].personal_data".to_string()),
+                    explanation: "The table names participants with their birth dates, but \
+                                  the DMP says the project keeps no personal data."
+                        .to_string(),
+                },
+            },
+            Event::Changes {
+                set: 3,
+                changes: vec![
+                    Change::Renamed {
+                        from: "draft.md".into(),
+                        to: "notes/draft.md".into(),
+                    },
+                    Change::Deleted("old.csv".into()),
+                ],
+            },
+            Event::Reviewing { set: 3 },
+            Event::Trace {
+                set: 3,
+                trace: Trace::Failed("could not reach http://localhost:11434/v1/".to_string()),
+            },
+            Event::ReviewFailed {
+                set: 3,
+                error: "could not reach http://localhost:11434/v1/".to_string(),
+            },
+        ];
+        for event in events {
+            screen.apply(Update::Session(event));
+        }
+        screen
+    }
+
+    fn drawn(screen: &mut Screen, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        format!("{:#?}", terminal.backend().buffer())
+    }
+
+    /// Snapshots `drawn` with the clock time a review started masked.
+    macro_rules! assert_screen {
+        ($name:literal, $drawn:expr) => {
+            insta::with_settings!({ filters => vec![(r"\d\d:\d\d:\d\d", "hh:mm:ss")] }, {
+                insta::assert_snapshot!($name, $drawn);
+            });
+        };
+    }
+
+    #[test]
+    fn draws_the_screen_before_any_change() {
+        assert_screen!("waiting", drawn(&mut screen(), 80, 12));
+    }
+
+    #[test]
+    fn draws_the_changes_and_their_verdicts() {
+        assert_screen!("changes", drawn(&mut reviewed(), 80, 24));
+    }
+
+    #[test]
+    fn draws_the_debug_pane_beside_the_changes_on_a_wide_terminal() {
+        let mut screen = reviewed();
+        screen.handle_key(KeyCode::Char('d').into());
+        assert_screen!("debug_beside", drawn(&mut screen, 150, 40));
+    }
+
+    #[test]
+    fn draws_the_debug_pane_below_the_changes_on_a_narrow_terminal() {
+        let mut screen = reviewed();
+        screen.handle_key(KeyCode::Char('d').into());
+        assert_screen!("debug_below", drawn(&mut screen, 80, 50));
+    }
 
     fn text(line: &Line) -> String {
         line.spans

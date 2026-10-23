@@ -64,7 +64,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::review::fake_model::fake_model;
+    use crate::testing::fake_model;
 
     #[tokio::test]
     async fn lists_the_models_a_server_offers() {

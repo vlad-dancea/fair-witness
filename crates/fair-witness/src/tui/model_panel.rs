@@ -324,3 +324,78 @@ fn highlighted(list: List<'_>, focused: bool) -> List<'_> {
     };
     list.highlight_style(style)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use fair_witness_core::project::AiConfig;
+    use fair_witness_core::testing::fake_model;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use serde_json::json;
+
+    use super::*;
+
+    /// A panel that has listed the models of a fake server, with qwen3:8b at medium effort
+    /// in use.
+    async fn loaded() -> ModelPanel {
+        let (url, _server) = fake_model(vec![json!({
+            "object": "list",
+            "data": [
+                { "id": "qwen3:8b", "object": "model" },
+                { "id": "llama3.2", "object": "model" },
+                { "id": "mistral-small", "object": "model" }
+            ]
+        })]);
+        let ai = AiConfig {
+            url: url.clone(),
+            model: "qwen3:8b".to_string(),
+            effort: Some(Effort::Medium),
+        };
+        let settings = ModelSettings {
+            project: Project::new(PathBuf::from("/home/researcher/sleep-study")),
+            reviewer: Arc::new(Reviewer::new(&ai, None)),
+            url,
+            api_key: None,
+        };
+        let mut panel = ModelPanel::open(&settings);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while matches!(panel.models, Models::Loading(_)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                panel.poll();
+            }
+        })
+        .await
+        .expect("the models did not load in time");
+        panel
+    }
+
+    fn drawn(panel: &mut ModelPanel) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal
+            .draw(|frame| panel.draw(frame, frame.area()))
+            .unwrap();
+        format!("{:#?}", terminal.backend().buffer())
+    }
+
+    #[tokio::test]
+    async fn lists_the_models_and_marks_the_one_in_use() {
+        insta::assert_snapshot!(drawn(&mut loaded().await));
+    }
+
+    #[tokio::test]
+    async fn filters_the_models_and_moves_to_the_efforts() {
+        let mut panel = loaded().await;
+        for key in [
+            KeyCode::Char('l'),
+            KeyCode::Char('l'),
+            KeyCode::Tab,
+            KeyCode::Down,
+        ] {
+            panel.handle_key(key.into());
+        }
+        insta::assert_snapshot!(drawn(&mut panel));
+    }
+}

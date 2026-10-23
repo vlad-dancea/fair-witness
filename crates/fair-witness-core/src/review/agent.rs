@@ -232,7 +232,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::review::fake_model::{fake_model, tool_call};
+    use crate::testing::{fake_model, tool_call};
     use crate::watcher::Change;
 
     fn input<'a>(root: &'a std::path::Path, dmp: &'a str, changes: &'a [Change]) -> Input<'a> {

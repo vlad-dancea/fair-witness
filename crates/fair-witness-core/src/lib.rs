@@ -6,4 +6,6 @@ pub mod damap;
 pub mod project;
 pub mod review;
 pub mod session;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod watcher;

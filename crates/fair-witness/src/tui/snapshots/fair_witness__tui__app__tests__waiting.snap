@@ -1,0 +1,42 @@
+---
+source: crates/fair-witness/src/tui/app.rs
+expression: "drawn(&mut screen(), 80, 12)"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 80, height: 12 },
+    content: [
+        "╭ fair-witness ────────────────────────────────────────────────────────────────╮",
+        "│Watching /home/researcher/sleep-study                                         │",
+        "│Comparing changes with project #7 - Sleep and screen time.                    │",
+        "│Using qwen3:8b (medium effort) from http://localhost:11434/v1.                │",
+        "╰──────────────────────────────────────────────────────────────────────────────╯",
+        "╭ Changes ─────────────────────────────────────────────────────────────────────╮",
+        "│No changes yet.                                                               │",
+        "│                                                                              │",
+        "│                                                                              │",
+        "│                                                                              │",
+        "╰──────────────────────────────────────────────────────────────────────────────╯",
+        " q quit  ↑↓ PgUp PgDn scroll  End latest  d debug  m model                      ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 1, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 15, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 10, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 38, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 7, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 31, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 1, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 16, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 2, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
+        x: 9, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 21, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
+        x: 30, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 33, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
+        x: 42, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 43, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
+        x: 49, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 52, y: 11, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}
