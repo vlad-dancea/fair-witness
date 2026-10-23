@@ -321,6 +321,10 @@ impl Screen {
                         .push(Line::from(format!("watch error: {e}").red()).into());
                 }
             }
+            Event::LogStopped { error } => {
+                let stopped = format!("stopped writing the log in .fair-witness/log/: {error}");
+                self.log.push(Line::from(stopped.red()).into());
+            }
         }
     }
 

@@ -42,6 +42,10 @@ pub enum Event {
         set: usize,
         errors: Vec<String>,
     },
+    /// The log could not be written, so it holds no events from here on, not even this one.
+    LogStopped {
+        error: String,
+    },
 }
 
 /// An event with the time it happened, as the log holds it, one per line.
@@ -189,6 +193,15 @@ impl Events {
             if let Err(e) = written {
                 tracing::error!("stopped writing the event log: {e}");
                 *log = None;
+                let _ = self.sender.send(record);
+                let stopped = Event::LogStopped {
+                    error: e.to_string(),
+                };
+                let _ = self.sender.send(Record {
+                    time: Timestamp::now(),
+                    event: stopped,
+                });
+                return;
             }
         }
         let _ = self.sender.send(record);
@@ -244,7 +257,37 @@ mod tests {
             ),
             Event::ReviewFailed { set, error } => format!("#{set} review failed: {error}"),
             Event::WatchErrors { set, errors } => format!("#{set} watch errors: {errors:?}"),
+            Event::LogStopped { error } => format!("log stopped: {error}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn says_once_when_the_log_cannot_be_written() {
+        // Every write to /dev/full fails as if the disk were full.
+        let full = File::options().write(true).open("/dev/full").unwrap();
+        let (sender, mut received) = mpsc::unbounded_channel();
+        let events = Events {
+            sender,
+            log: Mutex::new(Some(full)),
+        };
+
+        events.send(Event::Reviewing { set: 1 });
+        events.send(Event::Reviewing { set: 2 });
+        drop(events);
+
+        let mut seen = Vec::new();
+        while let Some(record) = received.recv().await {
+            seen.push(describe(&record.event));
+        }
+        assert_eq!(
+            seen,
+            [
+                "#1 reviewing",
+                "log stopped: No space left on device (os error 28)",
+                "#2 reviewing",
+            ]
+        );
     }
 
     #[tokio::test]
