@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use genai::Client;
@@ -19,33 +20,49 @@ const MAX_TURNS: usize = 12;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
     pub contradicts: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dmp_field: Option<String>,
     pub explanation: String,
 }
 
-/// What happened in a review, for the debug pane.
+/// What happened in a review, for the log and the debug pane. Fields without a value are left
+/// out of the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trace {
-    /// A message added to the conversation by us.
-    Sent {
-        role: String,
-        text: String,
+    /// What the model is told before any change: the system prompt, the DMP and the tools it
+    /// may call. A session passes it on only when it differs from the last one.
+    Setup {
+        system: String,
+        dmp: String,
+        tools: Vec<String>,
     },
+    /// The model the review asks. A session passes it on only when it differs from the last one.
+    Model(ModelChoice),
+    /// The first message of a review without the DMP, which `first_message` puts before it.
+    Prompt(String),
+    /// A later message from us, such as a reminder to hand in the verdict.
+    Sent(String),
     /// The conversation so far goes to the model.
     Request {
         turn: usize,
-        choice: ModelChoice,
-        tools: Vec<String>,
     },
     Reply {
         turn: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         texts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         calls: Vec<(String, Value)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_in: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_out: Option<i32>,
+        /// How long the model took to reply.
+        elapsed_ms: u64,
     },
     ToolResult {
         name: String,
@@ -62,6 +79,7 @@ pub struct Reviewer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
 }
 
@@ -93,23 +111,22 @@ impl Reviewer {
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
         let tools = Arc::new(Tools::new(input.root)?);
-        let prompt = prompt::user_message(input.dmp, input.changes, input.found);
+        let about_changes = prompt::about_changes(input.changes, input.found);
         let choice = self.choice();
         let mut definitions = Tools::definitions();
         definitions.push(verdict_tool());
-        let tool_names: Vec<String> = definitions
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        trace(Trace::Sent {
-            role: "system".to_string(),
-            text: SYSTEM_PROMPT.to_string(),
+        trace(Trace::Setup {
+            system: SYSTEM_PROMPT.to_string(),
+            dmp: input.dmp.to_string(),
+            tools: definitions
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
         });
-        trace(Trace::Sent {
-            role: "user".to_string(),
-            text: prompt.clone(),
-        });
-        let mut request = ChatRequest::new(vec![ChatMessage::user(prompt)])
+        trace(Trace::Model(choice.clone()));
+        trace(Trace::Prompt(about_changes.clone()));
+        let first = prompt::first_message(input.dmp, &about_changes);
+        let mut request = ChatRequest::new(vec![ChatMessage::user(first)])
             .with_system(SYSTEM_PROMPT)
             .with_tools(definitions);
         let mut options = ChatOptions::default().with_tool_choice(ToolChoice::Auto);
@@ -120,11 +137,8 @@ impl Reviewer {
         }
 
         for turn in 1..=MAX_TURNS {
-            trace(Trace::Request {
-                turn,
-                choice: choice.clone(),
-                tools: tool_names.clone(),
-            });
+            trace(Trace::Request { turn });
+            let asked = Instant::now();
             let response = match self
                 .client
                 .exec_chat(&choice.model, request.clone(), Some(&options))
@@ -148,14 +162,12 @@ impl Reviewer {
                 stop_reason: response.stop_reason.as_ref().map(|r| r.raw().to_string()),
                 tokens_in: response.usage.prompt_tokens,
                 tokens_out: response.usage.completion_tokens,
+                elapsed_ms: u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX),
             });
             request = request.append_message(ChatMessage::assistant(response.content));
             if calls.is_empty() {
                 let nudge = "Please finish by calling report_verdict.";
-                trace(Trace::Sent {
-                    role: "user".to_string(),
-                    text: nudge.to_string(),
-                });
+                trace(Trace::Sent(nudge.to_string()));
                 request = request.append_message(ChatMessage::user(nudge));
                 continue;
             }
@@ -303,13 +315,25 @@ mod tests {
         let tool_message = messages.iter().find(|m| m["role"] == "tool").unwrap();
         assert_eq!(tool_message["content"], "name,diagnosis\n");
 
+        let traces = traces.into_inner().unwrap();
+        let (Trace::Setup { system, dmp, .. }, Trace::Prompt(about_changes)) =
+            (&traces[0], &traces[2])
+        else {
+            panic!("no setup and prompt first: {traces:?}");
+        };
+        assert_eq!(body["messages"][0]["content"], json!(system));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!(prompt::first_message(dmp, about_changes))
+        );
         let kinds: Vec<String> = traces
-            .into_inner()
-            .unwrap()
             .iter()
             .map(|trace| match trace {
-                Trace::Sent { role, .. } => format!("sent {role}"),
-                Trace::Request { turn, .. } => format!("request {turn}"),
+                Trace::Setup { tools, .. } => format!("setup with {}", tools.join(", ")),
+                Trace::Model(choice) => format!("model {}", choice.model),
+                Trace::Prompt(text) => format!("prompt {}", text.lines().nth(1).unwrap_or("")),
+                Trace::Sent(text) => format!("sent {text}"),
+                Trace::Request { turn } => format!("request {turn}"),
                 Trace::Reply { turn, calls, .. } => format!("reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output } => format!("{name}: {output}"),
                 Trace::Failed(e) => format!("failed: {e}"),
@@ -318,8 +342,9 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "sent system",
-                "sent user",
+                "setup with list_dir, read_file, report_verdict",
+                "model test",
+                "prompt created: data/patients.csv",
                 "request 1",
                 "reply 1: read_file",
                 "read_file: name,diagnosis\n",

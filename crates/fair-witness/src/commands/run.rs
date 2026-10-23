@@ -9,14 +9,14 @@ use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
 use fair_witness_core::review::Reviewer;
-use fair_witness_core::session::{Event, Session};
+use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::Failure;
-use crate::notifications;
 use crate::setup::damap::{TerminalPrompts, http_client, web_url};
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::ModelSettings;
+use crate::{diagnostics, notifications};
 
 const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";
 const STOP_WRITING_WITHIN: Duration = Duration::from_secs(2);
@@ -70,7 +70,7 @@ pub struct Args {
 /// What `run` watches with, once it has everything it needs.
 struct Start {
     project: Project,
-    events: UnboundedReceiver<Event>,
+    records: UnboundedReceiver<Record>,
     status: Vec<String>,
     settings: Option<ModelSettings>,
 }
@@ -123,6 +123,13 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     let saved_dmp = config.as_ref().and_then(|config| config.damap.dmp_id);
 
     let mut session = Session::new(project.clone());
+    // A folder that never ran `setup` gets no log, since `run` writes nothing into it.
+    if config.is_some() {
+        let log = project.run_log()?;
+        diagnostics::write_to(&log.diagnostics)?;
+        session = session.logging_to(log.events);
+    }
+    tracing::info!("watching {}", project.root().display());
     if let Some(debounce) = debounce {
         session = session.debounce(debounce);
     }
@@ -141,6 +148,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
             };
             let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone()));
             session = session.reviewing(dmp.json, vec![reviewer.clone()]);
+            tracing::info!("{}", dmp.status);
             status.insert(0, dmp.status);
             settings = Some(ModelSettings {
                 project: project.clone(),
@@ -160,10 +168,10 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         _ => status.push("Changes are not checked.".to_string()),
     }
 
-    let events = session.start()?;
+    let records = session.start()?;
     Ok(Start {
         project,
-        events,
+        records,
         status,
         settings,
     })
@@ -271,6 +279,7 @@ async fn download_dmp(
                 "Warning: could not download the DMP, so changes are checked against the copy \
                  saved before: {e:#}"
             );
+            tracing::warn!("{warning}");
             // The screen draws each header line as one, and DAMAP's errors span several.
             status.extend(warning.lines().map(str::to_string));
             Ok(Dmp {
@@ -318,15 +327,15 @@ impl Prompts for ErrorOutput {
 async fn show_events(start: Start) -> Result<()> {
     let Start {
         project,
-        mut events,
+        mut records,
         status,
         settings,
     } = start;
     let (updates, received) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            notifications::show(&event, &updates);
-            if updates.send(Update::Session(event)).is_err() {
+        while let Some(record) = records.recv().await {
+            notifications::show(&record.event, &updates);
+            if updates.send(Update::Session(record)).is_err() {
                 return;
             }
         }
@@ -356,11 +365,12 @@ fn stop_requested() -> Result<impl Future<Output = ()>> {
     })
 }
 
-/// Prints each event as a line of JSON on stdout until `stopped` resolves.
+/// Prints each event with its time as a line of JSON on stdout, as the log holds it, until
+/// `stopped` resolves.
 async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result<()> {
     let Start {
         project,
-        mut events,
+        mut records,
         status,
         ..
     } = start;
@@ -395,9 +405,9 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
                 written?.context("could not write to stdout")?;
                 bail!("stopped writing to stdout");
             }
-            event = events.recv() => {
-                let event = event.context("stopped watching")?;
-                let mut line = serde_json::to_string(&event)?;
+            record = records.recv() => {
+                let record = record.context("stopped watching")?;
+                let mut line = serde_json::to_string(&record)?;
                 line.push('\n');
                 // When the writer has failed, the next turn of the loop reports why.
                 let _ = lines.send(line);

@@ -75,7 +75,7 @@ impl Run {
         }
     }
 
-    /// The events on stdout up to the verdict.
+    /// The events on stdout up to the verdict, without the time each line has.
     fn events_until_verdict(&self) -> Vec<Value> {
         let mut events = Vec::new();
         loop {
@@ -83,7 +83,9 @@ impl Run {
                 .stdout
                 .recv_timeout(PATIENCE)
                 .expect("no verdict in time");
-            let event: Value = serde_json::from_str(&line).unwrap();
+            let mut event: Value = serde_json::from_str(&line).unwrap();
+            let time = event.as_object_mut().unwrap().remove("time");
+            assert!(time.is_some_and(|time| time.is_string()), "{line}");
             let done = event["event"] == "verdict";
             events.push(event);
             if done {
@@ -183,6 +185,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
             "trace",
             "trace",
             "trace",
+            "trace",
             "verdict"
         ]
     );
@@ -191,7 +194,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
         json!({ "event": "changes", "set": 1, "changes": [{ "created": "patients.csv" }] })
     );
     assert_eq!(
-        events[6],
+        events[7],
         json!({
             "event": "verdict",
             "set": 1,
@@ -271,6 +274,24 @@ fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
             .contains("Soil samples")
     );
     assert_eq!(run.stop(), Some(0));
+    // A folder that is set up keeps a log, with the same lines that went to stdout. The run
+    // that could not start left one too, which is older.
+    let mut logs: Vec<_> = std::fs::read_dir(root.path().join(".fair-witness/log"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with("-events.jsonl"))
+        .collect();
+    logs.sort();
+    let logged: Vec<Value> = std::fs::read_to_string(logs.last().unwrap())
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: Value = serde_json::from_str(line).unwrap();
+            event.as_object_mut().unwrap().remove("time");
+            event
+        })
+        .collect();
+    assert_eq!(logged, events);
 }
 
 #[test]

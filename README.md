@@ -84,8 +84,11 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
+- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took. To keep it short, the system prompt, the DMP and the model are written once, before the first review, and again only when they change. `<start time>-diagnostics.log` has what happened outside the reviews, such as requests to DAMAP, folders that could not be read and notifications that failed. The `FAIR_WITNESS_LOG` environment variable sets how much it holds: `info` by default, `debug` for every request and `warn` for problems only. It takes the syntax of `RUST_LOG`, such as `warn,fair_witness_core=debug`.
 
-A `.gitignore` inside it keeps `credentials.toml` and `madmp.json` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
+The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
+
+A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json` and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ### What is ignored
 
@@ -180,13 +183,13 @@ What you do about a contradiction is up to you. Either undo the change, or, if t
 
 ### 4. See what the AI did
 
-Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it) and the token counts.
+Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts and how long each reply took.
 
 - `Tab` switches which pane the arrow keys scroll.
 - `c` collapses or expands long blocks, such as the DMP JSON.
 - `d` hides the pane again.
 
-This is the place to look when a verdict seems wrong.
+This is the place to look when a verdict seems wrong. The log in `.fair-witness/log/` holds the same steps, so a review can still be read after `run` quits.
 
 ### 5. Switch the model
 
@@ -251,13 +254,13 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 ```
 
 ```
-{"event":"changes","set":1,"changes":[{"created":"data/patients.csv"}]}
-{"event":"reviewing","set":1}
-{"event":"trace","set":1,"trace":{...}}
-{"event":"verdict","set":1,"verdict":{"contradicts":true,"dmp_field":"dataset[0].personal_data","explanation":"..."}}
+{"time":"2026-10-23T13:48:20.104Z","event":"changes","set":1,"changes":[{"created":"data/patients.csv"}]}
+{"time":"2026-10-23T13:48:20.105Z","event":"reviewing","set":1}
+{"time":"2026-10-23T13:48:20.105Z","event":"trace","set":1,"trace":{...}}
+{"time":"2026-10-23T13:48:24.913Z","event":"verdict","set":1,"verdict":{"contradicts":true,"dmp_field":"dataset[0].personal_data","explanation":"..."}}
 ```
 
-Each event has the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Messages for people, such as which DMP is used, go to stderr.
+Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up, and with 1 when it fails while watching.
 
@@ -271,6 +274,7 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
 - **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly; try a larger one with `m`.
+- **Something else went wrong**: run `FAIR_WITNESS_LOG=debug fair-witness run` and read the newest `-diagnostics.log` in `.fair-witness/log/`.
 - **No desktop notification**: the change list shows "could not show a notification" with the reason. Verdicts still appear in the terminal.
 
 ## Running DAMAP locally

@@ -1,8 +1,9 @@
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const DIR_NAME: &str = ".fair-witness";
@@ -12,6 +13,7 @@ const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
 const MADMP_PARTIAL_FILE: &str = "madmp.json.partial";
+const LOG_DIR: &str = "log";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
 # Use ! to check a path again, including paths fair-witness skips on its own.
@@ -66,6 +68,15 @@ impl Effort {
             Effort::High => "high",
         }
     }
+}
+
+/// Where a run of `fair-witness run` writes its log, in `.fair-witness/log/`.
+#[derive(Debug)]
+pub struct RunLog {
+    /// Every event of the run, as a line of JSON.
+    pub events: PathBuf,
+    /// What went wrong or happened outside the reviews, such as requests to DAMAP.
+    pub diagnostics: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -179,6 +190,42 @@ impl Project {
         written
     }
 
+    /// Names the log of a run that starts now, creating its folder and its empty events file.
+    pub fn run_log(&self) -> Result<RunLog> {
+        self.run_log_at(Timestamp::now())
+    }
+
+    fn run_log_at(&self, started: Timestamp) -> Result<RunLog> {
+        let dir = self.ensure_dir()?;
+        // Folders set up before there was a log have a .gitignore that does not list it.
+        write_gitignore(&dir)?;
+        let dir = dir.join(LOG_DIR);
+        fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+        let started = started.strftime("%Y-%m-%dT%H-%M-%S%.3fZ").to_string();
+        // Runs that start in the same millisecond share the time, so creating the events file
+        // claims the name, and a later run counts on.
+        let mut stem = started.clone();
+        for count in 2.. {
+            let events = dir.join(format!("{stem}-events.jsonl"));
+            match private_options().create_new(true).open(&events) {
+                Ok(_) => {
+                    return Ok(RunLog {
+                        events,
+                        diagnostics: dir.join(format!("{stem}-diagnostics.log")),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    stem = format!("{started}-{count}");
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("could not create {}", events.display()));
+                }
+            }
+        }
+        unreachable!("the counter runs out only after every name is taken")
+    }
+
     fn dir(&self) -> PathBuf {
         self.root.join(DIR_NAME)
     }
@@ -210,7 +257,7 @@ fn write_gitignore(dir: &Path) -> Result<()> {
     let path = dir.join(".gitignore");
     fs::write(
         &path,
-        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{MADMP_PARTIAL_FILE}\n"),
+        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{MADMP_PARTIAL_FILE}\n{LOG_DIR}/\n"),
     )
     .with_context(|| format!("could not write {}", path.display()))
 }
@@ -226,16 +273,45 @@ fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(Some(value))
 }
 
-fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
+/// Creates a file at `path` that only the user can read, failing if one is there.
+pub fn create_private(path: &Path) -> Result<File> {
+    private_options()
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("could not create {}", path.display()))
+}
+
+/// Opens the file at `path` to add to its end, creating it for the user alone if it is missing.
+pub fn append_private(path: &Path) -> Result<File> {
+    // Not in append mode, which on Windows takes away the right to cut the file shorter.
+    let mut file = private_options()
+        .create(true)
+        .open(path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+    file.seek(SeekFrom::End(0))
+        .with_context(|| format!("could not open {}", path.display()))?;
+    Ok(file)
+}
+
+/// Options to write a file that, when they create it, only the user can read.
+fn private_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true);
     #[cfg(unix)]
-    if private {
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    let _ = private;
+    options
+}
+
+fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
+    let mut options = if private {
+        private_options()
+    } else {
+        fs::OpenOptions::new()
+    };
+    options.write(true).create(true).truncate(true);
 
     let mut file = options
         .open(path)
@@ -316,6 +392,52 @@ mod tests {
     }
 
     #[test]
+    fn gives_runs_that_start_together_their_own_log() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let started: Timestamp = "2026-10-23T13:48:15.816Z".parse().unwrap();
+
+        let logs: Vec<RunLog> = (0..2)
+            .map(|_| project.run_log_at(started).unwrap())
+            .collect();
+
+        let log = root.path().join(".fair-witness/log");
+        assert_eq!(
+            logs.iter()
+                .flat_map(|run| [run.events.clone(), run.diagnostics.clone()])
+                .collect::<Vec<_>>(),
+            [
+                log.join("2026-10-23T13-48-15.816Z-events.jsonl"),
+                log.join("2026-10-23T13-48-15.816Z-diagnostics.log"),
+                log.join("2026-10-23T13-48-15.816Z-2-events.jsonl"),
+                log.join("2026-10-23T13-48-15.816Z-2-diagnostics.log"),
+            ]
+        );
+        #[cfg(unix)]
+        for run in &logs {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&run.events).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn adds_to_the_end_of_a_log_and_can_cut_it_back() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        fs::write(&path, "{\"set\":1}\n").unwrap();
+
+        let mut file = append_private(&path).unwrap();
+        file.write_all(b"{\"set\":2}\n{\"se").unwrap();
+        file.set_len(20).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"set\":1}\n{\"set\":2}\n"
+        );
+    }
+
+    #[test]
     fn finds_the_project_from_a_subfolder() {
         let root = tempfile::tempdir().unwrap();
         let project = Project::new(root.path().to_path_buf());
@@ -376,7 +498,7 @@ mod tests {
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(root.path().join(".fair-witness/.gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\nmadmp.json.partial\n"
+            "credentials.toml\nmadmp.json\nmadmp.json.partial\nlog/\n"
         );
         #[cfg(unix)]
         {
