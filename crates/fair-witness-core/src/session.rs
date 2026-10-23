@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::project::Project;
 use crate::review::{self, Step, Trace, Verdict};
-use crate::watcher::{Change, FolderWatcher};
+use crate::watcher::{self, Change, FolderWatcher};
 
 /// Something that happened while watching, with the number of the change set it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +43,7 @@ pub enum Event {
 /// Watches a project folder and, given a DMP, reviews each change set against it.
 pub struct Session {
     project: Project,
+    debounce: Duration,
     review: Option<Review>,
 }
 
@@ -55,8 +57,14 @@ impl Session {
     pub fn new(project: Project) -> Self {
         Self {
             project,
+            debounce: watcher::DEBOUNCE,
             review: None,
         }
+    }
+
+    /// Takes changes as one change set once the folder has been quiet for `debounce`.
+    pub fn debounce(self, debounce: Duration) -> Self {
+        Self { debounce, ..self }
     }
 
     /// Reviews each change set against `dmp`, running `steps` in order until one decides.
@@ -70,7 +78,7 @@ impl Session {
     /// Starts watching. The session runs until the receiver is dropped, and drops the review
     /// in progress then.
     pub fn start(self) -> Result<UnboundedReceiver<Event>> {
-        let watcher = FolderWatcher::new(self.project.root())?;
+        let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
         let (events, received) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             tokio::select! {
@@ -131,7 +139,6 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
 
     use serde_json::json;
 
@@ -141,7 +148,7 @@ mod tests {
     use crate::testing::{fake_model, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
-    const PATIENCE: Duration = Duration::from_secs(20);
+    const PATIENCE: Duration = Duration::from_secs(10);
 
     async fn until_decided(events: &mut UnboundedReceiver<Event>) -> Vec<Event> {
         let mut seen = Vec::new();
@@ -205,6 +212,7 @@ mod tests {
             None,
         );
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
+            .debounce(Duration::from_millis(50))
             .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
             .start()
             .unwrap();

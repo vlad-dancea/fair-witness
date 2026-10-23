@@ -19,7 +19,12 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use filter::Filter;
 pub use summary::{Listed, summarize};
 
-const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the folder stays quiet before its changes count as one change set, unless a
+/// caller asks for another time.
+pub const DEBOUNCE: Duration = Duration::from_secs(2);
+/// The debouncer checks for quiet every quarter of the wait, so a wait of zero would have it
+/// spin.
+const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
 
 /// A change in the watched folder, with paths relative to its root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,10 +120,13 @@ pub struct FolderWatcher {
 }
 
 impl FolderWatcher {
-    pub fn new(root: &Path) -> Result<Self> {
+    /// Watches `root`, grouping changes until the folder has been quiet for `debounce`, or
+    /// for 10 milliseconds when that is shorter.
+    pub fn new(root: &Path, debounce: Duration) -> Result<Self> {
         let filter = Filter::new(root)?;
         let (tx, events) = mpsc::unbounded_channel();
-        let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, move |result| {
+        let debounce = debounce.max(SHORTEST_DEBOUNCE);
+        let mut debouncer = new_debouncer(debounce, None, move |result| {
             let _ = tx.send(result);
         })?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
@@ -269,12 +277,23 @@ mod tests {
 
     use super::*;
 
-    const QUIET: Duration = Duration::from_secs(4);
+    const DEBOUNCE: Duration = Duration::from_millis(50);
+    /// Generous, so that a slow machine still delivers the first batch in time.
+    const FIRST_BATCH: Duration = Duration::from_secs(5);
+    /// Every change a test makes happens before it drains, so a batch that comes this long
+    /// after the last one belongs to no test.
+    const QUIET: Duration = Duration::from_millis(250);
+
+    fn watch(root: &Path) -> FolderWatcher {
+        FolderWatcher::new(root, DEBOUNCE).unwrap()
+    }
 
     async fn drain(watcher: &mut FolderWatcher) -> Vec<Change> {
         let mut changes = Vec::new();
-        while let Ok(Some(batch)) = tokio::time::timeout(QUIET, watcher.next()).await {
+        let mut wait = FIRST_BATCH;
+        while let Ok(Some(batch)) = tokio::time::timeout(wait, watcher.next()).await {
             changes.extend(batch.expect("watching failed"));
+            wait = QUIET;
         }
         changes
     }
@@ -317,7 +336,7 @@ mod tests {
         let root = root.path();
         fs::write(root.join("notes.txt"), "a").unwrap();
         git(root, &["init", "-q"]);
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         git(root, &["add", "."]);
         git(root, &["commit", "-qm", "Add notes"]);
@@ -335,7 +354,7 @@ mod tests {
         let root = root.path();
         fs::create_dir(root.join(".fair-witness")).unwrap();
         fs::write(root.join(".fair-witness/ignore"), "scratch/\n").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         for path in [
             ".venv/lib/site.py",
@@ -366,7 +385,7 @@ mod tests {
         fs::create_dir(root.join("data")).unwrap();
         fs::create_dir(root.join("node_modules")).unwrap();
         fs::write(root.join("data/a.csv"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::rename(root.join("data/a.csv"), root.join("node_modules/a.csv")).unwrap();
 
@@ -382,7 +401,7 @@ mod tests {
         let root = root.path();
         let outside = tempfile::tempdir().unwrap();
         fs::write(root.join("a.csv"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         // Some platforms report both ends of a move out of the watched folder.
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
@@ -404,7 +423,7 @@ mod tests {
         fs::create_dir(root.join("data")).unwrap();
         fs::write(root.join("data/a.csv"), "a").unwrap();
         fs::write(root.join("data/notes.txt"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::rename(root.join("data"), root.join("archive")).unwrap();
         assert_eq!(
@@ -427,7 +446,7 @@ mod tests {
     async fn reports_files_written_into_a_new_folder_once_each() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::create_dir_all(root.join("data/raw")).unwrap();
         fs::write(root.join("data/a.csv"), "a").unwrap();
@@ -446,7 +465,7 @@ mod tests {
         fs::create_dir(outside.path().join("survey")).unwrap();
         fs::write(outside.path().join("survey/answers.csv"), "x").unwrap();
         let root = root.path();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::rename(outside.path().join("survey"), root.join("survey")).unwrap();
 
@@ -462,7 +481,7 @@ mod tests {
         let root = root.path();
         fs::create_dir(root.join("data")).unwrap();
         fs::write(root.join("data/a.csv"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::rename(root.join("data"), root.join("dataset")).unwrap();
 
@@ -481,7 +500,7 @@ mod tests {
         let root = root.path();
         fs::create_dir(root.join("data")).unwrap();
         fs::write(root.join("data/a.csv"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::remove_dir_all(root.join("data")).unwrap();
 
@@ -515,7 +534,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::write(root.join("notes.txt"), "a").unwrap();
-        let mut watcher = FolderWatcher::new(root).unwrap();
+        let mut watcher = watch(root);
 
         fs::write(root.join("notes.txt"), "b").unwrap();
 
