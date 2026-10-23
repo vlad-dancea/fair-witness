@@ -53,6 +53,7 @@ API key (empty for none): ********
 Model (type to filter): your-model
 Changes will be checked with your-model.
 Run `fair-witness run` to start watching this folder.
+Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to ignore.
 ```
 
 Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in.
@@ -82,8 +83,9 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP, refreshed on every `run`.
+- `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
 
-A `.gitignore` inside it keeps the last two out of git. You can run `fair-witness` from any subfolder; it finds `.fair-witness/` by looking upwards.
+A `.gitignore` inside it keeps `credentials.toml` and `madmp.json` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ### What is ignored
 
@@ -95,7 +97,7 @@ Some files in a project are not research data, and checking them would only cost
 - folders a tool tagged as a cache with a [`CACHEDIR.TAG`](https://bford.info/cachedir/) file, as cargo tags `target/` and pytest, mypy and ruff tag their `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/`
 - editor swap and backup files (`*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`) and `.DS_Store`
 
-To ignore more, list it in `.fair-witness/ignore`, in the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one:
+To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. `.fair-witness/` itself is always skipped:
 
 ```gitignore
 # scratch output of the analysis scripts

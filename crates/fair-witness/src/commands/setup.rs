@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fair_witness_core::project::Project;
+use fair_witness_core::project::{DIR_NAME, IGNORE_FILE, Project};
 
 use crate::setup::model::{self, ModelArgs};
 use crate::setup::{damap, dmp};
@@ -15,5 +15,9 @@ pub async fn run(
     dmp::choose(&project, &damap).await?;
     model::setup(&project, model).await?;
     println!("Run `fair-witness run` to start watching this folder.");
+    println!(
+        "Edit {} to choose which paths to ignore.",
+        project.root().join(DIR_NAME).join(IGNORE_FILE).display()
+    );
     Ok(())
 }
