@@ -28,7 +28,7 @@ It needs T3 Code's `delegate_task` tool. Without it, say so and stop.
    - from round 2 on: every earlier finding, your response to it and the open objections. The
      reviewer accepts each rebuttal or holds its position with new evidence.
 4. Verify every finding against the source before acting. Fix the correct ones. Rebut the rest
-   with evidence: a test, a run against a local DAMAP, or the quoted code. Never agree just to
+   with evidence: a test, a run against TU Wien's DAMAP, or the quoted code. Never agree just to
    end the loop.
 5. Run `mise run check` after fixing.
 
