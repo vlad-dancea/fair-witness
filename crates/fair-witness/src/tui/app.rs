@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use fair_witness_core::review::{ModelChoice, Trace, Verdict};
-use fair_witness_core::watcher::{self, Change, Kind, Listed};
+use crossterm::event::{self as terminal, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use fair_witness_core::review::ModelChoice;
+use fair_witness_core::session::Event;
+use fair_witness_core::watcher::{self, Kind, Listed};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -27,12 +28,7 @@ const RESULT_ARROW: &str = " ↳ ";
 const IN_LINE_GREEN: Color = Color::Rgb(0x6c, 0xc6, 0x44);
 
 pub enum Update {
-    /// A change set, numbered from 1 in the order seen.
-    Changes(usize, Vec<Change>),
-    Reviewing(usize),
-    Verdict(Result<Verdict>),
-    Trace(Trace),
-    WatchErrors(Vec<String>),
+    Session(Event),
     NotifyFailed(String),
 }
 
@@ -176,7 +172,7 @@ impl Screen {
             terminal.draw(|frame| self.draw(frame))?;
             tokio::select! {
                 event = terminal_events.next() => match event {
-                    Some(Ok(Event::Key(key))) if key.is_press() => self.handle_key(key),
+                    Some(Ok(terminal::Event::Key(key))) if key.is_press() => self.handle_key(key),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
@@ -274,11 +270,11 @@ impl Screen {
     }
 
     fn apply(&mut self, update: Update) {
-        if let Update::Verdict(_) = update {
+        if let Update::Session(Event::Verdict { .. } | Event::ReviewFailed { .. }) = update {
             self.reviewing_since = None;
         }
         match update {
-            Update::Changes(set, changes) => {
+            Update::Session(Event::Changes { set, changes }) => {
                 for listed in watcher::summarize(&changes) {
                     self.log.push(LogLine {
                         line: change_line(&listed),
@@ -287,12 +283,12 @@ impl Screen {
                     });
                 }
             }
-            Update::Reviewing(set) => {
+            Update::Session(Event::Reviewing { set }) => {
                 self.reviewing_since = Some(Instant::now());
                 self.debug.review_started(set);
             }
-            Update::Trace(trace) => self.debug.add(trace),
-            Update::Verdict(Ok(verdict)) if verdict.contradicts => {
+            Update::Session(Event::Trace { trace, .. }) => self.debug.add(trace),
+            Update::Session(Event::Verdict { verdict, .. }) if verdict.contradicts => {
                 let field = verdict
                     .dmp_field
                     .map(|field| format!(" ({field})"))
@@ -302,14 +298,18 @@ impl Screen {
                     Span::raw(format!(" {}", verdict.explanation)),
                 ]));
             }
-            Update::Verdict(Ok(verdict)) => self.log.push(LogLine::verdict(vec![
-                "in line with the DMP:".fg(IN_LINE_GREEN),
-                Span::raw(format!(" {}", verdict.explanation)),
-            ])),
-            Update::Verdict(Err(e)) => self.log.push(LogLine::verdict(vec![
-                format!("review failed: {e:#}").red(),
-            ])),
-            Update::WatchErrors(errors) => {
+            Update::Session(Event::Verdict { verdict, .. }) => {
+                self.log.push(LogLine::verdict(vec![
+                    "in line with the DMP:".fg(IN_LINE_GREEN),
+                    Span::raw(format!(" {}", verdict.explanation)),
+                ]))
+            }
+            Update::Session(Event::ReviewFailed { error, .. }) => {
+                self.log.push(LogLine::verdict(vec![
+                    format!("review failed: {error}").red(),
+                ]))
+            }
+            Update::Session(Event::WatchErrors { errors, .. }) => {
                 for e in errors {
                     self.log
                         .push(Line::from(format!("watch error: {e}").red()).into());

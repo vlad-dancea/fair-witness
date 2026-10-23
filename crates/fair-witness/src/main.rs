@@ -1,4 +1,5 @@
 mod commands;
+mod notifications;
 mod setup;
 mod tui;
 

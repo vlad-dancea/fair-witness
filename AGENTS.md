@@ -146,16 +146,20 @@ disagrees with it.
 
 ## Code
 
-- `fair-witness-core` holds what runs without a terminal. `review/` is the reviewer that asks
-  the model for a verdict through tool calls, with the tool loop in `agent.rs`, the system
-  prompt and first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and
-  the model's tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API
+- `fair-witness-core` holds what runs without a terminal. `session.rs` watches the folder,
+  reviews each change set and reports both as a stream of `Event`s. `review/` runs a review as
+  a sequence of steps in `steps.rs`, each of which decides or hands on to the next. The model is
+  the last step, with the tool loop in `agent.rs`, the system prompt and first message in
+  `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's tools in
+  `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API
   client and the login to it, `auth.rs` the OIDC login and `project.rs` the project folder and
   its `.fair-witness/`. The login asks the user for what it needs through the `Prompts` trait,
   which the binary implements.
 - `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,
-  `setup/` the questions `setup` asks and `tui/` the ratatui interface. Only `commands/` reads
-  the working directory, once at startup, and passes the `Project` it finds to the rest.
+  `setup/` the questions `setup` asks, `tui/` the ratatui interface and `notifications.rs` the
+  desktop notifications. `run` hands a session's events to the screen and the notifications.
+  Only `commands/` reads the working directory, once at startup, and passes the `Project` it
+  finds to the rest.
 - Only the binary knows about the terminal. The core never depends on ratatui, crossterm,
   dialoguer or notify-rust (`cargo tree -p fair-witness-core` shows none of them) and never
   prompts or prints, so the review logic can run without the interface.

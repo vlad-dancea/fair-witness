@@ -123,10 +123,7 @@ impl DebugLog {
 
     pub fn add(&mut self, trace: Trace) {
         match trace {
-            Trace::Sent {
-                role: "system",
-                text,
-            } => self.push(Entry::Instructions {
+            Trace::Sent { role, text } if role == "system" => self.push(Entry::Instructions {
                 text,
                 tools: Vec::new(),
             }),
@@ -654,11 +651,11 @@ mod tests {
     fn prompts() -> DebugLog {
         let mut log = DebugLog::default();
         log.add(Trace::Sent {
-            role: "system",
+            role: "system".to_string(),
             text: "Be careful.\nBe brief.".to_string(),
         });
         log.add(Trace::Sent {
-            role: "user",
+            role: "user".to_string(),
             text: "The DMP:\n```json\n{\n}\n```\nChanged: a.csv".to_string(),
         });
         log

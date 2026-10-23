@@ -5,4 +5,5 @@ pub mod auth;
 pub mod damap;
 pub mod project;
 pub mod review;
+pub mod session;
 pub mod watcher;

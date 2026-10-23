@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result, bail};
@@ -6,30 +5,31 @@ use genai::Client;
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ReasoningEffort, Tool, ToolChoice, ToolResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::openai_compatible;
+use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
 use crate::project::{AiConfig, Effort};
-use crate::watcher::Change;
 
 const MAX_TURNS: usize = 12;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
     pub contradicts: bool,
     pub dmp_field: Option<String>,
     pub explanation: String,
 }
 
-/// One step of a review, for the debug pane.
-#[derive(Debug, Clone)]
+/// What happened in a review, for the debug pane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Trace {
     /// A message added to the conversation by us.
     Sent {
-        role: &'static str,
+        role: String,
         text: String,
     },
     /// The conversation so far goes to the model.
@@ -59,7 +59,7 @@ pub struct Reviewer {
     choice: Mutex<ModelChoice>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
     pub model: String,
     pub effort: Option<Effort>,
@@ -89,13 +89,11 @@ impl Reviewer {
 
     pub async fn review(
         &self,
-        root: &Path,
-        dmp: &str,
-        changes: &[Change],
+        input: &Input<'_>,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
-        let tools = Tools::new(root)?;
-        let prompt = prompt::user_message(dmp, changes);
+        let tools = Tools::new(input.root)?;
+        let prompt = prompt::user_message(input.dmp, input.changes, input.found);
         let choice = self.choice();
         let mut definitions = Tools::definitions();
         definitions.push(verdict_tool());
@@ -104,11 +102,11 @@ impl Reviewer {
             .map(|tool| tool.name.to_string())
             .collect();
         trace(Trace::Sent {
-            role: "system",
+            role: "system".to_string(),
             text: SYSTEM_PROMPT.to_string(),
         });
         trace(Trace::Sent {
-            role: "user",
+            role: "user".to_string(),
             text: prompt.clone(),
         });
         let mut request = ChatRequest::new(vec![ChatMessage::user(prompt)])
@@ -155,7 +153,7 @@ impl Reviewer {
             if calls.is_empty() {
                 let nudge = "Please finish by calling report_verdict.";
                 trace(Trace::Sent {
-                    role: "user",
+                    role: "user".to_string(),
                     text: nudge.to_string(),
                 });
                 request = request.append_message(ChatMessage::user(nudge));
@@ -180,6 +178,16 @@ impl Reviewer {
             }
         }
         bail!("the model gave no verdict after {MAX_TURNS} replies")
+    }
+}
+
+impl Step for Reviewer {
+    fn check<'a>(
+        &'a self,
+        input: &'a Input<'a>,
+        trace: &'a (dyn Fn(Trace) + Sync),
+    ) -> StepFuture<'a> {
+        Box::pin(async move { Ok(Outcome::Decided(self.review(input, trace).await?)) })
     }
 }
 
@@ -220,28 +228,16 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::review::fake_model::fake_model;
+    use crate::review::fake_model::{fake_model, tool_call};
+    use crate::watcher::Change;
 
-    fn tool_call(name: &str, arguments: Value) -> Value {
-        json!({
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "model": "test",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": format!("call_{name}"),
-                        "type": "function",
-                        "function": { "name": name, "arguments": arguments.to_string() }
-                    }]
-                }
-            }],
-            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
-        })
+    fn input<'a>(root: &'a std::path::Path, dmp: &'a str, changes: &'a [Change]) -> Input<'a> {
+        Input {
+            root,
+            dmp,
+            changes,
+            found: &[],
+        }
     }
 
     fn reviewer(url: String) -> Reviewer {
@@ -276,9 +272,11 @@ mod tests {
         let traces = Mutex::new(Vec::new());
         let verdict = reviewer
             .review(
-                root.path(),
-                r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
-                &[Change::Created("data/patients.csv".into())],
+                &input(
+                    root.path(),
+                    r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
+                    &[Change::Created("data/patients.csv".into())],
+                ),
                 &|trace| traces.lock().unwrap().push(trace),
             )
             .await
@@ -339,7 +337,7 @@ mod tests {
             .collect();
 
         reviewer(endpoint)
-            .review(root.path(), "{}", &changes, &|_| {})
+            .review(&input(root.path(), "{}", &changes), &|_| {})
             .await
             .unwrap();
 
