@@ -3,7 +3,7 @@ use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::project::{AiConfig, Project};
 use fair_witness_core::review;
-use reqwest::blocking::Client;
+use reqwest::Client;
 
 use super::damap::{http_client, web_url};
 
@@ -32,7 +32,7 @@ pub struct ModelArgs {
     pub model: Option<String>,
 }
 
-pub fn setup(project: &Project, args: ModelArgs) -> Result<()> {
+pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     let mut config = project.config()?.context("this folder is not set up yet")?;
     let http = http_client()?;
     let previous = config.ai.take();
@@ -41,15 +41,18 @@ pub fn setup(project: &Project, args: ModelArgs) -> Result<()> {
         Some(url) => {
             let url = web_url(&url)?;
             let api_key = args.api_key.or(saved_key);
-            let models = review::list_models(&http, &url, api_key.as_deref())?;
+            let models = review::list_models(&http, &url, api_key.as_deref()).await?;
             (url, api_key, models)
         }
-        None => ask_for_api(
-            &http,
-            previous.as_ref().map(|ai| ai.url.clone()),
-            args.api_key,
-            saved_key,
-        )?,
+        None => {
+            ask_for_api(
+                &http,
+                previous.as_ref().map(|ai| ai.url.clone()),
+                args.api_key,
+                saved_key,
+            )
+            .await?
+        }
     };
     let effort = previous.as_ref().and_then(|ai| ai.effort);
     let model = choose_model(&url, models, args.model, previous.map(|ai| ai.model))?;
@@ -62,7 +65,7 @@ pub fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     project.save_config(&config)
 }
 
-fn ask_for_api(
+async fn ask_for_api(
     http: &Client,
     previous: Option<String>,
     given_key: Option<String>,
@@ -97,7 +100,7 @@ fn ask_for_api(
                     .or_else(|| saved_key.clone())
             }
         };
-        match review::list_models(http, &url, api_key.as_deref()) {
+        match review::list_models(http, &url, api_key.as_deref()).await {
             Ok(models) => return Ok((url, api_key, models)),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }

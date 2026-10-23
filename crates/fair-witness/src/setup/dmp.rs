@@ -3,11 +3,11 @@ use dialoguer::FuzzySelect;
 use fair_witness_core::damap::{Damap, DmpListItem};
 use fair_witness_core::project::Project;
 
-pub fn choose(project: &Project, damap: &Damap) -> Result<()> {
+pub async fn choose(project: &Project, damap: &Damap) -> Result<()> {
     let mut config = project
         .config()?
         .context("logging in did not save the config")?;
-    let dmps = damap.list_dmps()?;
+    let dmps = damap.list_dmps().await?;
     if dmps.is_empty() {
         println!(
             "Logged in. You have no DMPs yet; create one at {}, then run `fair-witness setup` again.",

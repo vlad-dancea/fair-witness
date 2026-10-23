@@ -2,10 +2,14 @@ use anyhow::{Context, Result, bail};
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ServiceTarget};
-use reqwest::blocking::Client as HttpClient;
+use reqwest::Client as HttpClient;
 use serde::Deserialize;
 
-pub fn list_models(http: &HttpClient, url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+pub async fn list_models(
+    http: &HttpClient,
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct Models {
         data: Vec<Model>,
@@ -22,6 +26,7 @@ pub fn list_models(http: &HttpClient, url: &str, api_key: Option<&str>) -> Resul
     }
     let response = request
         .send()
+        .await
         .with_context(|| format!("could not reach {url}"))?;
     let status = response.status();
     if !status.is_success() {
@@ -29,6 +34,7 @@ pub fn list_models(http: &HttpClient, url: &str, api_key: Option<&str>) -> Resul
     }
     let models: Models = response
         .json()
+        .await
         .with_context(|| format!("{url} does not look like an OpenAI-compatible API"))?;
     let mut ids: Vec<String> = models.data.into_iter().map(|model| model.id).collect();
     ids.sort();
@@ -60,8 +66,8 @@ mod tests {
     use super::*;
     use crate::review::fake_model::fake_model;
 
-    #[test]
-    fn lists_the_models_a_server_offers() {
+    #[tokio::test]
+    async fn lists_the_models_a_server_offers() {
         let (url, server) = fake_model(vec![json!({
             "object": "list",
             "data": [
@@ -70,7 +76,9 @@ mod tests {
             ]
         })]);
 
-        let models = list_models(&HttpClient::new(), &format!("{url}/"), Some("sk-test")).unwrap();
+        let models = list_models(&HttpClient::new(), &format!("{url}/"), Some("sk-test"))
+            .await
+            .unwrap();
 
         assert_eq!(models, ["llama3.2", "qwen3:8b"]);
         let (head, _) = &server.join().unwrap()[0];

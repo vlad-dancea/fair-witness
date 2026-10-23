@@ -1,6 +1,4 @@
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
 
 use anyhow::{Context, Result};
 use fair_witness_core::project::{Effort, Project};
@@ -13,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
 };
+use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
 
 use crate::setup::damap::http_client;
 
@@ -84,12 +83,14 @@ pub struct ModelPanel {
 
 impl ModelPanel {
     pub fn open(settings: &ModelSettings) -> Self {
-        let (sender, models) = mpsc::channel();
+        let (sender, models) = oneshot::channel();
         let url = settings.url.clone();
         let api_key = settings.api_key.clone();
-        thread::spawn(move || {
-            let listed =
-                http_client().and_then(|http| review::list_models(&http, &url, api_key.as_deref()));
+        tokio::spawn(async move {
+            let listed = match http_client() {
+                Ok(http) => review::list_models(&http, &url, api_key.as_deref()).await,
+                Err(e) => Err(e),
+            };
             let _ = sender.send(listed);
         });
         let current = settings.reviewer.choice();
@@ -174,14 +175,14 @@ impl ModelPanel {
     }
 
     fn poll(&mut self) {
-        let Models::Loading(receiver) = &self.models else {
+        let Models::Loading(receiver) = &mut self.models else {
             return;
         };
         self.models = match receiver.try_recv() {
             Ok(Ok(models)) => Models::Loaded(models),
             Ok(Err(e)) => Models::Failed(format!("{e:#}")),
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Models::Failed("could not list the models".into()),
+            Err(TryRecvError::Closed) => Models::Failed("could not list the models".into()),
         };
         self.refilter();
     }

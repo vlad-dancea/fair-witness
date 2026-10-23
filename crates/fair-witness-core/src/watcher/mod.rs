@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -14,6 +13,8 @@ use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, Recursi
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use filter::Filter;
 pub use summary::{Listed, summarize};
@@ -21,12 +22,34 @@ pub use summary::{Listed, summarize};
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A change in the watched folder, with paths relative to its root.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Change {
-    Created(PathBuf),
-    Changed(PathBuf),
-    Renamed { from: PathBuf, to: PathBuf },
-    Deleted(PathBuf),
+    Created(#[serde(with = "lossy")] PathBuf),
+    Changed(#[serde(with = "lossy")] PathBuf),
+    Renamed {
+        #[serde(with = "lossy")]
+        from: PathBuf,
+        #[serde(with = "lossy")]
+        to: PathBuf,
+    },
+    Deleted(#[serde(with = "lossy")] PathBuf),
+}
+
+/// Writes a path that is not valid UTF-8 with replacement characters, as the screen shows it,
+/// so that every change can be serialized.
+mod lossy {
+    use std::path::{Path, PathBuf};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&path.to_string_lossy())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        PathBuf::deserialize(deserializer)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,7 +108,7 @@ impl Change {
 
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
-    events: Receiver<DebounceEventResult>,
+    events: UnboundedReceiver<DebounceEventResult>,
     root: PathBuf,
     known: BTreeSet<PathBuf>,
     filter: Filter,
@@ -94,8 +117,10 @@ pub struct FolderWatcher {
 impl FolderWatcher {
     pub fn new(root: &Path) -> Result<Self> {
         let filter = Filter::new(root)?;
-        let (tx, events) = mpsc::channel();
-        let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, tx)?;
+        let (tx, events) = mpsc::unbounded_channel();
+        let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, move |result| {
+            let _ = tx.send(result);
+        })?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
         walk(root, &filter, &mut |path| {
@@ -212,13 +237,10 @@ impl FolderWatcher {
         }
         subtree
     }
-}
 
-impl Iterator for FolderWatcher {
-    type Item = Result<Vec<Change>, Vec<notify::Error>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self.events.recv().ok()?;
+    /// The next batch of changes, once the folder has been quiet for a moment.
+    pub async fn next(&mut self) -> Option<Result<Vec<Change>, Vec<notify::Error>>> {
+        let result = self.events.recv().await?;
         Some(self.handle(result))
     }
 }
@@ -249,10 +271,10 @@ mod tests {
 
     const QUIET: Duration = Duration::from_secs(4);
 
-    fn drain(watcher: &mut FolderWatcher) -> Vec<Change> {
+    async fn drain(watcher: &mut FolderWatcher) -> Vec<Change> {
         let mut changes = Vec::new();
-        while let Ok(result) = watcher.events.recv_timeout(QUIET) {
-            changes.extend(watcher.handle(result).expect("watching failed"));
+        while let Ok(Some(batch)) = tokio::time::timeout(QUIET, watcher.next()).await {
+            changes.extend(batch.expect("watching failed"));
         }
         changes
     }
@@ -281,8 +303,8 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    #[test]
-    fn skips_a_commit_in_a_git_repository() {
+    #[tokio::test]
+    async fn skips_a_commit_in_a_git_repository() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::write(root.join("notes.txt"), "a").unwrap();
@@ -294,13 +316,13 @@ mod tests {
         fs::write(root.join("results.csv"), "x").unwrap();
 
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Created(PathBuf::from("results.csv"))]
         );
     }
 
-    #[test]
-    fn skips_folders_tools_fill_and_files_the_researcher_ignores() {
+    #[tokio::test]
+    async fn skips_folders_tools_fill_and_files_the_researcher_ignores() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::create_dir(root.join(".fair-witness")).unwrap();
@@ -324,13 +346,13 @@ mod tests {
         }
 
         assert_eq!(
-            created(&drain(&mut watcher)),
+            created(&drain(&mut watcher).await),
             ["analysis", "data", "data/a.csv"].map(PathBuf::from),
         );
     }
 
-    #[test]
-    fn reports_a_file_moved_into_an_ignored_folder_as_deleted() {
+    #[tokio::test]
+    async fn reports_a_file_moved_into_an_ignored_folder_as_deleted() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::create_dir(root.join("data")).unwrap();
@@ -341,13 +363,13 @@ mod tests {
         fs::rename(root.join("data/a.csv"), root.join("node_modules/a.csv")).unwrap();
 
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Deleted(PathBuf::from("data/a.csv"))]
         );
     }
 
-    #[test]
-    fn reports_a_file_moved_out_of_the_project_as_deleted() {
+    #[tokio::test]
+    async fn reports_a_file_moved_out_of_the_project_as_deleted() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         let outside = tempfile::tempdir().unwrap();
@@ -365,8 +387,8 @@ mod tests {
         assert_eq!(changes, [Change::Deleted(PathBuf::from("a.csv"))]);
     }
 
-    #[test]
-    fn stops_watching_files_a_renamed_folder_brings_under_a_rule() {
+    #[tokio::test]
+    async fn stops_watching_files_a_renamed_folder_brings_under_a_rule() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::create_dir(root.join(".fair-witness")).unwrap();
@@ -378,7 +400,7 @@ mod tests {
 
         fs::rename(root.join("data"), root.join("archive")).unwrap();
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Renamed {
                 from: PathBuf::from("data"),
                 to: PathBuf::from("archive"),
@@ -388,13 +410,13 @@ mod tests {
         fs::write(root.join("archive/notes.txt"), "b").unwrap();
 
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Changed(PathBuf::from("archive/notes.txt"))]
         );
     }
 
-    #[test]
-    fn reports_files_written_into_a_new_folder_once_each() {
+    #[tokio::test]
+    async fn reports_files_written_into_a_new_folder_once_each() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         let mut watcher = FolderWatcher::new(root).unwrap();
@@ -404,13 +426,13 @@ mod tests {
         fs::write(root.join("data/raw/b.csv"), "b").unwrap();
 
         assert_eq!(
-            created(&drain(&mut watcher)),
+            created(&drain(&mut watcher).await),
             ["data", "data/a.csv", "data/raw", "data/raw/b.csv"].map(PathBuf::from),
         );
     }
 
-    #[test]
-    fn reports_a_folder_moved_in_from_outside_with_its_contents() {
+    #[tokio::test]
+    async fn reports_a_folder_moved_in_from_outside_with_its_contents() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::create_dir(outside.path().join("survey")).unwrap();
@@ -421,13 +443,13 @@ mod tests {
         fs::rename(outside.path().join("survey"), root.join("survey")).unwrap();
 
         assert_eq!(
-            created(&drain(&mut watcher)),
+            created(&drain(&mut watcher).await),
             ["survey", "survey/answers.csv"].map(PathBuf::from),
         );
     }
 
-    #[test]
-    fn reports_a_renamed_folder_as_one_rename() {
+    #[tokio::test]
+    async fn reports_a_renamed_folder_as_one_rename() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::create_dir(root.join("data")).unwrap();
@@ -437,7 +459,7 @@ mod tests {
         fs::rename(root.join("data"), root.join("dataset")).unwrap();
 
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Renamed {
                 from: PathBuf::from("data"),
                 to: PathBuf::from("dataset"),
@@ -445,8 +467,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reports_a_deleted_folder() {
+    #[tokio::test]
+    async fn reports_a_deleted_folder() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::create_dir(root.join("data")).unwrap();
@@ -455,7 +477,7 @@ mod tests {
 
         fs::remove_dir_all(root.join("data")).unwrap();
 
-        let changes = drain(&mut watcher);
+        let changes = drain(&mut watcher).await;
         assert!(
             changes.contains(&Change::Deleted(PathBuf::from("data"))),
             "{changes:?}"
@@ -463,8 +485,25 @@ mod tests {
         assert!(created(&changes).is_empty(), "{changes:?}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn reports_an_edited_file_as_changed() {
+    fn serializes_a_path_that_is_not_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let change = Change::Renamed {
+            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa.csv")),
+            to: PathBuf::from("data/a.csv"),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            serde_json::json!({ "renamed": { "from": "data/\u{fffd}a.csv", "to": "data/a.csv" } })
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_an_edited_file_as_changed() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         fs::write(root.join("notes.txt"), "a").unwrap();
@@ -473,7 +512,7 @@ mod tests {
         fs::write(root.join("notes.txt"), "b").unwrap();
 
         assert_eq!(
-            drain(&mut watcher),
+            drain(&mut watcher).await,
             [Change::Changed(PathBuf::from("notes.txt"))]
         );
     }

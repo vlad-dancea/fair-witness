@@ -2,10 +2,33 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The head and the JSON body of a request the fake model received.
 pub type Request = (String, Value);
+
+/// A reply in which the model calls the tool `name` with `arguments`.
+pub fn tool_call(name: &str, arguments: Value) -> Value {
+    json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": format!("call_{name}"),
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments.to_string() }
+                }]
+            }
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+    })
+}
 
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
 /// requests it got once all replies are sent.

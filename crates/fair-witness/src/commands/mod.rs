@@ -6,11 +6,9 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fair_witness_core::project::Project;
+use fair_witness_core::project::{NOT_SET_UP, Project};
 
 use crate::setup::model;
-
-pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 
 #[derive(Parser)]
 #[command(
@@ -47,15 +45,15 @@ enum Command {
     Logout,
 }
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let command = Cli::parse().command;
     let here = env::current_dir().context("could not determine the current directory")?;
     let project = Project::find(&here);
     match command {
         Command::Setup { url, model } => {
-            setup::run(project.as_ref(), Project::new(here), url, model)
+            setup::run(project.as_ref(), Project::new(here), url, model).await
         }
-        Command::Run { dmp } => run::run(&project.context(NOT_SET_UP)?, dmp),
+        Command::Run { dmp } => run::run(&project.context(NOT_SET_UP)?, dmp).await,
         Command::Logout => logout::run(project.as_ref()),
     }
 }

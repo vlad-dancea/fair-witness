@@ -13,8 +13,9 @@ Use list_dir and read_file to look at the changed files when their names alone
 do not settle it. Be frugal: read only what you need. Then call report_verdict
 exactly once. Only report a contradiction you can point to in the DMP.";
 
-/// The first message of a review: the DMP and what changed in the folder.
-pub fn user_message(dmp: &str, changes: &[Change]) -> String {
+/// The first message of a review: the DMP, what changed in the folder and what earlier steps of
+/// the review found.
+pub fn user_message(dmp: &str, changes: &[Change], found: &[String]) -> String {
     let listed = watcher::summarize(changes);
     let lines: Vec<String> = listed
         .iter()
@@ -32,6 +33,12 @@ pub fn user_message(dmp: &str, changes: &[Change]) -> String {
             "\n\nThere were too many changes to name each path. list_dir shows the \
              paths that still exist; deleted ones are gone.",
         );
+    }
+    if !found.is_empty() {
+        prompt.push_str("\n\nEarlier checks found:");
+        for finding in found {
+            prompt.push_str(&format!("\n- {finding}"));
+        }
     }
     prompt
 }

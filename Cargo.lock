@@ -679,6 +679,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix",
@@ -999,8 +1000,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "dialoguer",
  "fair-witness-core",
+ "futures",
  "jiff",
  "notify-rust",
  "open",
@@ -1008,6 +1011,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "unicode-width",
 ]
 
@@ -2835,7 +2839,6 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
