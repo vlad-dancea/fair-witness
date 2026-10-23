@@ -24,10 +24,13 @@ lists by name live next to the code. Leave them alone and never commit them.
   a full-screen terminal interface. Neither works without a terminal, so prove behavior with
   tests and say which parts you could not run. Trying them against a real AI model needs the
   maintainer's API key, so ask.
-- Stop only processes you started, by the PID you captured. Never `pkill -f` a pattern that
-  also appears in your own command line, because it kills your own shell.
+- Stop only processes you started, by the PID you captured. `pkill -f` and `pgrep -f` match
+  your own shell too, because the pattern is in its command line, so a `pkill -f` or a `kill`
+  loop over `pgrep -f` kills the shell running it. If you must match by pattern, bracket one
+  letter, as in `pgrep -f '[f]air-witness run'`.
 - Keep scratch files, test folders and plans outside the repository, in a `mktemp -d`
-  directory, and remove them afterwards.
+  directory under `/tmp`, and leave it there. `/tmp` empties on reboot, and Codex rejects any
+  command containing `rm -rf` or `rm -f`, including a cleanup `trap`.
 
 ## Automated workflows
 
