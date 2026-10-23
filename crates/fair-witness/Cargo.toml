@@ -25,3 +25,4 @@ unicode-width = "0.2.2"
 [dev-dependencies]
 fair-witness-core = { path = "../fair-witness-core", features = ["testing"] }
 insta = { version = "1.49.0", features = ["filters"] }
+tempfile = "3.27.0"

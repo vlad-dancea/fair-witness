@@ -84,8 +84,11 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP, refreshed on every `run`.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
+- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort and the token counts.
 
-A `.gitignore` inside it keeps `credentials.toml` and `madmp.json` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
+The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
+
+A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json` and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ### What is ignored
 
@@ -186,7 +189,7 @@ Press `d` to open the **debug pane** next to the change list. It shows each revi
 - `c` collapses or expands long blocks, such as the DMP JSON.
 - `d` hides the pane again.
 
-This is the place to look when a verdict seems wrong.
+This is the place to look when a verdict seems wrong. The log in `.fair-witness/log/` holds the same steps, so a review can still be read after `run` quits.
 
 ### 5. Switch the model
 

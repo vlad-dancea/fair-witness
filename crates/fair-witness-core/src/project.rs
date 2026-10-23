@@ -1,8 +1,9 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const DIR_NAME: &str = ".fair-witness";
@@ -11,6 +12,7 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
+const LOG_DIR: &str = "log";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
 # Use ! to check a path again, including paths fair-witness skips on its own.
@@ -65,6 +67,13 @@ impl Effort {
             Effort::High => "high",
         }
     }
+}
+
+/// Where a run of `fair-witness run` writes its log, in `.fair-witness/log/`.
+#[derive(Debug)]
+pub struct RunLog {
+    /// Every event of the run, as a line of JSON.
+    pub events: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -131,6 +140,19 @@ impl Project {
         fs::write(&path, json).with_context(|| format!("could not write {}", path.display()))
     }
 
+    /// Names the log of a run that starts now and creates its folder.
+    pub fn run_log(&self) -> Result<RunLog> {
+        let dir = self.ensure_dir()?;
+        // Folders set up before there was a log have a .gitignore that does not list it.
+        write_gitignore(&dir)?;
+        let dir = dir.join(LOG_DIR);
+        fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+        let started = Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S%.3fZ");
+        Ok(RunLog {
+            events: dir.join(format!("{started}-events.jsonl")),
+        })
+    }
+
     fn dir(&self) -> PathBuf {
         self.root.join(DIR_NAME)
     }
@@ -160,8 +182,11 @@ fn write_ignore(dir: &Path) -> Result<()> {
 
 fn write_gitignore(dir: &Path) -> Result<()> {
     let path = dir.join(".gitignore");
-    fs::write(&path, format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n"))
-        .with_context(|| format!("could not write {}", path.display()))
+    fs::write(
+        &path,
+        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{LOG_DIR}/\n"),
+    )
+    .with_context(|| format!("could not write {}", path.display()))
 }
 
 fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -175,16 +200,32 @@ fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(Some(value))
 }
 
-fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
+/// Creates a file at `path` that only the user can read, failing if one is there.
+pub fn create_private(path: &Path) -> Result<File> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
+    only_for_the_user(&mut options);
+    options
+        .open(path)
+        .with_context(|| format!("could not create {}", path.display()))
+}
+
+fn only_for_the_user(options: &mut fs::OpenOptions) {
     #[cfg(unix)]
-    if private {
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     #[cfg(not(unix))]
-    let _ = private;
+    let _ = options;
+}
+
+fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    if private {
+        only_for_the_user(&mut options);
+    }
 
     let mut file = options
         .open(path)
@@ -276,7 +317,7 @@ mod tests {
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(root.path().join(".fair-witness/.gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\n"
+            "credentials.toml\nmadmp.json\nlog/\n"
         );
         #[cfg(unix)]
         {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self as terminal, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use fair_witness_core::review::ModelChoice;
-use fair_witness_core::session::Event;
+use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::{self, Kind, Listed};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -28,7 +28,7 @@ const RESULT_ARROW: &str = " ↳ ";
 const IN_LINE_GREEN: Color = Color::Rgb(0x6c, 0xc6, 0x44);
 
 pub enum Update {
-    Session(Event),
+    Session(Record),
     NotifyFailed(String),
 }
 
@@ -270,11 +270,17 @@ impl Screen {
     }
 
     fn apply(&mut self, update: Update) {
-        if let Update::Session(Event::Verdict { .. } | Event::ReviewFailed { .. }) = update {
-            self.reviewing_since = None;
-        }
-        match update {
-            Update::Session(Event::Changes { set, changes }) => {
+        let record = match update {
+            Update::Session(record) => record,
+            Update::NotifyFailed(e) => {
+                let failed = format!("  could not show a notification: {e}");
+                self.log.push(Line::from(failed.yellow()).into());
+                return;
+            }
+        };
+        self.debug.add(&record);
+        match record.event {
+            Event::Changes { set, changes } => {
                 for listed in watcher::summarize(&changes) {
                     self.log.push(LogLine {
                         line: change_line(&listed),
@@ -283,12 +289,10 @@ impl Screen {
                     });
                 }
             }
-            Update::Session(Event::Reviewing { set }) => {
-                self.reviewing_since = Some(Instant::now());
-                self.debug.review_started(set);
-            }
-            Update::Session(Event::Trace { trace, .. }) => self.debug.add(trace),
-            Update::Session(Event::Verdict { verdict, .. }) if verdict.contradicts => {
+            Event::Reviewing { .. } => self.reviewing_since = Some(Instant::now()),
+            Event::Trace { .. } => {}
+            Event::Verdict { verdict, .. } if verdict.contradicts => {
+                self.reviewing_since = None;
                 let field = verdict
                     .dmp_field
                     .map(|field| format!(" ({field})"))
@@ -298,26 +302,25 @@ impl Screen {
                     Span::raw(format!(" {}", verdict.explanation)),
                 ]));
             }
-            Update::Session(Event::Verdict { verdict, .. }) => {
+            Event::Verdict { verdict, .. } => {
+                self.reviewing_since = None;
                 self.log.push(LogLine::verdict(vec![
                     "in line with the DMP:".fg(IN_LINE_GREEN),
                     Span::raw(format!(" {}", verdict.explanation)),
                 ]))
             }
-            Update::Session(Event::ReviewFailed { error, .. }) => {
+            Event::ReviewFailed { error, .. } => {
+                self.reviewing_since = None;
                 self.log.push(LogLine::verdict(vec![
                     format!("review failed: {error}").red(),
                 ]))
             }
-            Update::Session(Event::WatchErrors { errors, .. }) => {
+            Event::WatchErrors { errors, .. } => {
                 for e in errors {
                     self.log
                         .push(Line::from(format!("watch error: {e}").red()).into());
                 }
             }
-            Update::NotifyFailed(e) => self
-                .log
-                .push(Line::from(format!("  could not show a notification: {e}").yellow()).into()),
         }
     }
 
@@ -651,8 +654,9 @@ mod tests {
                 error: "could not reach http://localhost:11434/v1/".to_string(),
             },
         ];
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
         for event in events {
-            screen.apply(Update::Session(event));
+            screen.apply(Update::Session(Record { time, event }));
         }
         screen
     }

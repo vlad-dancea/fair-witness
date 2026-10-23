@@ -1012,6 +1012,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "unicode-width",
 ]
@@ -1023,6 +1024,7 @@ dependencies = [
  "anyhow",
  "genai",
  "ignore",
+ "jiff",
  "notify",
  "notify-debouncer-full",
  "reqwest",
@@ -1031,6 +1033,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]

@@ -152,9 +152,9 @@ disagrees with it.
 ## Code
 
 - `fair-witness-core` holds what runs without a terminal. `session.rs` watches the folder,
-  reviews each change set and reports both as a stream of `Event`s. `review/` runs a review as
-  a sequence of steps in `steps.rs`, each of which decides or hands on to the next. The model is
-  the last step, with the tool loop in `agent.rs`, the system prompt in `prompt.md`, the
+  reviews each change set and reports both as a stream of `Event`s, each stamped with its time
+  and written to the run's log. `review/` runs a review as a sequence of steps in `steps.rs`,
+  each of which decides or hands on to the next. The model is the last step, with the tool loop in `agent.rs`, the system prompt in `prompt.md`, the
   first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's
   tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API client and the
   login to it, `auth.rs` the OIDC login and `project.rs` the project folder and its

@@ -1,11 +1,15 @@
-use std::sync::Arc;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Result;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::project::Project;
+use crate::project::{self, Project};
 use crate::review::{self, Step, Trace, Verdict};
 use crate::watcher::{self, Change, FolderWatcher};
 
@@ -40,11 +44,20 @@ pub enum Event {
     },
 }
 
+/// An event with the time it happened, as the log holds it, one per line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Record {
+    pub time: Timestamp,
+    #[serde(flatten)]
+    pub event: Event,
+}
+
 /// Watches a project folder and, given a DMP, reviews each change set against it.
 pub struct Session {
     project: Project,
     debounce: Duration,
     review: Option<Review>,
+    log: Option<PathBuf>,
 }
 
 struct Review {
@@ -59,6 +72,7 @@ impl Session {
             project,
             debounce: watcher::DEBOUNCE,
             review: None,
+            log: None,
         }
     }
 
@@ -75,21 +89,38 @@ impl Session {
         }
     }
 
+    /// Also writes every event to a new file at `path`, as a line of JSON.
+    pub fn logging_to(self, path: PathBuf) -> Self {
+        Self {
+            log: Some(path),
+            ..self
+        }
+    }
+
     /// Starts watching. The session runs until the receiver is dropped, and drops the review
     /// in progress then.
-    pub fn start(self) -> Result<UnboundedReceiver<Event>> {
+    pub fn start(self) -> Result<UnboundedReceiver<Record>> {
         let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
-        let (events, received) = mpsc::unbounded_channel();
+        let log = self
+            .log
+            .as_deref()
+            .map(project::create_private)
+            .transpose()?;
+        let (sender, received) = mpsc::unbounded_channel();
+        let events = Events {
+            sender,
+            log: Mutex::new(log),
+        };
         tokio::spawn(async move {
             tokio::select! {
                 () = self.watch(watcher, &events) => {}
-                () = events.closed() => {}
+                () = events.sender.closed() => {}
             }
         });
         Ok(received)
     }
 
-    async fn watch(&self, mut watcher: FolderWatcher, events: &UnboundedSender<Event>) {
+    async fn watch(&self, mut watcher: FolderWatcher, events: &Events) {
         let mut set = 0;
         while let Some(batch) = watcher.next().await {
             let changes = match batch {
@@ -97,17 +128,17 @@ impl Session {
                 Ok(changes) => changes,
                 Err(errors) => {
                     let errors = errors.iter().map(ToString::to_string).collect();
-                    let _ = events.send(Event::WatchErrors { set, errors });
+                    events.send(Event::WatchErrors { set, errors });
                     continue;
                 }
             };
             set += 1;
-            let _ = events.send(Event::Changes {
+            events.send(Event::Changes {
                 set,
                 changes: changes.clone(),
             });
             if let Some(review) = &self.review {
-                let _ = events.send(self.review(review, set, &changes, events).await);
+                events.send(self.review(review, set, &changes, events).await);
             }
         }
     }
@@ -119,12 +150,10 @@ impl Session {
         review: &Review,
         set: usize,
         changes: &[Change],
-        events: &UnboundedSender<Event>,
+        events: &Events,
     ) -> Event {
-        let _ = events.send(Event::Reviewing { set });
-        let trace = |trace| {
-            let _ = events.send(Event::Trace { set, trace });
-        };
+        events.send(Event::Reviewing { set });
+        let trace = |trace| events.send(Event::Trace { set, trace });
         let root = self.project.root();
         match review::review(&review.steps, root, &review.dmp, changes, &trace).await {
             Ok(verdict) => Event::Verdict { set, verdict },
@@ -133,6 +162,36 @@ impl Session {
                 error: format!("{e:#}"),
             },
         }
+    }
+}
+
+/// Stamps each event with the time, logs it and passes it on.
+struct Events {
+    sender: UnboundedSender<Record>,
+    log: Mutex<Option<File>>,
+}
+
+impl Events {
+    fn send(&self, event: Event) {
+        let record = Record {
+            time: Timestamp::now(),
+            event,
+        };
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(file) = log.as_mut() {
+            let written = serde_json::to_vec(&record)
+                .map_err(std::io::Error::from)
+                .and_then(|mut line| {
+                    line.push(b'\n');
+                    file.write_all(&line)
+                });
+            // A gap in the middle of the log would read as events that never happened.
+            if let Err(e) = written {
+                tracing::error!("stopped writing the event log: {e}");
+                *log = None;
+            }
+        }
+        let _ = self.sender.send(record);
     }
 }
 
@@ -150,14 +209,17 @@ mod tests {
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(10);
 
-    async fn until_decided(events: &mut UnboundedReceiver<Event>) -> Vec<Event> {
+    async fn until_decided(events: &mut UnboundedReceiver<Record>) -> Vec<Record> {
         let mut seen = Vec::new();
         loop {
             let event = tokio::time::timeout(PATIENCE, events.recv())
                 .await
                 .expect("no verdict in time")
                 .expect("the session stopped");
-            let decided = matches!(event, Event::Verdict { .. } | Event::ReviewFailed { .. });
+            let decided = matches!(
+                event.event,
+                Event::Verdict { .. } | Event::ReviewFailed { .. }
+            );
             seen.push(event);
             if decided {
                 return seen;
@@ -186,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reviews_each_change_set_and_numbers_its_events() {
+    async fn reviews_each_change_set_and_logs_its_numbered_events() {
         let root = tempfile::tempdir().unwrap();
         let (endpoint, server) = fake_model(vec![
             tool_call(
@@ -211,9 +273,12 @@ mod tests {
             },
             None,
         );
-        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+        let project = Project::new(root.path().to_path_buf());
+        let log = project.run_log().unwrap().events;
+        let mut events = Session::new(project)
             .debounce(Duration::from_millis(50))
             .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .logging_to(log.clone())
             .start()
             .unwrap();
 
@@ -223,7 +288,9 @@ mod tests {
         seen.extend(until_decided(&mut events).await);
 
         assert_eq!(
-            seen.iter().map(describe).collect::<Vec<_>>(),
+            seen.iter()
+                .map(|record| describe(&record.event))
+                .collect::<Vec<_>>(),
             [
                 r#"#1 changes [Created("notes.txt")]"#,
                 "#1 reviewing",
@@ -246,12 +313,18 @@ mod tests {
             ]
         );
         assert_eq!(server.join().unwrap().len(), 3);
-        for event in &seen {
-            let json = serde_json::to_value(event).unwrap();
-            assert_eq!(&serde_json::from_value::<Event>(json).unwrap(), event);
-        }
+        assert!(seen.is_sorted_by_key(|record| record.time));
+        let logged: Vec<Record> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(logged, seen);
+        let mut first = serde_json::to_value(&seen[0]).unwrap();
+        let time = first.as_object_mut().unwrap().remove("time").unwrap();
+        assert_eq!(time, json!(seen[0].time.to_string()));
         assert_eq!(
-            serde_json::to_value(&seen[0]).unwrap(),
+            first,
             json!({ "event": "changes", "set": 1, "changes": [{ "created": "notes.txt" }] })
         );
     }

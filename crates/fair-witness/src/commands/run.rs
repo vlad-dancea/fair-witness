@@ -16,7 +16,7 @@ pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
     let damap = damap::resume(project, http_client()?, &TerminalPrompts).await?;
 
     let config = project.config()?.context("this folder is not set up yet")?;
-    let mut session = Session::new(project.clone());
+    let mut session = Session::new(project.clone()).logging_to(project.run_log()?.events);
     let (settings, status) = match (dmp.or(config.damap.dmp_id), config.ai) {
         (Some(id), Some(ai)) => {
             let api_key = project.credentials()?.api_key;
@@ -53,12 +53,12 @@ pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
         _ => (None, vec!["Changes are not checked.".to_string()]),
     };
 
-    let mut events = session.start()?;
+    let mut records = session.start()?;
     let (updates, received) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            notifications::show(&event, &updates);
-            if updates.send(Update::Session(event)).is_err() {
+        while let Some(record) = records.recv().await {
+            notifications::show(&record.event, &updates);
+            if updates.send(Update::Session(record)).is_err() {
                 return;
             }
         }
