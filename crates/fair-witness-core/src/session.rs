@@ -183,6 +183,7 @@ impl Events {
         };
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(file) = log.as_mut() {
+            let end = file.metadata().map(|metadata| metadata.len());
             let written = serde_json::to_vec(&record)
                 .map_err(std::io::Error::from)
                 .and_then(|mut line| {
@@ -191,6 +192,11 @@ impl Events {
                 });
             // A gap in the middle of the log would read as events that never happened.
             if let Err(e) = written {
+                // Part of the line may be written, and a log ending in half a line of JSON
+                // could not be read back.
+                if let Ok(end) = end {
+                    let _ = file.set_len(end);
+                }
                 tracing::error!("stopped writing the event log: {e}");
                 *log = None;
                 let _ = self.sender.send(record);
