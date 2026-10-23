@@ -9,6 +9,9 @@ use tracing_subscriber::EnvFilter;
 /// Sets which diagnostics are written, with the syntax of `RUST_LOG`.
 pub const LEVEL_VARIABLE: &str = "FAIR_WITNESS_LOG";
 const DEFAULT_LEVEL: &str = "info";
+/// The watcher sees the diagnostics file, which is in the watched folder. These crates log
+/// every file event below warn, so writing that line would cause the next, without end.
+const WATCHER_CRATES: [&str; 2] = ["notify", "notify_debouncer_full"];
 
 /// Writes the diagnostics of this process to a new file at `path`, at the level
 /// `FAIR_WITNESS_LOG` sets.
@@ -31,11 +34,15 @@ fn filter(level: Result<String, VarError>) -> Result<EnvFilter> {
         Err(e) => return Err(e).with_context(|| format!("{LEVEL_VARIABLE} is not valid")),
     };
     // The error repeats its message as its source, so only its message is kept.
-    EnvFilter::try_new(&level).map_err(|e| {
+    let mut filter = EnvFilter::try_new(&level).map_err(|e| {
         anyhow!(
             "{LEVEL_VARIABLE}={level} is not a log level ({e}); use one such as `info` or `debug`"
         )
-    })
+    })?;
+    for target in WATCHER_CRATES {
+        filter = filter.add_directive(format!("{target}=warn").parse()?);
+    }
+    Ok(filter)
 }
 
 #[cfg(test)]
@@ -43,17 +50,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_level_and_says_how_to_fix_a_wrong_one() {
+    fn reads_the_level_but_keeps_the_watcher_quiet() {
         let level = |value: &str| filter(Ok(value.to_string())).map(|f| f.to_string());
 
+        let watcher = "notify_debouncer_full=warn,notify=warn";
         assert_eq!(
             filter(Err(VarError::NotPresent)).unwrap().to_string(),
-            "info"
+            format!("{watcher},info")
         );
-        assert_eq!(level(" ").unwrap(), "info");
+        assert_eq!(level(" ").unwrap(), format!("{watcher},info"));
         assert_eq!(
-            level("warn,fair_witness_core=debug").unwrap(),
-            "fair_witness_core=debug,warn"
+            level("trace,notify=trace,fair_witness_core=debug").unwrap(),
+            "notify_debouncer_full=warn,fair_witness_core=debug,notify=warn,trace"
         );
         assert_eq!(
             level("info=loud").unwrap_err().to_string(),
