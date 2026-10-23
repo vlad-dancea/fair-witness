@@ -292,7 +292,15 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let mut command = Command::new("git");
+        // A git hook or `git rebase --exec` running the tests sets variables such as GIT_DIR,
+        // which would point these commands at that repository instead of `dir`.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(name);
+            }
+        }
+        let status = command
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.org"])
             .args(args)
             .current_dir(dir)
