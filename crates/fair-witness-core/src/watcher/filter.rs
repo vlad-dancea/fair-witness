@@ -1,6 +1,9 @@
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::project::{DIR_NAME, IGNORE_FILE};
@@ -25,6 +28,13 @@ const BUILT_IN: &[&str] = &[
     ".DS_Store",
 ];
 
+/// The file that marks a folder as a cache, as the Cache Directory Tagging
+/// Specification (https://bford.info/cachedir/) describes.
+pub const CACHE_TAG: &str = "CACHEDIR.TAG";
+/// A tag only counts when it starts with this, so that a file that happens to
+/// have the name does not hide a folder.
+const CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
 /// Decides which paths in the project folder are not research data.
 pub struct Filter {
     root: PathBuf,
@@ -33,7 +43,8 @@ pub struct Filter {
 
 impl Filter {
     /// Reads the built-in rules, then `.fair-witness/ignore`, which can add
-    /// rules or undo built-in ones with `!`.
+    /// rules or undo built-in ones with `!`, including the one for folders
+    /// tagged as caches.
     pub fn new(root: &Path) -> Result<Self> {
         let mut builder = GitignoreBuilder::new(root);
         for rule in BUILT_IN {
@@ -71,12 +82,39 @@ impl Filter {
         // re-includes the file, which `matched_path_or_any_parents` allows.
         let mut folders: Vec<&Path> = relative.ancestors().skip(1).collect();
         folders.pop();
-        folders
-            .iter()
-            .rev()
-            .any(|folder| self.rules.matched(folder, true).is_ignore())
-            || self.rules.matched(relative, is_dir).is_ignore()
+        folders.iter().rev().any(|folder| self.skips_folder(folder))
+            || if is_dir {
+                self.skips_folder(relative)
+            } else {
+                self.rules.matched(relative, false).is_ignore()
+            }
     }
+
+    fn skips_folder(&self, relative: &Path) -> bool {
+        match self.rules.matched(relative, true) {
+            Match::Ignore(_) => true,
+            Match::Whitelist(_) => false,
+            // Read on every call, because a tool can tag a folder after
+            // creating it, as cargo does with `target/`.
+            Match::None => is_cache(&self.root.join(relative)),
+        }
+    }
+}
+
+fn is_cache(folder: &Path) -> bool {
+    let path = folder.join(CACHE_TAG);
+    // Opening a named pipe waits for a writer, which would stop the watcher.
+    if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(tag) = File::open(path) else {
+        return false;
+    };
+    let mut start = Vec::with_capacity(CACHE_TAG_SIGNATURE.len());
+    tag.take(CACHE_TAG_SIGNATURE.len() as u64)
+        .read_to_end(&mut start)
+        .is_ok()
+        && start == CACHE_TAG_SIGNATURE
 }
 
 #[cfg(test)]
@@ -104,6 +142,45 @@ mod tests {
         assert!(!skipped("venv/answers.csv"));
         assert!(skipped(".fair-witness/credentials.toml"));
         assert!(skipped("scratch/keep.csv"));
+    }
+
+    #[test]
+    fn skips_folders_tagged_as_caches_unless_a_rule_keeps_them() {
+        let (root, filter) = filter("!kept/\n");
+        let filter = filter.unwrap();
+        for (folder, tag) in [
+            (
+                "target",
+                "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n",
+            ),
+            ("kept", "Signature: 8a477f597d28d172789f06886806bc55"),
+            ("notes", "Signature: of the participants, scanned\n"),
+        ] {
+            fs::create_dir(root.path().join(folder)).unwrap();
+            fs::write(root.path().join(folder).join(CACHE_TAG), tag).unwrap();
+        }
+        let skipped = |path: &str, is_dir| filter.skips(&root.path().join(path), is_dir);
+
+        assert!(skipped("target", true));
+        assert!(skipped("target/debug/app", false));
+        assert!(!skipped("kept/model.bin", false));
+        assert!(!skipped("notes", true));
+        assert!(!skipped("notes/CACHEDIR.TAG", false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_open_a_tag_that_is_a_named_pipe() {
+        let (root, filter) = filter("");
+        let filter = filter.unwrap();
+        fs::create_dir(root.path().join("data")).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.path().join("data").join(CACHE_TAG))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(!filter.skips(&root.path().join("data/a.csv"), false));
     }
 
     #[test]
