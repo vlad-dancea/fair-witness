@@ -103,8 +103,9 @@ impl Filter {
 
 fn is_cache(folder: &Path) -> bool {
     let path = folder.join(CACHE_TAG);
-    // Opening a named pipe waits for a writer, which would stop the watcher.
-    if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+    // The specification allows only a regular file, not a link. Opening a
+    // named pipe would also wait for a writer and stop the watcher.
+    if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         return false;
     }
     let Ok(tag) = File::open(path) else {
@@ -170,17 +171,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn does_not_open_a_tag_that_is_a_named_pipe() {
+    fn trusts_only_a_tag_that_is_a_regular_file() {
         let (root, filter) = filter("");
         let filter = filter.unwrap();
-        fs::create_dir(root.path().join("data")).unwrap();
+        let root = root.path();
+        for folder in ["cache", "linked", "piped"] {
+            fs::create_dir(root.join(folder)).unwrap();
+        }
+        fs::write(
+            root.join("cache").join(CACHE_TAG),
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            root.join("cache").join(CACHE_TAG),
+            root.join("linked").join(CACHE_TAG),
+        )
+        .unwrap();
         let status = std::process::Command::new("mkfifo")
-            .arg(root.path().join("data").join(CACHE_TAG))
+            .arg(root.join("piped").join(CACHE_TAG))
             .status()
             .unwrap();
         assert!(status.success());
 
-        assert!(!filter.skips(&root.path().join("data/a.csv"), false));
+        assert!(filter.skips(&root.join("cache/a.csv"), false));
+        assert!(!filter.skips(&root.join("linked/a.csv"), false));
+        assert!(!filter.skips(&root.join("piped/a.csv"), false));
     }
 
     #[test]
