@@ -6,7 +6,7 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fair_witness_core::project::{NOT_SET_UP, Project};
+use fair_witness_core::project::Project;
 
 use crate::setup::model;
 
@@ -34,26 +34,50 @@ enum Command {
         model: model::ModelArgs,
     },
     #[command(about = "Watch this folder for changes")]
-    Run {
-        #[arg(
-            long,
-            help = "Check changes against the DMP with this id instead of the one chosen in `setup`"
-        )]
-        dmp: Option<i64>,
-    },
+    Run(run::Args),
     #[command(about = "Forget the saved login for this folder")]
     Logout,
 }
 
-pub async fn run() -> Result<()> {
+/// Why fair-witness stopped with an error, which decides its exit code.
+pub enum Failure {
+    /// `run` could not start watching, such as in a folder that is not set up.
+    Setup(anyhow::Error),
+    Runtime(anyhow::Error),
+}
+
+impl Failure {
+    /// 2 for a run that never started, as clap exits on bad arguments, so scripts can tell it
+    /// from one that failed while watching.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Failure::Setup(_) => 2,
+            Failure::Runtime(_) => 1,
+        }
+    }
+
+    pub fn error(&self) -> &anyhow::Error {
+        match self {
+            Failure::Setup(e) | Failure::Runtime(e) => e,
+        }
+    }
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(e: anyhow::Error) -> Self {
+        Failure::Runtime(e)
+    }
+}
+
+pub async fn run() -> Result<(), Failure> {
     let command = Cli::parse().command;
     let here = env::current_dir().context("could not determine the current directory")?;
-    let project = Project::find(&here);
     match command {
         Command::Setup { url, model } => {
-            setup::run(project.as_ref(), Project::new(here), url, model).await
+            let project = Project::find(&here);
+            Ok(setup::run(project.as_ref(), Project::new(here), url, model).await?)
         }
-        Command::Run { dmp } => run::run(&project.context(NOT_SET_UP)?, dmp).await,
-        Command::Logout => logout::run(project.as_ref()),
+        Command::Run(args) => run::run(&here, args).await,
+        Command::Logout => Ok(logout::run(Project::find(&here).as_ref())?),
     }
 }

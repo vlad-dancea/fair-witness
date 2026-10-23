@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fair_witness_core::project::{Effort, Project};
 use fair_witness_core::review::{self, ModelChoice, Reviewer};
 use ratatui::Frame;
@@ -33,6 +33,10 @@ impl ModelSettings {
             .ai
             .as_mut()
             .context("no AI model is set up any more")?;
+        // A model of an API given with --ai-url would be saved under the API from `setup`.
+        if ai.url != self.url {
+            bail!("{} is not the API chosen in `fair-witness setup`", self.url);
+        }
         ai.model = choice.model;
         ai.effort = choice.effort;
         self.project.save_config(&config)

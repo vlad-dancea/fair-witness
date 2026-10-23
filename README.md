@@ -82,7 +82,7 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
-- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`.
+- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
 
 A `.gitignore` inside it keeps `credentials.toml` and `madmp.json` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
@@ -194,7 +194,7 @@ Press `m` to change the model without restarting:
 
 - Type to filter the model list, and use `↑↓` to choose.
 - `Tab` switches to the **effort** column (`default`, `none`, `low`, `medium`, `high`) for models that support reasoning effort.
-- `Enter` uses the choice from the next change set on and saves it to `config.toml`. `Esc` cancels.
+- `Enter` uses the choice from the next change set on and saves it to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. `Esc` cancels.
 
 To use a different API or key, quit and run `fair-witness setup`.
 
@@ -222,9 +222,46 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 | `fair-witness setup` | Set up the current folder, or change its DAMAP login, DMP or model |
 | `fair-witness run` | Watch the folder and check changes against the DMP |
 | `fair-witness run --dmp <id>` | Check against another DMP this time only, without changing the saved choice |
+| `fair-witness run --headless` | Print what happens as lines of JSON instead of drawing the screen, see [Running from a script](#running-from-a-script) |
 | `fair-witness logout` | Forget the saved DAMAP login for this folder |
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
+
+If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, not one given with `--dmp`.
+
+### Running from a script
+
+Scripts and agents can run fair-witness without a terminal and without DAMAP. These options of `run` work with or without `--headless`:
+
+| Flag | Environment variable | |
+|---|---|---|
+| `--headless` | | Print each event as one line of JSON on stdout instead of drawing the screen |
+| `--project <dir>` | | Watch this folder instead of the current one |
+| `--dmp-file <path>` | | Check against the maDMP JSON in this file instead of downloading the DMP from DAMAP |
+| `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
+| `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
+| | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000) |
+
+With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:
+
+```sh
+fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json \
+  --ai-url http://localhost:11434/v1 --model qwen3:8b
+```
+
+```
+{"event":"changes","set":1,"changes":[{"created":"data/patients.csv"}]}
+{"event":"reviewing","set":1}
+{"event":"trace","set":1,"trace":{...}}
+{"event":"verdict","set":1,"verdict":{"contradicts":true,"dmp_field":"dataset[0].personal_data","explanation":"..."}}
+```
+
+Each event has the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Messages for people, such as which DMP is used, go to stderr.
+
+`--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up, and with 1 when it fails while watching.
+
+The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved.
 
 ## Troubleshooting
 
