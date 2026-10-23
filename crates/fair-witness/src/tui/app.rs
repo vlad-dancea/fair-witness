@@ -540,6 +540,7 @@ mod tests {
             stop_reason: Some("tool_calls".to_string()),
             tokens_in: Some(1200),
             tokens_out: Some(80),
+            elapsed_ms: 3400,
         };
         let events = [
             Event::Changes {

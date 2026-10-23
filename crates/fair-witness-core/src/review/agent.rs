@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use genai::Client;
@@ -46,6 +47,8 @@ pub enum Trace {
         stop_reason: Option<String>,
         tokens_in: Option<i32>,
         tokens_out: Option<i32>,
+        /// How long the model took to reply.
+        elapsed_ms: u64,
     },
     ToolResult {
         name: String,
@@ -125,6 +128,7 @@ impl Reviewer {
                 choice: choice.clone(),
                 tools: tool_names.clone(),
             });
+            let asked = Instant::now();
             let response = match self
                 .client
                 .exec_chat(&choice.model, request.clone(), Some(&options))
@@ -148,6 +152,7 @@ impl Reviewer {
                 stop_reason: response.stop_reason.as_ref().map(|r| r.raw().to_string()),
                 tokens_in: response.usage.prompt_tokens,
                 tokens_out: response.usage.completion_tokens,
+                elapsed_ms: u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX),
             });
             request = request.append_message(ChatMessage::assistant(response.content));
             if calls.is_empty() {

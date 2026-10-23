@@ -84,7 +84,7 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP, refreshed on every `run`.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
-- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort and the token counts.
+- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took.
 
 The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
 
@@ -183,7 +183,7 @@ What you do about a contradiction is up to you. Either undo the change, or, if t
 
 ### 4. See what the AI did
 
-Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it) and the token counts.
+Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts and how long each reply took.
 
 - `Tab` switches which pane the arrow keys scroll.
 - `c` collapses or expands long blocks, such as the DMP JSON.

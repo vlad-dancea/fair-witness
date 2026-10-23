@@ -49,6 +49,7 @@ struct Reply {
     stop_reason: Option<String>,
     tokens_in: Option<i32>,
     tokens_out: Option<i32>,
+    elapsed_ms: u64,
 }
 
 /// A tool the AI called, with what the tool gave back.
@@ -164,6 +165,7 @@ impl DebugLog {
                 stop_reason,
                 tokens_in,
                 tokens_out,
+                elapsed_ms,
             } => {
                 let reply = Reply {
                     reasoning,
@@ -179,6 +181,7 @@ impl DebugLog {
                     stop_reason,
                     tokens_in,
                     tokens_out,
+                    elapsed_ms,
                 };
                 let waiting = self.this_review().find_map(|entry| match entry {
                     Entry::Turn(waiting) if waiting.number == turn && waiting.reply.is_none() => {
@@ -301,9 +304,10 @@ fn render_turn(turn: &Turn, width: usize, collapsed: bool, lines: &mut Vec<Line<
     };
     let count = |tokens: Option<i32>| tokens.map_or("?".to_string(), |n| n.to_string());
     details.push(format!(
-        "{} in · {} out tokens",
+        "{} in · {} out tokens · {:.1} s",
         count(reply.tokens_in),
-        count(reply.tokens_out)
+        count(reply.tokens_out),
+        reply.elapsed_ms as f64 / 1000.0
     ));
     if let Some(reason) = &reply.stop_reason
         && !USUAL_STOPS.contains(&reason.as_str())
@@ -728,6 +732,7 @@ mod tests {
             stop_reason: Some("tool_calls".to_string()),
             tokens_in: Some(100),
             tokens_out: Some(20),
+            elapsed_ms: 1340,
         };
         log.add_trace(reply(
             1,
@@ -768,13 +773,13 @@ mod tests {
             &lines[1..],
             [
                 "",
-                " AI   turn 1 · qwen3 · 100 in · 20 out tokens",
+                " AI   turn 1 · qwen3 · 100 in · 20 out tokens · 1.3 s",
                 "  Let me look.",
                 "",
                 "  ▸ read_file a.csv",
                 "    │ name,age",
                 "",
-                " AI   turn 2 · qwen3 · 100 in · 20 out tokens",
+                " AI   turn 2 · qwen3 · 100 in · 20 out tokens · 1.3 s",
                 "  Done.",
                 "",
                 "  ╭─ ✗ contradicts the DMP ────────────╮",
@@ -796,6 +801,7 @@ mod tests {
             stop_reason: None,
             tokens_in: None,
             tokens_out: None,
+            elapsed_ms: 0,
         });
         let output: Vec<String> = (1..=10).map(|n| format!("file{n}")).collect();
         log.add_trace(Trace::ToolResult {
