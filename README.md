@@ -236,7 +236,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | Flag | Environment variable | |
 |---|---|---|
 | `--headless` | | Print each event as one line of JSON on stdout instead of drawing the screen |
-| `--project <dir>` | | Watch this folder instead of the current one |
+| `--project <dir>` | | Run in this folder instead of the current one. As there, the project is the nearest folder upwards that is set up, or this folder itself if none is |
 | `--dmp-file <path>` | | Check against the maDMP JSON in this file instead of downloading the DMP from DAMAP |
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
 | `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |

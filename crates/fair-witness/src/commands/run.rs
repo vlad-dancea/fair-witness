@@ -38,7 +38,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "DIR",
-        help = "Watch this folder instead of the current one"
+        help = "Run as if started in this folder instead of the current one"
     )]
     project: Option<PathBuf>,
     #[arg(
