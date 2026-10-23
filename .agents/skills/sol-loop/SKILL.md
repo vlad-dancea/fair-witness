@@ -17,9 +17,16 @@ It needs T3 Code's `delegate_task` tool. Without it, say so and stop.
 2. Call `orchestrator_capabilities`, then `delegate_task` with provider instance `codex`, model
    `gpt-6.1-sol`, option `reasoningEffort: high`, role `review`, interaction mode `plan` (so it
    cannot edit) and mode `async`. End your turn and let its completion wake you.
+   If `delegate_task` fails, or the round ends with a usage limit or `model_unavailable`, do not
+   retry Sol. Run the same round with provider instance `claudeAgent`, the strongest Claude model
+   `orchestrator_capabilities` lists and option `effort: high`, and name the reviewing model in
+   the report. If that fails too, report when the limit resets and stop.
 3. The reviewer sees only your task text, so the brief stands alone:
    - the goal of the change in a few sentences and the worktree path
    - read `AGENTS.md`, then the diff and every new file by path
+   - every path is inside the worktree. A reviewer may not be allowed to read anything outside
+     it, so it runs the three commands from step 1 there itself instead of reading a diff saved
+     under `/tmp`
    - find what is wrong: correctness, data loss, security, leaks of the login or API key, files
      the model may read that it should not, missing tests, broken rules from `AGENTS.md`
    - every finding gives file:line, a concrete failure (this input gives that wrong result) and
