@@ -251,8 +251,12 @@ async fn download_dmp(
     };
     match downloaded.await {
         Ok((name, madmp)) => {
-            if config.dmp_id == Some(id) {
-                project.save_madmp(&config.frontend_url, id, &madmp)?;
+            // The DMP is downloaded, so a copy that cannot be saved only costs the fallback.
+            if config.dmp_id == Some(id)
+                && let Err(e) = project.save_madmp(&config.frontend_url, id, &madmp)
+            {
+                let warning = format!("Warning: could not save a copy of the DMP: {e:#}");
+                status.extend(warning.lines().map(str::to_string));
             }
             Ok(Dmp {
                 json: serde_json::to_string_pretty(&madmp)?,

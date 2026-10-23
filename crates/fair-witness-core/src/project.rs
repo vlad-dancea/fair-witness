@@ -163,9 +163,14 @@ impl Project {
             dmp_id,
             madmp: madmp.clone(),
         };
+        // Written beside the copy and renamed over it, so a failed write keeps the old copy.
         let path = dir.join(MADMP_FILE);
-        fs::write(&path, serde_json::to_string_pretty(&saved)?)
-            .with_context(|| format!("could not write {}", path.display()))
+        let partial = dir.join(format!("{MADMP_FILE}.partial"));
+        if let Err(e) = fs::write(&partial, serde_json::to_string_pretty(&saved)?) {
+            let _ = fs::remove_file(&partial);
+            return Err(e).with_context(|| format!("could not write {}", partial.display()));
+        }
+        fs::rename(&partial, &path).with_context(|| format!("could not write {}", path.display()))
     }
 
     fn dir(&self) -> PathBuf {
@@ -276,6 +281,29 @@ mod tests {
         );
         assert_eq!(project.madmp("https://a.example.org", 4).unwrap(), None);
         assert_eq!(project.madmp("https://b.example.org", 3).unwrap(), None);
+    }
+
+    #[test]
+    fn keeps_the_saved_dmp_when_saving_another_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let url = "https://a.example.org";
+        project
+            .save_madmp(url, 3, &serde_json::json!({ "title": "three" }))
+            .unwrap();
+        // A folder where the new copy is written first makes writing it fail.
+        fs::create_dir(root.path().join(DIR_NAME).join("madmp.json.partial")).unwrap();
+
+        assert!(
+            project
+                .save_madmp(url, 4, &serde_json::json!({ "title": "four" }))
+                .is_err()
+        );
+
+        assert_eq!(
+            project.madmp(url, 3).unwrap().as_deref(),
+            Some("{\n  \"title\": \"three\"\n}")
+        );
     }
 
     #[test]
