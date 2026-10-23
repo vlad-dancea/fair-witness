@@ -2,6 +2,7 @@ mod filter;
 mod summary;
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use notify_debouncer_full::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use filter::Filter;
+use filter::{CACHE_TAG, Filter};
 pub use summary::{Listed, summarize};
 
 /// How long the folder stays quiet before its changes count as one change set, unless a
@@ -165,6 +166,10 @@ impl FolderWatcher {
                 for path in paths {
                     if !self.known.contains(path) {
                         self.discover(path, changes);
+                    } else if self.filter.skips(path, false) {
+                        // Its folder was tagged as a cache since, as in
+                        // `forget`.
+                        self.known.remove(path);
                     } else if path.is_file() {
                         changes.push(Change::Changed(path.clone()));
                     }
@@ -183,7 +188,9 @@ impl FolderWatcher {
     }
 
     fn forget(&mut self, path: &Path, changes: &mut Vec<Change>) {
-        if !self.take_subtree(path).is_empty() {
+        // A folder can be tagged as a cache after the event, too late for the
+        // tag's own event to be in this batch.
+        if !self.take_subtree(path).is_empty() && !self.filter.skips(path, false) {
             changes.push(Change::Deleted(path.to_path_buf()));
         }
     }
@@ -223,9 +230,45 @@ impl FolderWatcher {
     }
 
     fn handle(&mut self, result: DebounceEventResult) -> Result<Vec<Change>, Vec<notify::Error>> {
+        let events = result?;
+        // Opening a tag to read it is an event too, so only writes count, or
+        // every read would cause another.
+        let tagged: Vec<&Path> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::Create(_)
+                        | EventKind::Remove(_)
+                        | EventKind::Modify(
+                            ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Name(_)
+                        )
+                )
+            })
+            .flat_map(|event| &event.paths)
+            .filter(|path| path.file_name() == Some(OsStr::new(CACHE_TAG)))
+            .filter_map(|path| path.parent())
+            .collect();
+        // Cargo creates `target/` before it tags it, so files in a folder can
+        // be known before the folder counts as a cache. Forgetting them before
+        // the events are applied sends every later event there through the
+        // filter. Nothing is reported, because nothing was deleted.
+        for folder in &tagged {
+            if self.filter.skips(folder, true) {
+                self.take_subtree(folder);
+            }
+        }
         let mut changes = Vec::new();
-        for event in &result? {
+        for event in &events {
             self.apply(event, &mut changes);
+        }
+        // A folder whose tag is gone or lost its signature holds files that
+        // were never reported, so they count as created, like the files of a
+        // folder that appears.
+        for folder in &tagged {
+            if !self.filter.skips(folder, true) {
+                self.discover(folder, &mut changes);
+            }
         }
         Ok(changes
             .into_iter()
@@ -375,6 +418,109 @@ mod tests {
         assert_eq!(
             created(&drain(&mut watcher).await),
             ["analysis", "data", "data/a.csv"].map(PathBuf::from),
+        );
+    }
+
+    const CARGO_TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n\
+        # This file is a cache directory tag created by cargo.\n";
+
+    fn write(root: &Path, path: &str, contents: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    #[tokio::test]
+    async fn skips_folders_tools_tag_as_caches() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, ".pytest_cache/CACHEDIR.TAG", CARGO_TAG);
+        let mut watcher = watch(root);
+
+        write(root, ".pytest_cache/v/cache/lastfailed", "{}");
+        // As `cargo build` does, in one change set.
+        fs::create_dir(root.join("target")).unwrap();
+        write(root, "target/CACHEDIR.TAG", CARGO_TAG);
+        write(root, "target/debug/app", "x");
+        write(root, "data/a.csv", "a");
+
+        assert_eq!(
+            created(&drain(&mut watcher).await),
+            ["data", "data/a.csv"].map(PathBuf::from),
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_reporting_a_folder_once_it_is_tagged_as_a_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+
+        write(root, "target/debug/app", "x");
+        assert_eq!(
+            created(&drain(&mut watcher).await),
+            ["target", "target/debug", "target/debug/app"].map(PathBuf::from),
+        );
+        write(root, "target/CACHEDIR.TAG", CARGO_TAG);
+        write(root, "target/debug/app", "y");
+        write(root, "target/debug/build.log", "y");
+        write(root, "results.csv", "x");
+
+        assert_eq!(
+            drain(&mut watcher).await,
+            [Change::Created(PathBuf::from("results.csv"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_changes_to_known_files_in_a_folder_tagged_since() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "target/app", "x");
+        write(root, "target/build.log", "x");
+        let mut watcher = watch(root);
+
+        // The session reads a batch only after the review before it, so the
+        // tag can be written before the batch with earlier events is read.
+        fs::remove_file(root.join("target/build.log")).unwrap();
+        write(root, "target/CACHEDIR.TAG", CARGO_TAG);
+        let edit = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(root.join("target/app"));
+        let removal = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(root.join("target/build.log"));
+        let changes = watcher
+            .handle(Ok(vec![
+                DebouncedEvent::new(edit, Instant::now()),
+                DebouncedEvent::new(removal, Instant::now()),
+            ]))
+            .unwrap();
+
+        assert_eq!(changes, []);
+    }
+
+    #[tokio::test]
+    async fn reports_a_folder_whose_tag_is_removed_as_created() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "data/CACHEDIR.TAG", CARGO_TAG);
+        write(root, "data/a.csv", "a");
+        write(root, "data/b.csv", "b");
+        let mut watcher = watch(root);
+
+        fs::remove_file(root.join("data/CACHEDIR.TAG")).unwrap();
+        assert_eq!(
+            created(&drain(&mut watcher).await),
+            ["data", "data/a.csv", "data/b.csv"].map(PathBuf::from),
+        );
+        fs::write(root.join("data/a.csv"), "c").unwrap();
+        fs::remove_file(root.join("data/b.csv")).unwrap();
+
+        assert_eq!(
+            drain(&mut watcher).await,
+            [
+                Change::Changed(PathBuf::from("data/a.csv")),
+                Change::Deleted(PathBuf::from("data/b.csv")),
+            ]
         );
     }
 
