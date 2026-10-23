@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -235,11 +235,14 @@ pub fn create_private(path: &Path) -> Result<File> {
 
 /// Opens the file at `path` to add to its end, creating it for the user alone if it is missing.
 pub fn append_private(path: &Path) -> Result<File> {
-    private_options()
-        .append(true)
+    // Not in append mode, which on Windows takes away the right to cut the file shorter.
+    let mut file = private_options()
         .create(true)
         .open(path)
-        .with_context(|| format!("could not open {}", path.display()))
+        .with_context(|| format!("could not open {}", path.display()))?;
+    file.seek(SeekFrom::End(0))
+        .with_context(|| format!("could not open {}", path.display()))?;
+    Ok(file)
 }
 
 /// Options to write a file that, when they create it, only the user can read.
@@ -319,6 +322,22 @@ mod tests {
             let mode = fs::metadata(&run.events).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn adds_to_the_end_of_a_log_and_can_cut_it_back() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        fs::write(&path, "{\"set\":1}\n").unwrap();
+
+        let mut file = append_private(&path).unwrap();
+        file.write_all(b"{\"set\":2}\n{\"se").unwrap();
+        file.set_len(20).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"set\":1}\n{\"set\":2}\n"
+        );
     }
 
     #[test]
