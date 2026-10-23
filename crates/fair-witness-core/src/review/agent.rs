@@ -1,4 +1,4 @@
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context, Result, bail};
 use genai::Client;
@@ -92,7 +92,7 @@ impl Reviewer {
         input: &Input<'_>,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
-        let tools = Tools::new(input.root)?;
+        let tools = Arc::new(Tools::new(input.root)?);
         let prompt = prompt::user_message(input.dmp, input.changes, input.found);
         let choice = self.choice();
         let mut definitions = Tools::definitions();
@@ -166,8 +166,12 @@ impl Reviewer {
                         Err(e) => format!("error: invalid verdict: {e}"),
                     }
                 } else {
-                    tools
-                        .call(&call.fn_name, &call.fn_arguments)
+                    // The tools read the disk, which can block, such as on a FIFO.
+                    let tools = tools.clone();
+                    let (name, arguments) = (call.fn_name.clone(), call.fn_arguments.clone());
+                    tokio::task::spawn_blocking(move || tools.call(&name, &arguments))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
                         .unwrap_or_else(|e| format!("error: {e}"))
                 };
                 trace(Trace::ToolResult {
