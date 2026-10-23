@@ -133,6 +133,19 @@ mod tests {
     }
 
     #[test]
+    fn the_setup_template_adds_no_ignore_rules() {
+        let root = tempfile::tempdir().unwrap();
+        crate::project::Project::new(root.path().to_path_buf())
+            .create()
+            .unwrap();
+
+        let filter = Filter::new(root.path()).unwrap();
+
+        assert_eq!(filter.rules.num_ignores(), BUILT_IN.len() as u64);
+        assert_eq!(filter.rules.num_whitelists(), 0);
+    }
+
+    #[test]
     fn reads_rules_like_git() {
         let (root, filter) = filter("!venv/\n!.fair-witness/\nscratch/\n!scratch/keep.csv\n");
         let filter = filter.unwrap();

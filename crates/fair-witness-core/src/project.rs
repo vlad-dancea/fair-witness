@@ -11,6 +11,19 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
+const IGNORE_TEMPLATE: &str = "\
+# Ignore paths with .gitignore syntax, relative to the project folder.
+# Use ! to check a path again, including paths fair-witness skips on its own.
+# .fair-witness/ itself is always skipped.
+# `fair-witness run` reads this file at startup. Restart it after edits.
+# See \"What is ignored\" in the README for what is skipped already:
+# https://github.com/vlad-dancea/fair-witness#what-is-ignored
+#
+# Examples (remove the leading \"# \" to use):
+# build/
+# scratch/
+# *.log
+";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -87,7 +100,8 @@ impl Project {
     pub fn create(&self) -> Result<()> {
         let dir = self.dir();
         fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-        write_gitignore(&dir)
+        write_gitignore(&dir)?;
+        write_ignore(&dir)
     }
 
     pub fn config(&self) -> Result<Option<Config>> {
@@ -129,6 +143,21 @@ impl Project {
     }
 }
 
+fn write_ignore(dir: &Path) -> Result<()> {
+    let path = dir.join(IGNORE_FILE);
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("could not create {}", path.display())),
+    };
+    file.write_all(IGNORE_TEMPLATE.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
 fn write_gitignore(dir: &Path) -> Result<()> {
     let path = dir.join(".gitignore");
     fs::write(&path, format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n"))
@@ -167,6 +196,24 @@ fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creates_the_ignore_template_without_overwriting_an_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let path = root.path().join(DIR_NAME).join(IGNORE_FILE);
+
+        project.create().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), IGNORE_TEMPLATE);
+        for contents in [b"scratch/\n!scratch/keep.csv\n\xff".as_slice(), b""] {
+            fs::write(&path, contents).unwrap();
+
+            project.create().unwrap();
+
+            assert_eq!(fs::read(&path).unwrap(), contents);
+        }
+    }
 
     #[test]
     fn finds_the_project_from_a_subfolder() {
