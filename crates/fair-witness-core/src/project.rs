@@ -11,6 +11,7 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
+const MADMP_PARTIAL_FILE: &str = "madmp.json.partial";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
 # Use ! to check a path again, including paths fair-witness skips on its own.
@@ -165,12 +166,17 @@ impl Project {
         };
         // Written beside the copy and renamed over it, so a failed write keeps the old copy.
         let path = dir.join(MADMP_FILE);
-        let partial = dir.join(format!("{MADMP_FILE}.partial"));
-        if let Err(e) = fs::write(&partial, serde_json::to_string_pretty(&saved)?) {
+        let partial = dir.join(MADMP_PARTIAL_FILE);
+        let written = fs::write(&partial, serde_json::to_string_pretty(&saved)?)
+            .with_context(|| format!("could not write {}", partial.display()))
+            .and_then(|()| {
+                fs::rename(&partial, &path)
+                    .with_context(|| format!("could not write {}", path.display()))
+            });
+        if written.is_err() {
             let _ = fs::remove_file(&partial);
-            return Err(e).with_context(|| format!("could not write {}", partial.display()));
         }
-        fs::rename(&partial, &path).with_context(|| format!("could not write {}", path.display()))
+        written
     }
 
     fn dir(&self) -> PathBuf {
@@ -202,8 +208,11 @@ fn write_ignore(dir: &Path) -> Result<()> {
 
 fn write_gitignore(dir: &Path) -> Result<()> {
     let path = dir.join(".gitignore");
-    fs::write(&path, format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n"))
-        .with_context(|| format!("could not write {}", path.display()))
+    fs::write(
+        &path,
+        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{MADMP_PARTIAL_FILE}\n"),
+    )
+    .with_context(|| format!("could not write {}", path.display()))
 }
 
 fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -292,7 +301,7 @@ mod tests {
             .save_madmp(url, 3, &serde_json::json!({ "title": "three" }))
             .unwrap();
         // A folder where the new copy is written first makes writing it fail.
-        fs::create_dir(root.path().join(DIR_NAME).join("madmp.json.partial")).unwrap();
+        fs::create_dir(root.path().join(DIR_NAME).join(MADMP_PARTIAL_FILE)).unwrap();
 
         assert!(
             project
@@ -367,7 +376,7 @@ mod tests {
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(root.path().join(".fair-witness/.gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\n"
+            "credentials.toml\nmadmp.json\nmadmp.json.partial\n"
         );
         #[cfg(unix)]
         {
