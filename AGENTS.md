@@ -26,8 +26,9 @@ lists by name live next to the code. Leave them alone and never commit them.
   maintainer's API key, so ask.
 - Stop only processes you started, by the PID you captured. `pkill -f` and `pgrep -f` match
   your own shell too, because the pattern is in its command line, so a `pkill -f` or a `kill`
-  loop over `pgrep -f` kills the shell running it. If you must match by pattern, bracket one
-  letter, as in `pgrep -f '[f]air-witness run'`.
+  loop over `pgrep -f` kills the shell running it. If you must find a process by pattern,
+  bracket one letter, as in `pgrep -f '[f]air-witness run'`, and check each PID's command line with
+  `ps -o args= -p <pid>` before you kill it.
 - Keep scratch files, test folders and plans outside the repository, in a `mktemp -d`
   directory under `/tmp`, and leave it there. `/tmp` empties on reboot, and Codex rejects any
   command containing `rm -rf` or `rm -f`, including a cleanup `trap`.

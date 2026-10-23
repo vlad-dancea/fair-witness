@@ -20,7 +20,8 @@ It needs T3 Code's `delegate_task` tool. Without it, say so and stop.
    If `delegate_task` fails, or the round ends with a usage limit or `model_unavailable`, do not
    retry Sol. Run the same round with provider instance `claudeAgent`, the strongest Claude model
    `orchestrator_capabilities` lists and option `effort: high`, and name the reviewing model in
-   the report. If that fails too, report when the limit resets and stop.
+   the report. If that fails too, report its error, with the reset time when the error gives
+   one, and stop.
 3. The reviewer sees only your task text, so the brief stands alone:
    - the goal of the change in a few sentences and the worktree path
    - read `AGENTS.md`, then the diff and every new file by path
