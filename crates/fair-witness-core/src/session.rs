@@ -93,7 +93,7 @@ impl Session {
         }
     }
 
-    /// Also writes every event to a new file at `path`, as a line of JSON.
+    /// Also adds every event to the file at `path`, as a line of JSON.
     pub fn logging_to(self, path: PathBuf) -> Self {
         Self {
             log: Some(path),
@@ -108,7 +108,7 @@ impl Session {
         let log = self
             .log
             .as_deref()
-            .map(project::create_private)
+            .map(project::append_private)
             .transpose()?;
         let (sender, received) = mpsc::unbounded_channel();
         let events = Events {

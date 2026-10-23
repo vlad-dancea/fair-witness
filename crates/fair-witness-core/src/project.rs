@@ -142,18 +142,40 @@ impl Project {
         fs::write(&path, json).with_context(|| format!("could not write {}", path.display()))
     }
 
-    /// Names the log of a run that starts now and creates its folder.
+    /// Names the log of a run that starts now, creating its folder and its empty events file.
     pub fn run_log(&self) -> Result<RunLog> {
+        self.run_log_at(Timestamp::now())
+    }
+
+    fn run_log_at(&self, started: Timestamp) -> Result<RunLog> {
         let dir = self.ensure_dir()?;
         // Folders set up before there was a log have a .gitignore that does not list it.
         write_gitignore(&dir)?;
         let dir = dir.join(LOG_DIR);
         fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-        let started = Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S%.3fZ");
-        Ok(RunLog {
-            events: dir.join(format!("{started}-events.jsonl")),
-            diagnostics: dir.join(format!("{started}-diagnostics.log")),
-        })
+        let started = started.strftime("%Y-%m-%dT%H-%M-%S%.3fZ").to_string();
+        // Runs that start in the same millisecond share the time, so creating the events file
+        // claims the name, and a later run counts on.
+        let mut stem = started.clone();
+        for count in 2.. {
+            let events = dir.join(format!("{stem}-events.jsonl"));
+            match private_options().create_new(true).open(&events) {
+                Ok(_) => {
+                    return Ok(RunLog {
+                        events,
+                        diagnostics: dir.join(format!("{stem}-diagnostics.log")),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    stem = format!("{started}-{count}");
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("could not create {}", events.display()));
+                }
+            }
+        }
+        unreachable!("the counter runs out only after every name is taken")
     }
 
     fn dir(&self) -> PathBuf {
@@ -205,30 +227,40 @@ fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 
 /// Creates a file at `path` that only the user can read, failing if one is there.
 pub fn create_private(path: &Path) -> Result<File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    only_for_the_user(&mut options);
-    options
+    private_options()
+        .create_new(true)
         .open(path)
         .with_context(|| format!("could not create {}", path.display()))
 }
 
-fn only_for_the_user(options: &mut fs::OpenOptions) {
+/// Opens the file at `path` to add to its end, creating it for the user alone if it is missing.
+pub fn append_private(path: &Path) -> Result<File> {
+    private_options()
+        .append(true)
+        .create(true)
+        .open(path)
+        .with_context(|| format!("could not open {}", path.display()))
+}
+
+/// Options to write a file that, when they create it, only the user can read.
+fn private_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    let _ = options;
+    options
 }
 
 fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
-    let mut options = fs::OpenOptions::new();
+    let mut options = if private {
+        private_options()
+    } else {
+        fs::OpenOptions::new()
+    };
     options.write(true).create(true).truncate(true);
-    if private {
-        only_for_the_user(&mut options);
-    }
 
     let mut file = options
         .open(path)
@@ -256,6 +288,36 @@ mod tests {
             project.create().unwrap();
 
             assert_eq!(fs::read(&path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn gives_runs_that_start_together_their_own_log() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let started: Timestamp = "2026-10-23T13:48:15.816Z".parse().unwrap();
+
+        let logs: Vec<RunLog> = (0..2)
+            .map(|_| project.run_log_at(started).unwrap())
+            .collect();
+
+        let log = root.path().join(".fair-witness/log");
+        assert_eq!(
+            logs.iter()
+                .flat_map(|run| [run.events.clone(), run.diagnostics.clone()])
+                .collect::<Vec<_>>(),
+            [
+                log.join("2026-10-23T13-48-15.816Z-events.jsonl"),
+                log.join("2026-10-23T13-48-15.816Z-diagnostics.log"),
+                log.join("2026-10-23T13-48-15.816Z-2-events.jsonl"),
+                log.join("2026-10-23T13-48-15.816Z-2-diagnostics.log"),
+            ]
+        );
+        #[cfg(unix)]
+        for run in &logs {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&run.events).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
         }
     }
 
