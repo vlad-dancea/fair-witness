@@ -16,9 +16,9 @@ fn main() {
     // A notification the desktop never answers, or a review stuck reading a file, must not keep
     // fair-witness from exiting.
     runtime.shutdown_background();
-    if let Err(e) = result {
-        tracing::error!("{e:#}");
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
+    if let Err(failure) = result {
+        tracing::error!("{:#}", failure.error());
+        eprintln!("error: {:#}", failure.error());
+        std::process::exit(failure.exit_code());
     }
 }

@@ -12,6 +12,7 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
+const MADMP_PARTIAL_FILE: &str = "madmp.json.partial";
 const LOG_DIR: &str = "log";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
@@ -86,6 +87,14 @@ pub struct Credentials {
     pub api_key: Option<String>,
 }
 
+/// A copy of a DMP with where it came from, since DAMAP's maDMP holds neither.
+#[derive(Serialize, Deserialize)]
+struct SavedMadmp {
+    damap_url: String,
+    dmp_id: i64,
+    madmp: serde_json::Value,
+}
+
 /// A project folder: the one that holds `.fair-witness/`.
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -135,11 +144,50 @@ impl Project {
         )
     }
 
-    pub fn save_madmp(&self, json: &str) -> Result<()> {
+    /// The copy of DMP `dmp_id` from the DAMAP at `damap_url` that an earlier `run` saved, if
+    /// the copy there is of that DMP.
+    pub fn madmp(&self, damap_url: &str, dmp_id: i64) -> Result<Option<String>> {
+        let path = self.dir().join(MADMP_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        // Copies saved before they said where they came from do not parse, and are not used.
+        match serde_json::from_str::<SavedMadmp>(&text) {
+            Ok(saved) if saved.damap_url == damap_url && saved.dmp_id == dmp_id => {
+                Ok(Some(serde_json::to_string_pretty(&saved.madmp)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn save_madmp(
+        &self,
+        damap_url: &str,
+        dmp_id: i64,
+        madmp: &serde_json::Value,
+    ) -> Result<()> {
         let dir = self.ensure_dir()?;
         write_gitignore(&dir)?;
+        let saved = SavedMadmp {
+            damap_url: damap_url.to_string(),
+            dmp_id,
+            madmp: madmp.clone(),
+        };
+        // Written beside the copy and renamed over it, so a failed write keeps the old copy.
         let path = dir.join(MADMP_FILE);
-        fs::write(&path, json).with_context(|| format!("could not write {}", path.display()))
+        let partial = dir.join(MADMP_PARTIAL_FILE);
+        let written = fs::write(&partial, serde_json::to_string_pretty(&saved)?)
+            .with_context(|| format!("could not write {}", partial.display()))
+            .and_then(|()| {
+                fs::rename(&partial, &path)
+                    .with_context(|| format!("could not write {}", path.display()))
+            });
+        if written.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        written
     }
 
     /// Names the log of a run that starts now, creating its folder and its empty events file.
@@ -209,7 +257,7 @@ fn write_gitignore(dir: &Path) -> Result<()> {
     let path = dir.join(".gitignore");
     fs::write(
         &path,
-        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{LOG_DIR}/\n"),
+        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{MADMP_PARTIAL_FILE}\n{LOG_DIR}/\n"),
     )
     .with_context(|| format!("could not write {}", path.display()))
 }
@@ -292,6 +340,55 @@ mod tests {
 
             assert_eq!(fs::read(&path).unwrap(), contents);
         }
+    }
+
+    #[test]
+    fn uses_the_saved_dmp_only_for_the_dmp_and_damap_it_came_from() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        let path = root.path().join(DIR_NAME).join(MADMP_FILE);
+        // A copy saved before copies said where they came from.
+        fs::write(&path, r#"{"title": "old"}"#).unwrap();
+        assert_eq!(project.madmp("https://a.example.org", 3).unwrap(), None);
+
+        let madmp = serde_json::json!({ "title": "three" });
+        project
+            .save_madmp("https://a.example.org", 3, &madmp)
+            .unwrap();
+
+        assert_eq!(
+            project
+                .madmp("https://a.example.org", 3)
+                .unwrap()
+                .as_deref(),
+            Some("{\n  \"title\": \"three\"\n}")
+        );
+        assert_eq!(project.madmp("https://a.example.org", 4).unwrap(), None);
+        assert_eq!(project.madmp("https://b.example.org", 3).unwrap(), None);
+    }
+
+    #[test]
+    fn keeps_the_saved_dmp_when_saving_another_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let url = "https://a.example.org";
+        project
+            .save_madmp(url, 3, &serde_json::json!({ "title": "three" }))
+            .unwrap();
+        // A folder where the new copy is written first makes writing it fail.
+        fs::create_dir(root.path().join(DIR_NAME).join(MADMP_PARTIAL_FILE)).unwrap();
+
+        assert!(
+            project
+                .save_madmp(url, 4, &serde_json::json!({ "title": "four" }))
+                .is_err()
+        );
+
+        assert_eq!(
+            project.madmp(url, 3).unwrap().as_deref(),
+            Some("{\n  \"title\": \"three\"\n}")
+        );
     }
 
     #[test]
@@ -401,7 +498,7 @@ mod tests {
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(root.path().join(".fair-witness/.gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\nlog/\n"
+            "credentials.toml\nmadmp.json\nmadmp.json.partial\nlog/\n"
         );
         #[cfg(unix)]
         {
