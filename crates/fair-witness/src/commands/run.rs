@@ -385,8 +385,11 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
                 // Lets the writer finish the lines it has, so a reader gets no half line, but
                 // not for long, since a reader that stopped reading never lets it.
                 drop(lines);
-                let _ = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await;
-                return Ok(());
+                // A writer that fails now has lost its reader, which wants no more lines.
+                return match tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => bail!("stopped before writing every event, since stdout was not read"),
+                };
             }
             written = &mut writer => {
                 written?.context("could not write to stdout")?;

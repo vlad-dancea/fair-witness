@@ -371,6 +371,11 @@ fn stops_when_nobody_reads_its_events() {
     let project = tempfile::tempdir().unwrap();
     let mut run = start_with_a_large_dmp(project.path());
     stuck_writing(project.path(), &mut run);
+    drop(run.stdin.take());
 
-    assert_eq!(run.stop(), Some(0));
+    assert_eq!(run.exit_code(), Some(1));
+    assert_eq!(
+        run.stderr_until("error:").pop().unwrap(),
+        "error: stopped before writing every event, since stdout was not read"
+    );
 }

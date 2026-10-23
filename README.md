@@ -259,7 +259,7 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 
 Each event has the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Messages for people, such as which DMP is used, go to stderr.
 
-`--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up, and with 1 when it fails while watching.
+`--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up, and with 1 when it fails while watching.
 
 The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved.
 
