@@ -1,4 +1,6 @@
-use fair_witness_core::review::{ModelChoice, Trace, Verdict};
+use fair_witness_core::review::{ModelChoice, Trace, Verdict, first_message};
+use fair_witness_core::session::{Event, Record};
+use jiff::tz::TimeZone;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -47,6 +49,7 @@ struct Reply {
     stop_reason: Option<String>,
     tokens_in: Option<i32>,
     tokens_out: Option<i32>,
+    elapsed_ms: u64,
 }
 
 /// A tool the AI called, with what the tool gave back.
@@ -89,6 +92,15 @@ pub struct DebugLog {
     entries: Vec<Entry>,
     collapsed: bool,
     rendered: Option<(u16, Vec<Line<'static>>)>,
+    /// The last setup and model a session reported, which it does not repeat for each review.
+    setup: Option<Setup>,
+    model: Option<ModelChoice>,
+}
+
+struct Setup {
+    system: String,
+    dmp: String,
+    tools: Vec<String>,
 }
 
 impl Default for DebugLog {
@@ -97,6 +109,8 @@ impl Default for DebugLog {
             entries: Vec::new(),
             collapsed: true,
             rendered: None,
+            setup: None,
+            model: None,
         }
     }
 }
@@ -116,35 +130,44 @@ impl DebugLog {
         self.entries.is_empty()
     }
 
-    pub fn review_started(&mut self, set: usize) {
-        let time = jiff::Zoned::now().strftime("%H:%M:%S").to_string();
-        self.push(Entry::Review { set, time });
+    /// Takes what a session reports about its reviews, from a live run or its log alike, and
+    /// skips the rest.
+    pub fn add(&mut self, record: &Record) {
+        match &record.event {
+            Event::Reviewing { set } => {
+                let zoned = record.time.to_zoned(TimeZone::system());
+                let time = zoned.strftime("%H:%M:%S").to_string();
+                self.push(Entry::Review { set: *set, time });
+            }
+            Event::Trace { trace, .. } => self.add_trace(trace.clone()),
+            _ => {}
+        }
     }
 
-    pub fn add(&mut self, trace: Trace) {
+    fn add_trace(&mut self, trace: Trace) {
         match trace {
-            Trace::Sent { role, text } if role == "system" => self.push(Entry::Instructions {
-                text,
-                tools: Vec::new(),
-            }),
-            Trace::Sent { text, .. } => self.push(Entry::Prompt(text)),
-            Trace::Request {
-                turn,
-                choice,
-                tools,
-            } => {
-                if let Some(Entry::Instructions { tools: listed, .. }) = self
-                    .this_review()
-                    .find(|entry| matches!(entry, Entry::Instructions { .. }))
-                {
-                    *listed = tools;
-                }
-                self.push(Entry::Turn(Turn {
-                    number: turn,
-                    choice: Some(choice),
-                    reply: None,
-                }));
+            Trace::Setup { system, dmp, tools } => {
+                self.setup = Some(Setup { system, dmp, tools });
             }
+            Trace::Model(choice) => self.model = Some(choice),
+            Trace::Prompt(about_changes) => match &self.setup {
+                Some(setup) => {
+                    let instructions = Entry::Instructions {
+                        text: setup.system.clone(),
+                        tools: setup.tools.clone(),
+                    };
+                    let prompt = Entry::Prompt(first_message(&setup.dmp, &about_changes));
+                    self.push(instructions);
+                    self.push(prompt);
+                }
+                None => self.push(Entry::Prompt(about_changes)),
+            },
+            Trace::Sent(text) => self.push(Entry::Prompt(text)),
+            Trace::Request { turn } => self.push(Entry::Turn(Turn {
+                number: turn,
+                choice: self.model.clone(),
+                reply: None,
+            })),
             Trace::Reply {
                 turn,
                 reasoning,
@@ -153,6 +176,7 @@ impl DebugLog {
                 stop_reason,
                 tokens_in,
                 tokens_out,
+                elapsed_ms,
             } => {
                 let reply = Reply {
                     reasoning,
@@ -168,6 +192,7 @@ impl DebugLog {
                     stop_reason,
                     tokens_in,
                     tokens_out,
+                    elapsed_ms,
                 };
                 let waiting = self.this_review().find_map(|entry| match entry {
                     Entry::Turn(waiting) if waiting.number == turn && waiting.reply.is_none() => {
@@ -290,9 +315,10 @@ fn render_turn(turn: &Turn, width: usize, collapsed: bool, lines: &mut Vec<Line<
     };
     let count = |tokens: Option<i32>| tokens.map_or("?".to_string(), |n| n.to_string());
     details.push(format!(
-        "{} in · {} out tokens",
+        "{} in · {} out tokens · {:.1} s",
         count(reply.tokens_in),
-        count(reply.tokens_out)
+        count(reply.tokens_out),
+        reply.elapsed_ms as f64 / 1000.0
     ));
     if let Some(reason) = &reply.stop_reason
         && !USUAL_STOPS.contains(&reason.as_str())
@@ -628,6 +654,15 @@ impl Wrapper {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use fair_witness_core::project::{AiConfig, Project};
+    use fair_witness_core::review::Reviewer;
+    use fair_witness_core::session::Session;
+    use fair_witness_core::testing::{fake_model, tool_call};
+    use jiff::Timestamp;
     use serde_json::json;
 
     use super::*;
@@ -650,14 +685,12 @@ mod tests {
 
     fn prompts() -> DebugLog {
         let mut log = DebugLog::default();
-        log.add(Trace::Sent {
-            role: "system".to_string(),
-            text: "Be careful.\nBe brief.".to_string(),
+        log.add_trace(Trace::Setup {
+            system: "Be careful.\nBe brief.".to_string(),
+            dmp: "{\n}".to_string(),
+            tools: vec!["read_file".to_string()],
         });
-        log.add(Trace::Sent {
-            role: "user".to_string(),
-            text: "The DMP:\n```json\n{\n}\n```\nChanged: a.csv".to_string(),
-        });
+        log.add_trace(Trace::Prompt("Changed: a.csv".to_string()));
         log
     }
 
@@ -669,10 +702,12 @@ mod tests {
             [
                 " SYSTEM PROMPT   how the AI should judge",
                 "  ⋯ 2 lines hidden (c to expand)",
+                "  tools: read_file",
                 "",
                 " FAIR-WITNESS   to the AI",
                 "  The DMP:",
                 "  ⋯ 2 json lines hidden (c to expand)",
+                "  ",
                 "  Changed: a.csv",
             ],
         );
@@ -691,12 +726,12 @@ mod tests {
             model: "qwen3".to_string(),
             effort: None,
         };
-        log.review_started(3);
-        log.add(Trace::Request {
-            turn: 1,
-            choice: choice.clone(),
-            tools: vec!["read_file".to_string()],
+        log.add(&Record {
+            time: Timestamp::now(),
+            event: Event::Reviewing { set: 3 },
         });
+        log.add_trace(Trace::Model(choice));
+        log.add_trace(Trace::Request { turn: 1 });
         let reply = |turn, text: &str, calls| Trace::Reply {
             turn,
             reasoning: None,
@@ -705,28 +740,25 @@ mod tests {
             stop_reason: Some("tool_calls".to_string()),
             tokens_in: Some(100),
             tokens_out: Some(20),
+            elapsed_ms: 1340,
         };
-        log.add(reply(
+        log.add_trace(reply(
             1,
             "Let me look.",
             vec![("read_file".to_string(), json!({ "path": "a.csv" }))],
         ));
-        log.add(Trace::ToolResult {
+        log.add_trace(Trace::ToolResult {
             name: "read_file".to_string(),
             output: "name,age".to_string(),
         });
-        log.add(Trace::Request {
-            turn: 2,
-            choice,
-            tools: Vec::new(),
-        });
+        log.add_trace(Trace::Request { turn: 2 });
         let lines = texts(&mut log, 40);
         assert_eq!(
             &lines[lines.len() - 2..],
             [" AI   turn 2 · qwen3", "  waiting for the reply…"]
         );
 
-        log.add(reply(
+        log.add_trace(reply(
             2,
             "Done.",
             vec![(
@@ -745,13 +777,13 @@ mod tests {
             &lines[1..],
             [
                 "",
-                " AI   turn 1 · qwen3 · 100 in · 20 out tokens",
+                " AI   turn 1 · qwen3 · 100 in · 20 out tokens · 1.3 s",
                 "  Let me look.",
                 "",
                 "  ▸ read_file a.csv",
                 "    │ name,age",
                 "",
-                " AI   turn 2 · qwen3 · 100 in · 20 out tokens",
+                " AI   turn 2 · qwen3 · 100 in · 20 out tokens · 1.3 s",
                 "  Done.",
                 "",
                 "  ╭─ ✗ contradicts the DMP ────────────╮",
@@ -765,7 +797,7 @@ mod tests {
     #[test]
     fn shortens_long_tool_output_while_collapsed() {
         let mut log = DebugLog::default();
-        log.add(Trace::Reply {
+        log.add_trace(Trace::Reply {
             turn: 1,
             reasoning: None,
             texts: Vec::new(),
@@ -773,9 +805,10 @@ mod tests {
             stop_reason: None,
             tokens_in: None,
             tokens_out: None,
+            elapsed_ms: 0,
         });
         let output: Vec<String> = (1..=10).map(|n| format!("file{n}")).collect();
-        log.add(Trace::ToolResult {
+        log.add_trace(Trace::ToolResult {
             name: "list_dir".to_string(),
             output: output.join("\n"),
         });
@@ -786,6 +819,58 @@ mod tests {
         );
         log.toggle_collapsed();
         assert_eq!(texts(&mut log, 80).last().unwrap(), "    │ file10");
+    }
+
+    #[tokio::test]
+    async fn shows_a_logged_run_as_it_showed_it_live() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, _server) = fake_model(vec![
+            tool_call("read_file", json!({ "path": "participants.csv" })),
+            tool_call(
+                "report_verdict",
+                json!({
+                    "contradicts": true,
+                    "dmp_field": "dataset[0].personal_data",
+                    "explanation": "Participant names, but the DMP says no personal data."
+                }),
+            ),
+        ]);
+        let ai = AiConfig {
+            url: endpoint,
+            model: "test".to_string(),
+            effort: None,
+        };
+        let project = Project::new(root.path().to_path_buf());
+        let log = project.run_log().unwrap().events;
+        let mut records = Session::new(project)
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![Arc::new(Reviewer::new(&ai, None))])
+            .logging_to(log.clone())
+            .start()
+            .unwrap();
+        fs::write(root.path().join("participants.csv"), "name\nAnna Muster\n").unwrap();
+
+        let mut live = DebugLog::default();
+        loop {
+            let record = tokio::time::timeout(Duration::from_secs(10), records.recv())
+                .await
+                .expect("no verdict in time")
+                .expect("the session stopped");
+            live.add(&record);
+            if let Event::Verdict { .. } = record.event {
+                break;
+            }
+        }
+        let mut replayed = DebugLog::default();
+        for line in fs::read_to_string(&log).unwrap().lines() {
+            replayed.add(&serde_json::from_str(line).unwrap());
+        }
+
+        assert_eq!(replayed.lines(100), live.lines(100));
+        assert!(texts(&mut live, 100).contains(&"    │ Anna Muster".to_string()));
+        live.toggle_collapsed();
+        replayed.toggle_collapsed();
+        assert_eq!(replayed.lines(100), live.lines(100));
     }
 
     #[test]

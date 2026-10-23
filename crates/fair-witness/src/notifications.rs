@@ -32,6 +32,7 @@ pub fn show(event: &Event, updates: &UnboundedSender<Update>) {
             .body(&body)
             .show();
         if let Err(e) = shown {
+            tracing::warn!("could not show a notification: {e}");
             let _ = updates.send(Update::NotifyFailed(e.to_string()));
         }
     });

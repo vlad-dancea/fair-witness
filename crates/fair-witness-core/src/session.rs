@@ -1,11 +1,15 @@
-use std::sync::Arc;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Result;
+use jiff::{Timestamp, Unit};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::project::Project;
+use crate::project::{self, Project};
 use crate::review::{self, Step, Trace, Verdict};
 use crate::watcher::{self, Change, FolderWatcher};
 
@@ -38,6 +42,18 @@ pub enum Event {
         set: usize,
         errors: Vec<String>,
     },
+    /// The log could not be written, so it holds no events from here on, not even this one.
+    LogStopped {
+        error: String,
+    },
+}
+
+/// An event with the time it happened, as the log holds it, one per line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Record {
+    pub time: Timestamp,
+    #[serde(flatten)]
+    pub event: Event,
 }
 
 /// Watches a project folder and, given a DMP, reviews each change set against it.
@@ -45,6 +61,7 @@ pub struct Session {
     project: Project,
     debounce: Duration,
     review: Option<Review>,
+    log: Option<PathBuf>,
 }
 
 struct Review {
@@ -59,6 +76,7 @@ impl Session {
             project,
             debounce: watcher::DEBOUNCE,
             review: None,
+            log: None,
         }
     }
 
@@ -75,21 +93,35 @@ impl Session {
         }
     }
 
+    /// Also adds every event to the file at `path`, as a line of JSON.
+    pub fn logging_to(self, path: PathBuf) -> Self {
+        Self {
+            log: Some(path),
+            ..self
+        }
+    }
+
     /// Starts watching. The session runs until the receiver is dropped, and drops the review
     /// in progress then.
-    pub fn start(self) -> Result<UnboundedReceiver<Event>> {
+    pub fn start(self) -> Result<UnboundedReceiver<Record>> {
         let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
-        let (events, received) = mpsc::unbounded_channel();
+        let log = self
+            .log
+            .as_deref()
+            .map(project::append_private)
+            .transpose()?;
+        let (sender, received) = mpsc::unbounded_channel();
+        let events = Events::new(sender, log);
         tokio::spawn(async move {
             tokio::select! {
                 () = self.watch(watcher, &events) => {}
-                () = events.closed() => {}
+                () = events.sender.closed() => {}
             }
         });
         Ok(received)
     }
 
-    async fn watch(&self, mut watcher: FolderWatcher, events: &UnboundedSender<Event>) {
+    async fn watch(&self, mut watcher: FolderWatcher, events: &Events) {
         let mut set = 0;
         while let Some(batch) = watcher.next().await {
             let changes = match batch {
@@ -97,17 +129,17 @@ impl Session {
                 Ok(changes) => changes,
                 Err(errors) => {
                     let errors = errors.iter().map(ToString::to_string).collect();
-                    let _ = events.send(Event::WatchErrors { set, errors });
+                    events.send(Event::WatchErrors { set, errors });
                     continue;
                 }
             };
             set += 1;
-            let _ = events.send(Event::Changes {
+            events.send(Event::Changes {
                 set,
                 changes: changes.clone(),
             });
             if let Some(review) = &self.review {
-                let _ = events.send(self.review(review, set, &changes, events).await);
+                events.send(self.review(review, set, &changes, events).await);
             }
         }
     }
@@ -119,12 +151,10 @@ impl Session {
         review: &Review,
         set: usize,
         changes: &[Change],
-        events: &UnboundedSender<Event>,
+        events: &Events,
     ) -> Event {
-        let _ = events.send(Event::Reviewing { set });
-        let trace = |trace| {
-            let _ = events.send(Event::Trace { set, trace });
-        };
+        events.send(Event::Reviewing { set });
+        let trace = |trace| events.send(Event::Trace { set, trace });
         let root = self.project.root();
         match review::review(&review.steps, root, &review.dmp, changes, &trace).await {
             Ok(verdict) => Event::Verdict { set, verdict },
@@ -134,6 +164,90 @@ impl Session {
             },
         }
     }
+}
+
+/// Stamps each event with the time, logs it and passes it on, leaving out what a review
+/// repeats from the one before.
+struct Events {
+    sender: UnboundedSender<Record>,
+    log: Mutex<Option<File>>,
+    last_setup: Mutex<Option<Trace>>,
+    last_model: Mutex<Option<Trace>>,
+}
+
+impl Events {
+    fn new(sender: UnboundedSender<Record>, log: Option<File>) -> Self {
+        Self {
+            sender,
+            log: Mutex::new(log),
+            last_setup: Mutex::new(None),
+            last_model: Mutex::new(None),
+        }
+    }
+
+    fn send(&self, event: Event) {
+        if self.repeats(&event) {
+            return;
+        }
+        let record = Record { time: now(), event };
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(file) = log.as_mut() {
+            let end = file.metadata().map(|metadata| metadata.len());
+            let written = serde_json::to_vec(&record)
+                .map_err(std::io::Error::from)
+                .and_then(|mut line| {
+                    line.push(b'\n');
+                    file.write_all(&line)
+                });
+            // A gap in the middle of the log would read as events that never happened.
+            if let Err(e) = written {
+                // Part of the line may be written, and a log ending in half a line of JSON
+                // could not be read back.
+                if let Ok(end) = end {
+                    let _ = file.set_len(end);
+                }
+                tracing::error!("stopped writing the event log: {e}");
+                *log = None;
+                let _ = self.sender.send(record);
+                let stopped = Event::LogStopped {
+                    error: e.to_string(),
+                };
+                let _ = self.sender.send(Record {
+                    time: now(),
+                    event: stopped,
+                });
+                return;
+            }
+        }
+        let _ = self.sender.send(record);
+    }
+
+    /// Whether `event` is the setup or model of a review that the last one already reported.
+    fn repeats(&self, event: &Event) -> bool {
+        let (last, trace) = match event {
+            Event::Trace {
+                trace: trace @ Trace::Setup { .. },
+                ..
+            } => (&self.last_setup, trace),
+            Event::Trace {
+                trace: trace @ Trace::Model(_),
+                ..
+            } => (&self.last_model, trace),
+            _ => return false,
+        };
+        let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref() == Some(trace) {
+            return true;
+        }
+        *last = Some(trace.clone());
+        false
+    }
+}
+
+/// The time to the millisecond, which is as fine as the log needs.
+fn now() -> Timestamp {
+    let now = Timestamp::now();
+    now.round(Unit::Millisecond).unwrap_or(now)
 }
 
 #[cfg(test)]
@@ -150,14 +264,17 @@ mod tests {
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(10);
 
-    async fn until_decided(events: &mut UnboundedReceiver<Event>) -> Vec<Event> {
+    async fn until_decided(events: &mut UnboundedReceiver<Record>) -> Vec<Record> {
         let mut seen = Vec::new();
         loop {
             let event = tokio::time::timeout(PATIENCE, events.recv())
                 .await
                 .expect("no verdict in time")
                 .expect("the session stopped");
-            let decided = matches!(event, Event::Verdict { .. } | Event::ReviewFailed { .. });
+            let decided = matches!(
+                event.event,
+                Event::Verdict { .. } | Event::ReviewFailed { .. }
+            );
             seen.push(event);
             if decided {
                 return seen;
@@ -170,8 +287,13 @@ mod tests {
             Event::Changes { set, changes } => format!("#{set} changes {changes:?}"),
             Event::Reviewing { set } => format!("#{set} reviewing"),
             Event::Trace { set, trace } => match trace {
-                Trace::Sent { role, .. } => format!("#{set} sent {role}"),
-                Trace::Request { turn, .. } => format!("#{set} request {turn}"),
+                Trace::Setup { dmp, .. } => format!("#{set} setup with DMP {dmp}"),
+                Trace::Model(choice) => format!("#{set} model {}", choice.model),
+                Trace::Prompt(text) => {
+                    format!("#{set} prompt {}", text.lines().nth(1).unwrap_or(""))
+                }
+                Trace::Sent(text) => format!("#{set} sent {text}"),
+                Trace::Request { turn } => format!("#{set} request {turn}"),
                 Trace::Reply { turn, calls, .. } => format!("#{set} reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output } => format!("#{set} {name}: {output}"),
                 Trace::Failed(e) => format!("#{set} failed: {e}"),
@@ -182,11 +304,38 @@ mod tests {
             ),
             Event::ReviewFailed { set, error } => format!("#{set} review failed: {error}"),
             Event::WatchErrors { set, errors } => format!("#{set} watch errors: {errors:?}"),
+            Event::LogStopped { error } => format!("log stopped: {error}"),
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn reviews_each_change_set_and_numbers_its_events() {
+    async fn says_once_when_the_log_cannot_be_written() {
+        // Every write to /dev/full fails as if the disk were full.
+        let full = File::options().write(true).open("/dev/full").unwrap();
+        let (sender, mut received) = mpsc::unbounded_channel();
+        let events = Events::new(sender, Some(full));
+
+        events.send(Event::Reviewing { set: 1 });
+        events.send(Event::Reviewing { set: 2 });
+        drop(events);
+
+        let mut seen = Vec::new();
+        while let Some(record) = received.recv().await {
+            seen.push(describe(&record.event));
+        }
+        assert_eq!(
+            seen,
+            [
+                "#1 reviewing",
+                "log stopped: No space left on device (os error 28)",
+                "#2 reviewing",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reviews_each_change_set_and_logs_its_numbered_events() {
         let root = tempfile::tempdir().unwrap();
         let (endpoint, server) = fake_model(vec![
             tool_call(
@@ -211,9 +360,12 @@ mod tests {
             },
             None,
         );
-        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+        let project = Project::new(root.path().to_path_buf());
+        let log = project.run_log().unwrap().events;
+        let mut events = Session::new(project)
             .debounce(Duration::from_millis(50))
             .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .logging_to(log.clone())
             .start()
             .unwrap();
 
@@ -223,19 +375,21 @@ mod tests {
         seen.extend(until_decided(&mut events).await);
 
         assert_eq!(
-            seen.iter().map(describe).collect::<Vec<_>>(),
+            seen.iter()
+                .map(|record| describe(&record.event))
+                .collect::<Vec<_>>(),
             [
                 r#"#1 changes [Created("notes.txt")]"#,
                 "#1 reviewing",
-                "#1 sent system",
-                "#1 sent user",
+                "#1 setup with DMP {}",
+                "#1 model test",
+                "#1 prompt created: notes.txt",
                 "#1 request 1",
                 "#1 reply 1: report_verdict",
                 "#1 verdict: contradicts false (None): Notes are not data.",
                 r#"#2 changes [Created("patients.csv")]"#,
                 "#2 reviewing",
-                "#2 sent system",
-                "#2 sent user",
+                "#2 prompt created: patients.csv",
                 "#2 request 1",
                 "#2 reply 1: read_file",
                 "#2 read_file: name\nAnna Muster\n",
@@ -246,13 +400,37 @@ mod tests {
             ]
         );
         assert_eq!(server.join().unwrap().len(), 3);
-        for event in &seen {
-            let json = serde_json::to_value(event).unwrap();
-            assert_eq!(&serde_json::from_value::<Event>(json).unwrap(), event);
-        }
+        assert!(seen.is_sorted_by_key(|record| record.time));
+        let logged: Vec<Record> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(logged, seen);
+        let mut first = serde_json::to_value(&seen[0]).unwrap();
+        let time = first.as_object_mut().unwrap().remove("time").unwrap();
+        assert_eq!(time, json!(seen[0].time.to_string()));
         assert_eq!(
-            serde_json::to_value(&seen[0]).unwrap(),
+            first,
             json!({ "event": "changes", "set": 1, "changes": [{ "created": "notes.txt" }] })
+        );
+        let mut reply = serde_json::to_value(&seen[6].event).unwrap();
+        reply["trace"]["reply"]
+            .as_object_mut()
+            .unwrap()
+            .remove("elapsed_ms")
+            .unwrap();
+        assert_eq!(
+            reply,
+            json!({ "event": "trace", "set": 1, "trace": { "reply": {
+                "turn": 1,
+                "calls": [["report_verdict", {
+                    "contradicts": false, "explanation": "Notes are not data."
+                }]],
+                "stop_reason": "tool_calls",
+                "tokens_in": 1,
+                "tokens_out": 1
+            } } })
         );
     }
 }

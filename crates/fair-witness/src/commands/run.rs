@@ -7,16 +7,19 @@ use fair_witness_core::review::Reviewer;
 use fair_witness_core::session::Session;
 use tokio::sync::mpsc;
 
-use crate::notifications;
 use crate::setup::damap::{TerminalPrompts, http_client};
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::ModelSettings;
+use crate::{diagnostics, notifications};
 
 pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
+    let log = project.run_log()?;
+    diagnostics::write_to(&log.diagnostics)?;
+    tracing::info!("watching {}", project.root().display());
     let damap = damap::resume(project, http_client()?, &TerminalPrompts).await?;
 
     let config = project.config()?.context("this folder is not set up yet")?;
-    let mut session = Session::new(project.clone());
+    let mut session = Session::new(project.clone()).logging_to(log.events);
     let (settings, status) = match (dmp.or(config.damap.dmp_id), config.ai) {
         (Some(id), Some(ai)) => {
             let api_key = project.credentials()?.api_key;
@@ -31,6 +34,7 @@ pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
             let dmp = serde_json::to_string_pretty(&damap.madmp(id).await?)?;
             project.save_madmp(&dmp)?;
             session = session.reviewing(dmp, vec![reviewer.clone()]);
+            tracing::info!("comparing changes with DMP #{id}");
             let status = vec![format!("Comparing changes with project #{id} - {name}.")];
             let settings = ModelSettings {
                 project: project.clone(),
@@ -53,12 +57,12 @@ pub async fn run(project: &Project, dmp: Option<i64>) -> Result<()> {
         _ => (None, vec!["Changes are not checked.".to_string()]),
     };
 
-    let mut events = session.start()?;
+    let mut records = session.start()?;
     let (updates, received) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            notifications::show(&event, &updates);
-            if updates.send(Update::Session(event)).is_err() {
+        while let Some(record) = records.recv().await {
+            notifications::show(&record.event, &updates);
+            if updates.send(Update::Session(record)).is_err() {
                 return;
             }
         }

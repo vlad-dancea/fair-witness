@@ -193,6 +193,13 @@ impl Oidc {
             .send()
             .await
             .context("could not reach the login server")?;
+        // Only the grant type, since the other parameters are secrets.
+        let grant = params.iter().find(|(name, _)| *name == "grant_type");
+        tracing::debug!(
+            grant = grant.map(|(_, value)| *value),
+            status = %response.status(),
+            "the login server answered a token request"
+        );
         if response.status().is_success() {
             Ok(Ok(response
                 .json()

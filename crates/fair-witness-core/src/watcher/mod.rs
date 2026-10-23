@@ -304,12 +304,17 @@ fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
         return;
     }
     visit(path.to_path_buf());
-    if metadata.is_dir()
-        && let Ok(entries) = fs::read_dir(path)
-    {
-        for entry in entries.flatten() {
-            walk(&entry.path(), filter, visit);
+    if !metadata.is_dir() {
+        return;
+    }
+    // Changes inside a folder that cannot be read go unnoticed, so the log says which.
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                walk(&entry.path(), filter, visit);
+            }
         }
+        Err(e) => tracing::warn!("could not look into {}: {e}", path.display()),
     }
 }
 

@@ -1,4 +1,5 @@
 mod commands;
+mod diagnostics;
 mod notifications;
 mod setup;
 mod tui;
@@ -16,6 +17,7 @@ fn main() {
     // fair-witness from exiting.
     runtime.shutdown_background();
     if let Err(e) = result {
+        tracing::error!("{e:#}");
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
