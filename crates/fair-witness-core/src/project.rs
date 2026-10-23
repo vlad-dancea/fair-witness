@@ -74,6 +74,8 @@ impl Effort {
 pub struct RunLog {
     /// Every event of the run, as a line of JSON.
     pub events: PathBuf,
+    /// What went wrong or happened outside the reviews, such as requests to DAMAP.
+    pub diagnostics: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -150,6 +152,7 @@ impl Project {
         let started = Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S%.3fZ");
         Ok(RunLog {
             events: dir.join(format!("{started}-events.jsonl")),
+            diagnostics: dir.join(format!("{started}-diagnostics.log")),
         })
     }
 

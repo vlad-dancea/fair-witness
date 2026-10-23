@@ -84,7 +84,7 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
 - `madmp.json`: a copy of the DMP, refreshed on every `run`.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
-- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took.
+- `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took. `<start time>-diagnostics.log` has what happened outside the reviews, such as requests to DAMAP, folders that could not be read and notifications that failed. The `FAIR_WITNESS_LOG` environment variable sets how much it holds: `info` by default, `debug` for every request and `warn` for problems only. It takes the syntax of `RUST_LOG`, such as `warn,fair_witness_core=debug`.
 
 The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
 
@@ -237,6 +237,7 @@ If `run` finds no DMP or no model, it still watches and lists changes, but does 
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
 - **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly; try a larger one with `m`.
+- **Something else went wrong**: run `FAIR_WITNESS_LOG=debug fair-witness run` and read the newest `-diagnostics.log` in `.fair-witness/log/`.
 - **No desktop notification**: the change list shows "could not show a notification" with the reason. Verdicts still appear in the terminal.
 
 ## Running DAMAP locally

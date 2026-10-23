@@ -1,6 +1,8 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -61,12 +63,12 @@ impl Damap {
     }
 
     pub async fn instance_config(&self) -> Result<InstanceConfig> {
-        let response = self
-            .http
-            .get(format!("{}/api/config", self.url))
-            .send()
-            .await
-            .with_context(|| format!("could not reach {}", self.url))?;
+        let response = send(
+            self.http.get(format!("{}/api/config", self.url)),
+            "/api/config",
+        )
+        .await
+        .with_context(|| format!("could not reach {}", self.url))?;
         if !response.status().is_success() {
             bail!(
                 "{} answered {} on /api/config; is this DAMAP?",
@@ -101,9 +103,21 @@ impl Damap {
     }
 }
 
+async fn send(request: RequestBuilder, path: &str) -> reqwest::Result<Response> {
+    let sent = Instant::now();
+    let response = request.send().await;
+    let elapsed_ms = sent.elapsed().as_millis();
+    match &response {
+        Ok(response) => {
+            tracing::debug!(path, status = %response.status(), elapsed_ms, "DAMAP answered")
+        }
+        Err(e) => tracing::warn!(path, elapsed_ms, "DAMAP could not be reached: {e}"),
+    }
+    response
+}
+
 async fn send_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) -> Result<T> {
-    let response = request
-        .send()
+    let response = send(request, path)
         .await
         .with_context(|| format!("request to {path} failed"))?;
     match response.status() {
