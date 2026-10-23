@@ -227,7 +227,7 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
-If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, not one given with `--dmp`.
+If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, also when `--dmp` names it, and not for another DMP given with `--dmp`.
 
 ### Running from a script
 
