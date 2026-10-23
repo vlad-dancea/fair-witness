@@ -139,6 +139,10 @@ disagrees with it.
 - Write few, meaningful tests in a `#[cfg(test)] mod tests` beside the code they cover. Avoid
   trivial construction and accessor tests. Assert whole values or messages where practical and
   verify tests fail when behavior breaks.
+- The screen, the debug pane and the model panel have snapshot tests with insta, stored with
+  their text and styles in `crates/fair-witness/src/tui/snapshots/`. After an intended change to
+  what they show, run `INSTA_UPDATE=always mise run test`, read the diff of the `.snap` files
+  and commit them with the change. CI never writes snapshots, so a stale one fails it.
 - When changing `damap/` or `auth.rs`, try the change against TU Wien's DAMAP at
   `https://damap.it.tuwien.ac.at`, the default URL, logged in as `user` with password `user`.
   Do not start a local DAMAP for it.
@@ -155,7 +159,9 @@ disagrees with it.
   `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API
   client and the login to it, `auth.rs` the OIDC login and `project.rs` the project folder and
   its `.fair-witness/`. The login asks the user for what it needs through the `Prompts` trait,
-  which the binary implements.
+  which the binary implements. `testing.rs` is a fake model that answers like an
+  OpenAI-compatible API, compiled for the core's tests and for crates that enable the
+  `testing` feature, as the binary's tests do.
 - `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,
   `setup/` the questions `setup` asks, `tui/` the ratatui interface and `notifications.rs` the
   desktop notifications. `run` hands a session's events to the screen and the notifications.

@@ -1,4 +1,7 @@
 /target/
+# Snapshots insta proposes but nobody accepted yet.
+*.snap.new
+*.pending-snap
 
 # Personal thesis notes kept next to the code, not part of the repository.
 /eosc-arena-context.md
