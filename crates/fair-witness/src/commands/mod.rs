@@ -82,7 +82,9 @@ impl From<anyhow::Error> for Failure {
 
 pub async fn run() -> Result<(), Failure> {
     let command = Cli::parse().command;
-    let here = env::current_dir().context("could not determine the current directory")?;
+    let here = env::current_dir()
+        .context("could not determine the current directory")
+        .map_err(Failure::Setup)?;
     match command {
         Command::Setup { url, model } => {
             let project = Project::find(&here);
