@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use crate::project::AiConfig;
     use crate::review::Reviewer;
-    use crate::review::fake_model::{fake_model, tool_call};
+    use crate::testing::{fake_model, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(20);

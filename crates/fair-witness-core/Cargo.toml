@@ -17,5 +17,9 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.2", features = ["macros", "rt", "sync", "time"] }
 toml = "1.1.6"
 
+[features]
+# The fake model in `testing`, for the tests of crates that use this one.
+testing = []
+
 [dev-dependencies]
 tempfile = "3.27.0"

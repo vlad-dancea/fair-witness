@@ -1,3 +1,6 @@
+//! A fake model that answers like an OpenAI-compatible API, for tests here and in the crates
+//! that enable the `testing` feature.
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::thread;

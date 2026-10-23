@@ -69,7 +69,7 @@ mod tests {
     use super::*;
     use crate::project::AiConfig;
     use crate::review::Reviewer;
-    use crate::review::fake_model::{fake_model, tool_call};
+    use crate::testing::{fake_model, tool_call};
 
     /// A step that gives the same outcome for every change set.
     struct Fixed(fn() -> Outcome);
