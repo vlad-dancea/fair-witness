@@ -315,9 +315,18 @@ mod tests {
         let tool_message = messages.iter().find(|m| m["role"] == "tool").unwrap();
         assert_eq!(tool_message["content"], "name,diagnosis\n");
 
+        let traces = traces.into_inner().unwrap();
+        let (Trace::Setup { system, dmp, .. }, Trace::Prompt(about_changes)) =
+            (&traces[0], &traces[2])
+        else {
+            panic!("no setup and prompt first: {traces:?}");
+        };
+        assert_eq!(body["messages"][0]["content"], json!(system));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!(prompt::first_message(dmp, about_changes))
+        );
         let kinds: Vec<String> = traces
-            .into_inner()
-            .unwrap()
             .iter()
             .map(|trace| match trace {
                 Trace::Setup { tools, .. } => format!("setup with {}", tools.join(", ")),
