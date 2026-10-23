@@ -25,10 +25,31 @@ const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Change {
-    Created(PathBuf),
-    Changed(PathBuf),
-    Renamed { from: PathBuf, to: PathBuf },
-    Deleted(PathBuf),
+    Created(#[serde(with = "lossy")] PathBuf),
+    Changed(#[serde(with = "lossy")] PathBuf),
+    Renamed {
+        #[serde(with = "lossy")]
+        from: PathBuf,
+        #[serde(with = "lossy")]
+        to: PathBuf,
+    },
+    Deleted(#[serde(with = "lossy")] PathBuf),
+}
+
+/// Writes a path that is not valid UTF-8 with replacement characters, as the screen shows it,
+/// so that every change can be serialized.
+mod lossy {
+    use std::path::{Path, PathBuf};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&path.to_string_lossy())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        PathBuf::deserialize(deserializer)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -462,6 +483,23 @@ mod tests {
             "{changes:?}"
         );
         assert!(created(&changes).is_empty(), "{changes:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serializes_a_path_that_is_not_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let change = Change::Renamed {
+            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa.csv")),
+            to: PathBuf::from("data/a.csv"),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            serde_json::json!({ "renamed": { "from": "data/\u{fffd}a.csv", "to": "data/a.csv" } })
+        );
     }
 
     #[tokio::test]
