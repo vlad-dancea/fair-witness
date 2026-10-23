@@ -33,7 +33,18 @@ enum Command {
         #[command(flatten)]
         model: model::ModelArgs,
     },
-    #[command(about = "Watch this folder for changes")]
+    #[command(
+        about = "Watch this folder for changes, on screen or, with --headless, as JSON lines",
+        after_help = "\
+With --headless, each event is printed as one line of JSON on stdout, and messages for people \
+go to stderr. It never asks for a DAMAP login, and stops when stdin closes, on Ctrl+C or on \
+SIGTERM.
+
+Exit codes: 0 when stopped, 1 when it fails while watching, 2 when it cannot start.
+
+Set FAIR_WITNESS_DEBOUNCE_MS to change how long the folder has to be quiet before its changes \
+count as one set (default 2000)."
+    )]
     Run(run::Args),
     #[command(about = "Forget the saved login for this folder")]
     Logout,
