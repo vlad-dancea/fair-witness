@@ -27,7 +27,9 @@ going. Everything else follows `AGENTS.md`, which wins over this skill when the 
    because only new comments wake you. Then call `watch_pull_request` and end your turn. T3 Code
    wakes you when a check fails, the checks pass, someone comments or reviews, or the branch
    conflicts. Do not poll.
-5. On each wake, check the whole pull request, not only the event that woke you:
+5. On each wake, check the whole pull request, not only the event that woke you.
+   `gh pr checks` exits with code 8 while any check is pending, which is not a failure, so run
+   it on its own and never before `&&`.
    - A failed check: find why it differs from the local check before retrying. Retry only a
      failure you can show is infrastructure, not code.
    - CodeRabbit and other review comments, including findings in the body of a review: handle
