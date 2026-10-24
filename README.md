@@ -299,7 +299,7 @@ mise install            # the pinned Rust toolchain, with clippy and rustfmt
 mise run dev -- setup   # run fair-witness from source
 mise run format         # format the sources
 mise run scenarios      # run the scripted researcher sessions in scenarios/
-mise run check          # everything CI checks: formatting, clippy, tests
+mise run check          # everything CI checks: formatting, clippy, tests, scenarios
 ```
 
 Clippy warnings fail the check.

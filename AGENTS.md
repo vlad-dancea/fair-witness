@@ -18,8 +18,8 @@ lists by name live next to the code. Leave them alone and never commit them.
 - mise owns the Rust toolchain and the tasks. Use `mise run check`, `mise run test`,
   `mise run format` and `mise run dev -- <arguments>` at the repository root.
 - Run `mise run check` after changing the code, the tool pins or a workflow. It runs rustfmt,
-  clippy with every warning as an error, and the tests. Report exactly what ran and any
-  limitations, including changes that no check covers.
+  clippy with every warning as an error, the tests and the scenarios. Report exactly what ran
+  and any limitations, including changes that no check covers.
 - `fair-witness setup` asks questions and opens a browser to log in, and `fair-witness run` draws
   a full-screen terminal interface. Neither works without a terminal, so prove behavior with
   tests and say which parts you could not run. Trying them against a real AI model needs the
