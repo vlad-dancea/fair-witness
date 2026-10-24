@@ -1,0 +1,10 @@
+description = "A researcher starts an analysis in Python and Jupyter, which leave editor backups, bytecode and checkpoints behind."
+
+[[set]]
+changes = [
+  { created = "analysis" },
+  { created = "analysis/plot_ph.py" },
+  { created = "analysis/explore.ipynb" },
+]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP. Backups, bytecode and notebook checkpoints are not research data, so the watcher skips them."
