@@ -2,8 +2,8 @@
 
 A command-line tool that watches a research project folder and has an AI model check each change
 against the project's data management plan (DMP) in DAMAP. The repository root is a Cargo
-workspace with two crates in `crates/`: the library `fair-witness-core` and the binary
-`fair-witness`.
+workspace with three crates in `crates/`: the library `fair-witness-core`, the binary
+`fair-witness` and `fair-witness-scenarios`, which runs the scenarios in `scenarios/`.
 
 The tool, the binary crate, the binary and the repository are all called fair-witness, and the
 library is fair-witness-core. History before
@@ -18,8 +18,8 @@ lists by name live next to the code. Leave them alone and never commit them.
 - mise owns the Rust toolchain and the tasks. Use `mise run check`, `mise run test`,
   `mise run format` and `mise run dev -- <arguments>` at the repository root.
 - Run `mise run check` after changing the code, the tool pins or a workflow. It runs rustfmt,
-  clippy with every warning as an error, and the tests. Report exactly what ran and any
-  limitations, including changes that no check covers.
+  clippy with every warning as an error, the tests and the scenarios. Report exactly what ran
+  and any limitations, including changes that no check covers.
 - `fair-witness setup` asks questions and opens a browser to log in, and `fair-witness run` draws
   a full-screen terminal interface. Neither works without a terminal, so prove behavior with
   tests and say which parts you could not run. Trying them against a real AI model needs the
@@ -171,6 +171,9 @@ disagrees with it.
   desktop notifications. `run` hands a session's events to the screen and the notifications.
   Only `commands/` reads the working directory, once at startup, and passes the `Project` it
   finds to the rest.
+- `fair-witness-scenarios` is a development tool that dist does not release. It runs each
+  scenario in `scenarios/` against `fair-witness run --headless` with the fake model from
+  `testing.rs`. `scenarios/README.md` describes the format, so update it with the format.
 - Only the binary knows about the terminal. The core never depends on ratatui, crossterm,
   dialoguer or notify-rust (`cargo tree -p fair-witness-core` shows none of them) and never
   prompts or prints, so the review logic can run without the interface.

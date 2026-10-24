@@ -613,6 +613,7 @@ mod tests {
                 trace: Trace::ToolResult {
                     name: "read_file".to_string(),
                     output: "name,born,sleep_hours\nAnna Muster,1990-04-02,6.5".to_string(),
+                    failed: false,
                 },
             },
             Event::Trace {

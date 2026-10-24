@@ -1,8 +1,9 @@
 # Continuous integration and releases for fair-witness.
 #
 # Runs the `check` task developers run before pushing: rustfmt, clippy with every warning as an
-# error, and the tests. mise installs the Rust toolchain pinned in mise.toml, so CI builds with
-# exactly the toolchain used locally. On main, a passing check publishes the next release.
+# error, the tests and the scenarios. mise installs the Rust toolchain pinned in mise.toml, so CI
+# builds with exactly the toolchain used locally. On main, a passing check publishes the next
+# release.
 name: ci
 
 on:

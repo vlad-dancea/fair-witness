@@ -1,0 +1,6 @@
+description = "A researcher imports the CSV files of 40 sites from the lab at once."
+
+[[set]]
+contradicts = false
+explanation = "The DMP plans soil measurements as one CSV file per site and sampling campaign, which is what arrived."
+fake_tool_calls = [{ tool = "list_dir", arguments = { path = "raw/2026-10" } }]

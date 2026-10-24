@@ -1,0 +1,15 @@
+description = "A researcher renames the data folder, then converts a CSV file of measurements to Excel and deletes the CSV."
+
+[[set]]
+changes = [{ renamed = { from = "data", to = "raw" } }]
+contradicts = false
+explanation = "The DMP does not say where in the project the measurements are kept."
+
+[[set]]
+changes = [
+  { created = "raw/campaign-2026-04.xlsx" },
+  { deleted = "raw/campaign-2026-04.csv" },
+]
+contradicts = true
+dmp_field = "dataset[0].distribution[0].format"
+explanation = "The DMP keeps the soil measurements as CSV, and now they are an Excel file."
