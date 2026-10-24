@@ -34,7 +34,7 @@ The script changes files in the project folder, which is its working directory, 
 
 fair-witness takes each change into a set once the change is older than the debounce, 500 milliseconds for scenarios (`--debounce-ms` changes it), and checks for such changes four times per debounce. Changes made one right after the other end up in the same set, but a `sleep` or a slow command between them can split the set in two, which fails the scenario.
 
-The script runs with `set -euo pipefail`, so a failing command fails the scenario. It must not read stdin, which `wait_for_verdict` uses. When the script ends, whatever it started in the background is stopped.
+The script runs with `set -euo pipefail`, so a failing command fails the scenario. It must not read stdin, which `wait_for_verdict` uses. When the script ends, whatever it started in the background is stopped, unless it left the script's process group, as `setsid` does. Like a test, the script runs with the permissions of whoever runs the scenarios, so read a scenario before you run it.
 
 ```bash
 mv data raw
