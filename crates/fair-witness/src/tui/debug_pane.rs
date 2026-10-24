@@ -209,7 +209,7 @@ impl DebugLog {
                     })),
                 }
             }
-            Trace::ToolResult { name, output } => {
+            Trace::ToolResult { name, output, .. } => {
                 let call = self
                     .this_review()
                     .find_map(|entry| match entry {
@@ -750,6 +750,7 @@ mod tests {
         log.add_trace(Trace::ToolResult {
             name: "read_file".to_string(),
             output: "name,age".to_string(),
+            failed: false,
         });
         log.add_trace(Trace::Request { turn: 2 });
         let lines = texts(&mut log, 40);
@@ -811,6 +812,7 @@ mod tests {
         log.add_trace(Trace::ToolResult {
             name: "list_dir".to_string(),
             output: output.join("\n"),
+            failed: false,
         });
         let lines = texts(&mut log, 80);
         assert_eq!(

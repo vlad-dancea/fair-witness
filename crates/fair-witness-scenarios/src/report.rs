@@ -102,15 +102,19 @@ impl SetOutcome {
             }
             Event::ReviewFailed { error, .. } => self.review_failed = Some(error.clone()),
             // The fake model's calls are the scenario's own, so one that fails is a mistake in
-            // the scenario or a broken tool. A file that starts with "error: " looks the same.
+            // the scenario or a broken tool.
             Event::Trace {
-                trace: Trace::ToolResult { name, output },
+                trace:
+                    Trace::ToolResult {
+                        name,
+                        output,
+                        failed: true,
+                    },
                 ..
             } => {
-                if let Some(error) = output.strip_prefix("error: ") {
-                    self.problems
-                        .push(format!("the tool call {name} failed: {error}"));
-                }
+                let error = output.strip_prefix("error: ").unwrap_or(output);
+                self.problems
+                    .push(format!("the tool call {name} failed: {error}"));
             }
             _ => {}
         }
@@ -290,10 +294,16 @@ mod tests {
                     { "renamed": { "from": "patients.csv", "to": "people.csv" } }
                 ] })),
                 record(json!({ "event": "review_failed", "set": 3, "error": "timed out" })),
-                // A verdict without its change set, after a tool call that failed.
+                // A verdict without its change set, after a file that reads like an error and a
+                // tool call that failed.
                 record(
                     json!({ "event": "trace", "set": 4, "trace": { "tool_result": {
-                    "name": "read_flie", "output": "error: unknown tool `read_flie`"
+                    "name": "read_file", "output": "error: disk full"
+                } } }),
+                ),
+                record(
+                    json!({ "event": "trace", "set": 4, "trace": { "tool_result": {
+                    "name": "read_flie", "output": "error: unknown tool `read_flie`", "failed": true
                 } } }),
                 ),
                 record(json!({ "event": "verdict", "set": 4, "verdict": {

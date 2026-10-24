@@ -67,8 +67,16 @@ pub enum Trace {
     ToolResult {
         name: String,
         output: String,
+        /// Whether the call failed, so that `output` is the error the model is told, which a
+        /// file can look like.
+        #[serde(default, skip_serializing_if = "is_false")]
+        failed: bool,
     },
     Failed(String),
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 pub struct Reviewer {
@@ -172,10 +180,10 @@ impl Reviewer {
                 continue;
             }
             for call in calls {
-                let output = if call.fn_name == "report_verdict" {
+                let result = if call.fn_name == "report_verdict" {
                     match serde_json::from_value(call.fn_arguments.clone()) {
                         Ok(verdict) => return Ok(verdict),
-                        Err(e) => format!("error: invalid verdict: {e}"),
+                        Err(e) => Err(format!("invalid verdict: {e}")),
                     }
                 } else {
                     // The tools read the disk, which can block, such as on a FIFO.
@@ -184,11 +192,13 @@ impl Reviewer {
                     tokio::task::spawn_blocking(move || tools.call(&name, &arguments))
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
-                        .unwrap_or_else(|e| format!("error: {e}"))
                 };
+                let failed = result.is_err();
+                let output = result.unwrap_or_else(|e| format!("error: {e}"));
                 trace(Trace::ToolResult {
                     name: call.fn_name.clone(),
                     output: output.clone(),
+                    failed,
                 });
                 request = request.append_message(ToolResponse::new(call.call_id, output));
             }
@@ -335,7 +345,7 @@ mod tests {
                 Trace::Sent(text) => format!("sent {text}"),
                 Trace::Request { turn } => format!("request {turn}"),
                 Trace::Reply { turn, calls, .. } => format!("reply {turn}: {}", calls[0].0),
-                Trace::ToolResult { name, output } => format!("{name}: {output}"),
+                Trace::ToolResult { name, output, .. } => format!("{name}: {output}"),
                 Trace::Failed(e) => format!("failed: {e}"),
             })
             .collect();
@@ -350,6 +360,62 @@ mod tests {
                 "read_file: name,diagnosis\n",
                 "request 2",
                 "reply 2: report_verdict",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn marks_the_tool_calls_that_fail() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("log.txt"), "error: disk full\n").unwrap();
+        let (endpoint, server) = fake_model(vec![
+            tool_call("read_file", json!({ "path": "log.txt" })),
+            tool_call("read_flie", json!({ "path": "log.txt" })),
+            tool_call("report_verdict", json!({ "contradicts": "no" })),
+            tool_call(
+                "report_verdict",
+                json!({ "contradicts": false, "explanation": "A log file." }),
+            ),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        reviewer(endpoint)
+            .review(
+                &input(root.path(), "{}", &[Change::Created("log.txt".into())]),
+                &|trace| traces.lock().unwrap().push(trace),
+            )
+            .await
+            .unwrap();
+
+        server.join().unwrap();
+        let results: Vec<(String, String, bool)> = traces
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .filter_map(|trace| match trace {
+                Trace::ToolResult {
+                    name,
+                    output,
+                    failed,
+                } => Some((name, output, failed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results,
+            [
+                ("read_file".into(), "error: disk full\n".into(), false),
+                (
+                    "read_flie".into(),
+                    "error: unknown tool `read_flie`".into(),
+                    true
+                ),
+                (
+                    "report_verdict".into(),
+                    "error: invalid verdict: invalid type: string \"no\", expected a boolean"
+                        .into(),
+                    true
+                ),
             ]
         );
     }
