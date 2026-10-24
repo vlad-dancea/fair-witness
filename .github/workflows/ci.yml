@@ -43,9 +43,9 @@ jobs:
       - run: mise run check
 
   # Decides whether main differs from the latest release in what gets built: the sources, the
-  # dependencies or how dist builds them. Changes to CI, the README, mise.toml or the scenario
-  # runner in crates/fair-witness-scenarios alone are checked but not released, because the
-  # binaries would be the same. dist builds only the fair-witness package (precise-builds in
+  # dependencies or how dist builds them. Changes to this file, the README, mise.toml or the
+  # scenario runner in crates/fair-witness-scenarios alone are checked but not released, because
+  # the binaries would be the same. dist builds only the fair-witness package (precise-builds in
   # dist-workspace.toml), which does not depend on the runner. Cargo.lock is shared, and a
   # dependency change for the runner can move a crate the binary also uses, so a change to
   # Cargo.lock still releases.
