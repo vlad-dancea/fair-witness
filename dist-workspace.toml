@@ -17,3 +17,6 @@ install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
 install-updater = false
 # Releases are started by the publish job in .github/workflows/ci.yml on every push to main
 dispatch-releases = true
+# Build only the released package, so that the scenario runner and the testing feature of
+# fair-witness-core it turns on stay out of release builds.
+precise-builds = true

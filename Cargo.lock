@@ -1039,6 +1039,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fair-witness-scenarios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fair-witness-core",
+ "jiff",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -298,12 +298,13 @@ Then run `fair-witness setup --url http://localhost:8085` and log in as `user` w
 mise install            # the pinned Rust toolchain, with clippy and rustfmt
 mise run dev -- setup   # run fair-witness from source
 mise run format         # format the sources
+mise run scenarios      # run the scripted researcher sessions in scenarios/
 mise run check          # everything CI checks: formatting, clippy, tests
 ```
 
 Clippy warnings fail the check.
 
-The code is split into two crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface.
+The code is split into three crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface. `fair-witness-scenarios` runs the scenarios in `scenarios/` against the binary and is not released. [scenarios/README.md](scenarios/README.md) describes them.
 
 ## Releasing
 

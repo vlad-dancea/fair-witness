@@ -18,6 +18,13 @@ run = "cargo clippy --all-targets --locked -- -D warnings"
 description = "Run the tests"
 run = "cargo test --locked"
 
+[tasks.scenarios]
+description = "Run the researcher scenarios in scenarios/ with the fake model, with arguments after --, such as `mise run scenarios -- --help`"
+run = [
+  "cargo build --locked -p fair-witness",
+  "cargo run --locked -p fair-witness-scenarios --",
+]
+
 [tasks.check]
 description = "Everything CI checks: formatting, clippy, tests"
 depends = ["format:check", "lint", "test"]
