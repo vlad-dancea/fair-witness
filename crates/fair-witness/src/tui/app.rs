@@ -413,7 +413,7 @@ impl Screen {
     }
 
     fn draw_log(&mut self, frame: &mut Frame, area: Rect) {
-        let block = pane(" Changes ", self.debug_shown && !self.debug_focused);
+        let block = pane(" Changes ", self.debug_shown, !self.debug_focused);
         if self.log.is_empty() {
             let waiting =
                 Paragraph::new("No changes yet.".add_modifier(Modifier::DIM)).block(block);
@@ -439,7 +439,11 @@ impl Screen {
     }
 
     fn draw_debug(&mut self, frame: &mut Frame, area: Rect) {
-        let block = pane(" Debug: what the AI sees and does ", self.debug_focused);
+        let block = pane(
+            " Debug: what the AI sees and does ",
+            true,
+            self.debug_focused,
+        );
         if self.debug.is_empty() {
             let waiting = Paragraph::new(
                 "Nothing sent to the AI yet; it starts with the next change."
@@ -455,14 +459,16 @@ impl Screen {
     }
 }
 
-fn pane(title: &str, focused: bool) -> Block<'_> {
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(title);
-    if focused {
-        block.border_style(Style::new().fg(Color::Cyan))
-    } else {
-        block
+/// While both panes show, the focused one has a bold title and the other is
+/// dimmed; a colour would not do, as terminal themes remap the ANSI ones.
+fn pane(title: &str, split: bool, focused: bool) -> Block<'_> {
+    let block = Block::bordered().border_type(BorderType::Rounded);
+    match (split, focused) {
+        (false, _) => block.title(title),
+        (true, true) => block.title(title.bold()),
+        (true, false) => block
+            .title(title)
+            .border_style(Style::new().add_modifier(Modifier::DIM)),
     }
 }
 
@@ -701,6 +707,34 @@ mod tests {
         let mut screen = reviewed();
         screen.handle_key(KeyCode::Char('d').into());
         assert_screen!("debug_below", drawn(&mut screen, 80, 50));
+    }
+
+    #[test]
+    fn sends_the_arrows_to_the_focused_pane_and_dims_the_other() {
+        let mut screen = reviewed();
+        let dimmed = |screen: &mut Screen, x, y| {
+            let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+            terminal.draw(|frame| screen.draw(frame)).unwrap();
+            let cell = &terminal.backend().buffer()[(x, y)];
+            cell.modifier.contains(Modifier::DIM)
+        };
+        // The top left corners of the changes pane and the debug pane.
+        let (changes, debug) = ((0, 5), (60, 5));
+
+        screen.handle_key(KeyCode::Char('d').into());
+        screen.handle_key(KeyCode::Up.into());
+        assert_eq!(
+            (screen.lines_from_bottom, screen.debug_lines_from_bottom),
+            (0, 1)
+        );
+        assert!(dimmed(&mut screen, changes.0, changes.1));
+        assert!(!dimmed(&mut screen, debug.0, debug.1));
+
+        screen.handle_key(KeyCode::Tab.into());
+        screen.handle_key(KeyCode::Up.into());
+        assert_eq!(screen.lines_from_bottom, 1);
+        assert!(!dimmed(&mut screen, changes.0, changes.1));
+        assert!(dimmed(&mut screen, debug.0, debug.1));
     }
 
     fn text(line: &Line) -> String {
