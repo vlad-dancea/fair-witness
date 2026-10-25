@@ -68,33 +68,11 @@ pub struct Args {
     #[arg(
         long,
         env = "FAIR_WITNESS_EFFORT",
-        value_enum,
-        help = "How much the model reasons, instead of the saved effort; `default` sends no \
-                effort"
+        help = "How much the model reasons, by a name it takes such as low or xhigh, instead of \
+                the saved effort. `default` sends no effort, so the model uses its own, and \
+                `none` asks for no reasoning, which some models ignore"
     )]
-    effort: Option<EffortArg>,
-}
-
-/// A reasoning effort on the command line, where `default` leaves it to the model.
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum EffortArg {
-    Default,
-    None,
-    Low,
-    Medium,
-    High,
-}
-
-impl EffortArg {
-    fn effort(self) -> Option<Effort> {
-        match self {
-            EffortArg::Default => None,
-            EffortArg::None => Some(Effort::None),
-            EffortArg::Low => Some(Effort::Low),
-            EffortArg::Medium => Some(Effort::Medium),
-            EffortArg::High => Some(Effort::High),
-        }
-    }
+    effort: Option<Effort>,
 }
 
 /// What `run` watches with, once it has everything it needs.
@@ -240,12 +218,13 @@ fn ai(
         (None, Some(ai)) => ai.model.clone(),
         (None, None) => bail!("no model chosen for {url}; pass --model"),
     };
-    let effort = match args.effort {
-        Some(effort) => effort.effort(),
+    let effort = match &args.effort {
+        Some(effort) => effort.clone(),
         None => saved
             .as_ref()
             .filter(|ai| ai.model == model)
-            .and_then(|ai| ai.effort),
+            .map(|ai| ai.effort.clone())
+            .unwrap_or_default(),
     };
     let api_key = match (&args.api_key, &saved) {
         (Some(key), _) => Some(key.clone()),
@@ -455,7 +434,7 @@ mod tests {
 
     use super::*;
 
-    fn args(model: Option<&str>, effort: Option<EffortArg>) -> Args {
+    fn args(model: Option<&str>, effort: Option<&str>) -> Args {
         Args {
             dmp: None,
             dmp_file: None,
@@ -464,7 +443,7 @@ mod tests {
             ai_url: None,
             api_key: None,
             model: model.map(str::to_string),
-            effort,
+            effort: effort.map(|name| name.parse().unwrap()),
         }
     }
 
@@ -480,15 +459,12 @@ mod tests {
             ai: Some(AiConfig {
                 url: "https://api.example.org/v1".to_string(),
                 model: "small".to_string(),
-                effort: Some(Effort::Low),
+                effort: "low".parse().unwrap(),
             }),
         };
         let effort = |args: Args| {
-            ai(&project, Some(&config), &args)
-                .unwrap()
-                .unwrap()
-                .0
-                .effort
+            let (ai, _) = ai(&project, Some(&config), &args).unwrap().unwrap();
+            ai.effort.name().to_string()
         };
 
         assert_eq!(
@@ -496,17 +472,11 @@ mod tests {
                 effort(args(None, None)),
                 // The saved effort belongs to the saved model.
                 effort(args(Some("large"), None)),
-                effort(args(None, Some(EffortArg::High))),
-                effort(args(None, Some(EffortArg::Default))),
-                effort(args(Some("large"), Some(EffortArg::None))),
+                effort(args(None, Some("high"))),
+                effort(args(None, Some("default"))),
+                effort(args(Some("large"), Some("none"))),
             ],
-            [
-                Some(Effort::Low),
-                None,
-                Some(Effort::High),
-                None,
-                Some(Effort::None)
-            ]
+            ["low", "default", "high", "default", "none"]
         );
     }
 }

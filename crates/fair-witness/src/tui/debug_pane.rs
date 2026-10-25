@@ -722,7 +722,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use fair_witness_core::project::{AiConfig, Project};
+    use fair_witness_core::project::{AiConfig, Effort, Project};
     use fair_witness_core::review::Reviewer;
     use fair_witness_core::session::Session;
     use fair_witness_core::testing::{fake_model, tool_call};
@@ -788,7 +788,7 @@ mod tests {
         let mut log = DebugLog::default();
         let choice = ModelChoice {
             model: "qwen3".to_string(),
-            effort: None,
+            effort: Effort::default(),
         };
         log.add(&Record {
             time: Timestamp::now(),
@@ -948,7 +948,7 @@ mod tests {
         let ai = AiConfig {
             url: endpoint,
             model: "test".to_string(),
-            effort: None,
+            effort: Effort::default(),
         };
         let project = Project::new(root.path().to_path_buf());
         let log = project.run_log().unwrap().events;

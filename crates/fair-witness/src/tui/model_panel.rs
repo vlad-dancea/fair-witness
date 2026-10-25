@@ -44,8 +44,8 @@ impl ModelSettings {
 }
 
 pub fn describe(choice: &ModelChoice) -> String {
-    match choice.effort {
-        Some(effort) => format!("{} ({} effort)", choice.model, effort.name()),
+    match choice.effort.sent() {
+        Some(effort) => format!("{} ({effort} effort)", choice.model),
         None => choice.model.clone(),
     }
 }
@@ -68,19 +68,12 @@ pub enum Outcome {
     Chosen(ModelChoice),
 }
 
-const EFFORTS: [Option<Effort>; 5] = [
-    None,
-    Some(Effort::None),
-    Some(Effort::Low),
-    Some(Effort::Medium),
-    Some(Effort::High),
-];
-
 pub struct ModelPanel {
     current: ModelChoice,
     models: Models,
     filter: String,
     model: ListState,
+    efforts: Vec<Effort>,
     effort: ListState,
     focus: Focus,
 }
@@ -98,12 +91,18 @@ impl ModelPanel {
             let _ = sender.send(listed);
         });
         let current = settings.reviewer.choice();
-        let effort = EFFORTS.iter().position(|e| *e == current.effort);
+        let mut efforts = Effort::offered();
+        // An effort given with --effort or in config.toml need not be one of those offered.
+        if !efforts.contains(&current.effort) {
+            efforts.push(current.effort.clone());
+        }
+        let effort = efforts.iter().position(|e| *e == current.effort);
         Self {
             current,
             models: Models::Loading(models),
             filter: String::new(),
             model: ListState::default(),
+            efforts,
             effort: ListState::default().with_selected(effort),
             focus: Focus::Model,
         }
@@ -152,7 +151,12 @@ impl ModelPanel {
             .model
             .selected()
             .and_then(|i| self.visible().get(i).map(|model| model.to_string()))?;
-        let effort = EFFORTS[self.effort.selected().unwrap_or(0).min(EFFORTS.len() - 1)];
+        let effort = self
+            .effort
+            .selected()
+            .unwrap_or(0)
+            .min(self.efforts.len() - 1);
+        let effort = self.efforts[effort].clone();
         Some(ModelChoice { model, effort })
     }
 
@@ -193,7 +197,7 @@ impl ModelPanel {
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         self.poll();
-        let rows = self.visible().len().max(EFFORTS.len()) as u16;
+        let rows = self.visible().len().max(self.efforts.len()) as u16;
         let [area] = Layout::horizontal([Constraint::Max(72)])
             .flex(Flex::Center)
             .areas(area);
@@ -228,10 +232,14 @@ impl ModelPanel {
         ])
         .areas(inner);
         self.draw_filter(frame, filter);
+        // Room for the longest effort and the mark of the one in use, since --effort takes any,
+        // but at most half the width, so that the models stay readable.
+        let width = self.efforts.iter().map(|e| e.name().chars().count() + 2);
+        let width = (width.max().unwrap_or(0) as u16).min(columns.width / 2);
         let [models, divider, efforts] = Layout::horizontal([
             Constraint::Fill(1),
             Constraint::Length(3),
-            Constraint::Length(10),
+            Constraint::Length(width),
         ])
         .areas(columns);
         self.draw_models(frame, models);
@@ -284,12 +292,10 @@ impl ModelPanel {
 
     fn draw_efforts(&mut self, frame: &mut Frame, area: Rect) {
         let list = header(frame, area, "Effort", self.focus == Focus::Effort);
-        let items: Vec<ListItem> = EFFORTS
+        let items: Vec<ListItem> = self
+            .efforts
             .iter()
-            .map(|effort| {
-                let name = effort.map_or("default", Effort::name);
-                item(name, *effort == self.current.effort)
-            })
+            .map(|effort| item(effort.name(), *effort == self.current.effort))
             .collect();
         frame.render_stateful_widget(
             highlighted(List::new(items), self.focus == Focus::Effort),
@@ -342,9 +348,8 @@ mod tests {
 
     use super::*;
 
-    /// A panel that has listed the models of a fake server, with qwen3:8b at medium effort
-    /// in use.
-    async fn loaded() -> ModelPanel {
+    /// A panel that has listed the models of a fake server, with qwen3:8b at `effort` in use.
+    async fn loaded(effort: &str) -> ModelPanel {
         let (url, _server) = fake_model(vec![json!({
             "object": "list",
             "data": [
@@ -356,7 +361,7 @@ mod tests {
         let ai = AiConfig {
             url: url.clone(),
             model: "qwen3:8b".to_string(),
-            effort: Some(Effort::Medium),
+            effort: effort.parse().unwrap(),
         };
         let settings = ModelSettings {
             project: Project::new(PathBuf::from("/home/researcher/sleep-study")),
@@ -386,12 +391,12 @@ mod tests {
 
     #[tokio::test]
     async fn lists_the_models_and_marks_the_one_in_use() {
-        insta::assert_snapshot!(drawn(&mut loaded().await));
+        insta::assert_snapshot!(drawn(&mut loaded("medium").await));
     }
 
     #[tokio::test]
     async fn filters_the_models_and_moves_to_the_efforts() {
-        let mut panel = loaded().await;
+        let mut panel = loaded("medium").await;
         for key in [
             KeyCode::Char('l'),
             KeyCode::Char('l'),
@@ -401,5 +406,24 @@ mod tests {
             panel.handle_key(key.into());
         }
         insta::assert_snapshot!(drawn(&mut panel));
+    }
+
+    #[tokio::test]
+    async fn keeps_an_effort_it_does_not_offer_however_long() {
+        let effort = "ultra".repeat(13);
+        let mut panel = loaded(&effort).await;
+
+        let shown = drawn(&mut panel);
+        assert!(shown.contains("│ mistral-small "), "{shown}");
+        let Outcome::Chosen(choice) = panel.handle_key(KeyCode::Enter.into()) else {
+            panic!("nothing chosen");
+        };
+        assert_eq!(
+            choice,
+            ModelChoice {
+                model: "qwen3:8b".to_string(),
+                effort: effort.parse().unwrap(),
+            }
+        );
     }
 }
