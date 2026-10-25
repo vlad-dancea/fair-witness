@@ -11,6 +11,7 @@ use reqwest::Client as HttpClient;
 use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
 use serde::Deserialize;
+use serde_json::Value;
 
 pub async fn list_models(
     http: &HttpClient,
@@ -111,6 +112,67 @@ pub fn asks_to_allow_effort(error: &genai::Error) -> Option<String> {
         return None;
     };
     (*status == StatusCode::BAD_REQUEST && asks_for_effort(body)).then(|| body.clone())
+}
+
+/// What the API said when it refused a request with a 4xx status other than 429 Too Many
+/// Requests, which sending it again would not change.
+pub fn refused(error: &genai::Error) -> Option<String> {
+    let genai::Error::WebModelCall {
+        webc_error: webc::Error::ResponseFailedStatus { status, body, .. },
+        ..
+    } = error
+    else {
+        return None;
+    };
+    (status.is_client_error() && *status != StatusCode::TOO_MANY_REQUESTS).then(|| message(body))
+}
+
+/// Why a request failed, without the request and the full answer that genai's errors hold.
+pub fn why_failed(error: &genai::Error) -> String {
+    let genai::Error::WebModelCall { webc_error, .. } = error else {
+        return error.to_string().lines().collect::<Vec<_>>().join(" ");
+    };
+    match webc_error {
+        webc::Error::ResponseFailedStatus { status, body, .. } => match message(body) {
+            message if message.is_empty() => format!("the API answered {status}"),
+            message => format!("the API answered {status}: {message}"),
+        },
+        webc::Error::ResponseFailedNotJson { content_type, .. } => {
+            format!("the API answered with {content_type} instead of JSON")
+        }
+        webc::Error::ResponseFailedInvalidJson { cause, .. } => {
+            format!("the API answered with invalid JSON: {cause}")
+        }
+        webc::Error::Reqwest(e) => {
+            let mut why = format!("could not reach the API: {e}");
+            let mut source = std::error::Error::source(e);
+            while let Some(cause) = source {
+                why.push_str(&format!(": {cause}"));
+                source = cause.source();
+            }
+            why
+        }
+        e => e.to_string(),
+    }
+}
+
+/// The message in an error body, which OpenAI and the APIs like it give as
+/// `{"error": {"message": "..."}}` and others in a field of its own, or else the whole body.
+fn message(body: &str) -> String {
+    let parsed: Option<Value> = serde_json::from_str(body).ok();
+    let message = parsed.as_ref().and_then(|body| {
+        let error = body.get("error");
+        [
+            error.and_then(|error| error.get("message")),
+            error,
+            body.get("message"),
+            body.get("detail"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(Value::as_str)
+    });
+    message.unwrap_or(body).trim().to_string()
 }
 
 /// Whether `body` asks to send `allowed_openai_params` with `reasoning_effort` alone, the one
