@@ -26,6 +26,7 @@ use fair_witness_core::project::Effort;
 use fair_witness_core::session::Record;
 use jiff::Timestamp;
 use serde::Serialize;
+use url::{Host, Url};
 
 use report::{Accuracy, Outcome};
 use run::{API_KEY, Model, Settings, can_hide};
@@ -193,6 +194,12 @@ fn run() -> Result<bool> {
     };
     if !fake && api_key.is_none() {
         eprintln!("{API_KEY} is not set, so the models are asked without an API key.");
+    }
+    if api_key.is_some() && in_the_clear(&args.ai_url) {
+        bail!(
+            "--ai-url uses plain HTTP to another machine, which would send {API_KEY} \
+             unencrypted. Use https://, or http:// only for this machine, such as for a stub API"
+        );
     }
     if api_key.as_deref().is_some_and(|key| !can_hide(key)) {
         bail!(
@@ -478,6 +485,21 @@ fn write_results(folder: &Path, results: &Results, events: &[Vec<Record>]) -> Re
     Ok(())
 }
 
+/// Whether a key sent to `ai_url` would cross the network unencrypted: plain HTTP to another
+/// machine than this one. fair-witness reads an address without a scheme as HTTPS.
+fn in_the_clear(ai_url: &str) -> bool {
+    let Ok(url) = Url::parse(ai_url.trim()) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && !match url.host() {
+            Some(Host::Domain(domain)) => domain == "localhost",
+            Some(Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +524,28 @@ mod tests {
             .collect();
 
         assert_eq!(order, [0, 2, 1, 3]);
+    }
+
+    #[test]
+    fn sends_a_key_over_plain_http_only_to_this_machine() {
+        assert_eq!(
+            [
+                AQUEDUCT,
+                "models.example.org/v1",
+                "http://127.0.0.1:8080/v1",
+                "http://LOCALHOST:1234",
+                "http://[::1]:9/v1",
+                "http://models.example.org/v1",
+                "http://10.0.0.5:8080/v1",
+                "HTTP://Models.Example.org",
+                "http://127.0.0.1@models.example.org/v1",
+                "http://models.example.org\\@127.0.0.1/v1",
+                "http://localhost.example.org",
+            ]
+            .map(in_the_clear),
+            [
+                false, false, false, false, false, true, true, true, true, true, true
+            ]
+        );
     }
 }
