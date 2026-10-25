@@ -58,6 +58,8 @@ Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to
 
 Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
+Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
+
 ### Setting up without prompts
 
 The DAMAP URL and the AI settings can also be passed as flags or environment variables. That's handy for scripts or for keeping an API key out of your shell history:
@@ -197,7 +199,7 @@ Press `m` to change the model without restarting:
 
 - Type to filter the model list, and use `↑↓` to choose.
 - `Tab` switches to the **effort** column for models that support reasoning effort: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. Each model takes only some of these names, and its API refuses, ignores or rounds the others. The list also holds an effort given with `--effort` that it does not offer.
-- `Enter` uses the choice from the next change set on and saves it to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. `Esc` cancels.
+- `Enter` first asks the API once whether it takes the model and effort, as `run` does when it starts. If the API refuses them, the panel stays open with its message, which often names the efforts the model takes. Otherwise the choice is used from the next change set on and saved to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. When the check cannot tell, such as when the API answers `429 Too Many Requests`, the Changes pane says so. `Esc` cancels, also while the panel checks.
 
 To use a different API or key, quit and run `fair-witness setup`.
 
@@ -229,6 +231,8 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 | `fair-witness logout` | Forget the saved DAMAP login for this folder |
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
+
+Before it watches, `run` asks the API once whether it takes the model and effort, with a request like the first of a review but cut off after one token. If the API refuses them, `run` stops with the API's message, which often names what the model takes, instead of failing every review later. If the API cannot be reached, answers that it is busy with `408 Request Timeout`, `409 Conflict` or `429 Too Many Requests`, or fails on its side, `run` starts anyway, and the header warns that the model could not be checked.
 
 If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, also when `--dmp` names it, and not for another DMP given with `--dmp`.
 
@@ -263,7 +267,7 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 
 Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
 
-`--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up, and with 1 when it fails while watching.
+`--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 
 The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved.
 
@@ -274,6 +278,7 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"… does not look like an OpenAI-compatible API"**: the AI URL usually needs to end in `/v1`.
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
+- **"… refuses your-model (high effort)"**: the API does not take the model at this effort, and its message after the colon says why, such as which efforts the model takes. Pass another with `--effort`, or `--effort default` to send none, and save it with `m` and `Enter`. Or choose another model with `setup`.
 - **"429 Too Many Requests"**: the API limits how many requests a model gets a minute, and a review takes 2 or 3. fair-witness waits as long as the API asks, at most a minute each time, and sends the request again, up to 10 times. The review fails when the API keeps refusing or asks for a longer wait, as for a daily quota. Wait and change the files again, or pick a model with a higher limit with `m`.
 - **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly; try a larger one with `m`.
 - **Something else went wrong**: run `FAIR_WITNESS_LOG=debug fair-witness run` and read the newest `-diagnostics.log` in `.fair-witness/log/`.

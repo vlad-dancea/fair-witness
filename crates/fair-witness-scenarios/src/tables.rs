@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::report::{Accuracy, Outcome};
+use crate::report::{Accuracy, Outcome, Refused};
 
 /// Names the run of a scenario. `one_each` says that each scenario ran once.
 pub fn label(outcome: &Outcome, fake: bool, one_each: bool) -> String {
@@ -209,6 +209,24 @@ fn without_numbers(error: &str) -> String {
     shape
 }
 
+/// The models and efforts the API refused, with what it said, which did not run.
+pub fn refused(refused: &[Refused]) -> String {
+    let mut text = String::new();
+    if !refused.is_empty() {
+        text.push_str("\nRefused by the API, so not run:\n");
+    }
+    for refused in refused {
+        let _ = writeln!(
+            text,
+            "  {} {}: {}",
+            refused.model,
+            refused.effort.name(),
+            indent(&refused.error)
+        );
+    }
+    text
+}
+
 /// What went wrong in each run that did not go as expected.
 pub fn problems(outcomes: &[Outcome], fake: bool, one_each: bool) -> String {
     let mut text = String::new();
@@ -268,7 +286,7 @@ fn indent(problem: &str) -> String {
 mod tests {
     use super::*;
     use crate::fixtures::{expected, review, review_failed, scenario, verdict};
-    use crate::report::{self, judge};
+    use crate::report::{self, Refused, judge};
     use crate::run::{Model, Ran};
 
     #[test]
@@ -346,6 +364,25 @@ clinic-export    2      1 of 1         0 of 1
 
 Failed reviews:
   small default, 2 times, such as: 429, retry after 3s
+"
+        );
+    }
+
+    #[test]
+    fn lists_what_the_api_said_of_each_model_and_effort_it_refused() {
+        let refused = [Refused {
+            model: "qwen-3.8-27b".to_string(),
+            effort: "high".parse().unwrap(),
+            error: "Unexpected reasoning effort high.\nAvailable Model Group Fallbacks=None"
+                .to_string(),
+        }];
+
+        assert_eq!(
+            super::refused(&refused),
+            "
+Refused by the API, so not run:
+  qwen-3.8-27b high: Unexpected reasoning effort high.
+    Available Model Group Fallbacks=None
 "
         );
     }

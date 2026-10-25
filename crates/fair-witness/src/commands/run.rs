@@ -8,14 +8,14 @@ use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
-use fair_witness_core::review::Reviewer;
+use fair_witness_core::review::{Checked, Reviewer};
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::Failure;
 use crate::setup::damap::{TerminalPrompts, http_client, web_url};
 use crate::tui::app::{Screen, Update};
-use crate::tui::model_panel::ModelSettings;
+use crate::tui::model_panel::{self, ModelSettings};
 use crate::{diagnostics, notifications};
 
 const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";
@@ -73,6 +73,13 @@ pub struct Args {
                 `none` asks for no reasoning, which some models ignore"
     )]
     effort: Option<Effort>,
+    #[arg(
+        long,
+        hide = true,
+        help = "Do not check the model and effort before watching, for a caller that checked them \
+                already, such as the scenario runner"
+    )]
+    skip_model_check: bool,
 }
 
 /// What `run` watches with, once it has everything it needs.
@@ -150,11 +157,15 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     };
     match (source, ai) {
         (Some(source), Some((ai, api_key))) => {
+            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone()));
+            // Before the DMP, so that a refusal comes before any DAMAP login.
+            if !args.skip_model_check {
+                check_model(&reviewer, &ai.url, &mut status).await?;
+            }
             let dmp = match source {
                 Source::File(file) => read_dmp(&file)?,
                 Source::Damap(id) => download_dmp(&project, id, args.headless, &mut status).await?,
             };
-            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone()));
             session = session.reviewing(dmp.json, vec![reviewer.clone()]);
             tracing::info!("{}", dmp.status);
             status.insert(0, dmp.status);
@@ -183,6 +194,30 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         status,
         settings,
     })
+}
+
+/// Asks the API once whether it takes the model and effort, so that a choice it refuses stops
+/// `run` at once instead of failing every review. When the check cannot tell, `run` still starts,
+/// with a warning in `status`.
+async fn check_model(reviewer: &Reviewer, url: &str, status: &mut Vec<String>) -> Result<()> {
+    let choice = reviewer.choice();
+    let described = model_panel::describe(&choice);
+    match reviewer.check(&choice).await {
+        Checked::Accepted => Ok(()),
+        Checked::Refused(message) => bail!(
+            "{url} refuses {described}: {message}\nPass another model with --model or another \
+             effort with --effort, or choose a model with `fair-witness setup`"
+        ),
+        Checked::Unknown(why) => {
+            let warning = format!(
+                "Warning: could not check {described}, so the reviews will show whether the API \
+                 takes it: {why}"
+            );
+            tracing::warn!("{warning}");
+            status.extend(warning.lines().map(str::to_string));
+            Ok(())
+        }
+    }
 }
 
 fn debounce() -> Result<Option<Duration>> {
@@ -444,6 +479,7 @@ mod tests {
             api_key: None,
             model: model.map(str::to_string),
             effort: effort.map(|name| name.parse().unwrap()),
+            skip_model_check: false,
         }
     }
 

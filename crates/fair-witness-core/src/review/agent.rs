@@ -12,10 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::prompt::{self, SYSTEM_PROMPT};
-use super::provider::{asks_to_allow_effort, openai_compatible, too_many_requests};
+use super::provider::{
+    asks_to_allow_effort, openai_compatible, refused, too_many_requests, why_failed,
+};
 use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
 use crate::project::{AiConfig, Effort};
+use crate::secret;
 
 const MAX_TURNS: usize = 12;
 /// How often a request goes again after the API refused it with 429 Too Many Requests. Reviews
@@ -24,6 +27,12 @@ const MAX_RETRIES: usize = 10;
 /// The longest wait before a retry. A limit per minute never asks for more, and a review is not
 /// worth holding for a longer one, such as a daily quota.
 const MAX_WAIT: Duration = Duration::from_secs(60);
+/// How long a check waits for the API: long enough for a busy one to answer with one token, and
+/// short enough that `run` does not seem to hang when it starts.
+const CHECK_WAIT: Duration = Duration::from_secs(30);
+/// What a check sends in place of the DMP and the changes.
+const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the API takes the \
+                             model, its effort and the tools.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
@@ -111,6 +120,20 @@ pub struct Reviewer {
     /// asks for each model it does not know to take an effort, and the field would make it
     /// pass an effort on raw to one it does know, such as Anthropic's, which refuses it.
     allowing_effort: Mutex<HashSet<String>>,
+    /// Kept to hide it in what a check reports, since an API may repeat a key it refuses.
+    api_key: Option<String>,
+}
+
+/// What the API made of a model and effort when a check asked it once, as a review would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    Accepted,
+    /// The API refused the request with a 4xx status other than 408 Request Timeout, 409
+    /// Conflict and 429 Too Many Requests, and said this.
+    Refused(String),
+    /// The check could not tell, for this reason, such as an API that could not be reached,
+    /// answered that it is busy with 408, 409 or 429, or failed on its side.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,12 +146,13 @@ pub struct ModelChoice {
 impl Reviewer {
     pub fn new(config: &AiConfig, api_key: Option<String>) -> Self {
         Self {
-            client: openai_compatible(&config.url, api_key),
+            client: openai_compatible(&config.url, api_key.clone()),
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
                 effort: config.effort.clone(),
             }),
             allowing_effort: Mutex::default(),
+            api_key,
         }
     }
 
@@ -151,8 +175,7 @@ impl Reviewer {
         let tools = Arc::new(Tools::new(input.root)?);
         let about_changes = prompt::about_changes(input.changes, input.found);
         let choice = self.choice();
-        let mut definitions = Tools::definitions();
-        definitions.push(verdict_tool());
+        let definitions = definitions();
         trace(Trace::Setup {
             system: SYSTEM_PROMPT.to_string(),
             dmp: input.dmp.to_string(),
@@ -167,16 +190,7 @@ impl Reviewer {
         let mut request = ChatRequest::new(vec![ChatMessage::user(first)])
             .with_system(SYSTEM_PROMPT)
             .with_tools(definitions);
-        // genai knows only a fixed list of efforts, and without one in the options it reads one
-        // from the end of the model name, so that `qwen3-max` would go out as `qwen3` at effort
-        // `max`. A budget stops that and adds nothing to an OpenAI request, so the effort goes
-        // in as given through the extra body.
-        let mut options = ChatOptions::default()
-            .with_tool_choice(ToolChoice::Auto)
-            .with_reasoning_effort(ReasoningEffort::Budget(0));
-        if let Some(effort) = choice.effort.sent() {
-            options = options.with_extra_body(json!({ "reasoning_effort": effort }));
-        }
+        let options = options(&choice.effort);
 
         for turn in 1..=MAX_TURNS {
             let (response, elapsed) = self
@@ -230,9 +244,50 @@ impl Reviewer {
         bail!("the model gave no verdict after {MAX_TURNS} replies")
     }
 
+    /// Asks the API once as a review would, with the system prompt, the tools and the effort of
+    /// `choice` but at most one token of output, so that a model or effort it refuses shows when
+    /// it is chosen instead of failing every review.
+    pub async fn check(&self, choice: &ModelChoice) -> Checked {
+        let request = ChatRequest::new(vec![ChatMessage::user(CHECK_MESSAGE)])
+            .with_system(SYSTEM_PROMPT)
+            .with_tools(definitions());
+        let options = options(&choice.effort);
+        let asked = async {
+            let limited = options.clone().with_max_tokens(1);
+            match checked(
+                self.send(&choice.model, &request, &limited, 1, &|_| {})
+                    .await,
+            ) {
+                // The API may refuse the limit itself, such as OpenAI's newer reasoning models the
+                // `max_tokens` that genai sends for model names it does not know, so only a request
+                // without it can show a refusal of the model or effort. An API refuses before the
+                // model writes anything, so the second request costs tokens only when the limit
+                // was what it refused.
+                Checked::Refused(_) => checked(
+                    self.send(&choice.model, &request, &options, 1, &|_| {})
+                        .await,
+                ),
+                answered => answered,
+            }
+        };
+        let checked = tokio::time::timeout(CHECK_WAIT, asked)
+            .await
+            .unwrap_or_else(|_| {
+                Checked::Unknown(format!(
+                    "the API did not answer within {} s",
+                    CHECK_WAIT.as_secs()
+                ))
+            });
+        let hide = |text| secret::hide(text, self.api_key.as_deref());
+        match checked {
+            Checked::Accepted => Checked::Accepted,
+            Checked::Refused(message) => Checked::Refused(hide(message)),
+            Checked::Unknown(why) => Checked::Unknown(hide(why)),
+        }
+    }
+
     /// Sends `request` and gives back the reply with how long it took. When the API refuses the
-    /// request with 429 Too Many Requests, waits as long as it asks and sends it again. When it
-    /// asks for `allowed_openai_params`, sends it again with the field.
+    /// request with 429 Too Many Requests, waits as long as it asks and sends it again.
     async fn ask(
         &self,
         model: &str,
@@ -241,46 +296,12 @@ impl Reviewer {
         turn: usize,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<(ChatResponse, Duration)> {
-        // The options always carry a budget, so whether the request names an effort shows only
-        // in the extra body.
-        let effort = options
-            .extra_body
-            .as_ref()
-            .is_some_and(|body| body.get("reasoning_effort").is_some());
         let mut retry = 0;
         loop {
-            let allowing = effort
-                && self
-                    .allowing_effort
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .contains(model);
-            let options = if allowing {
-                with_effort_allowed(options)
-            } else {
-                options.clone()
-            };
-            trace(Trace::Request { turn });
-            let asked = Instant::now();
-            let e = match self
-                .client
-                .exec_chat(model, request.clone(), Some(&options))
-                .await
-            {
-                Ok(response) => return Ok((response, asked.elapsed())),
+            let e = match self.send(model, request, options, turn, trace).await {
+                Ok(replied) => return Ok(replied),
                 Err(e) => e,
             };
-            if effort
-                && !allowing
-                && let Some(body) = asks_to_allow_effort(&e)
-            {
-                self.allowing_effort
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(model.to_string());
-                trace(Trace::EffortNotAllowed { turn, body });
-                continue;
-            }
             let failed = match too_many_requests(&e) {
                 None => format!("the model {model} failed"),
                 Some(_) if retry == MAX_RETRIES => format!(
@@ -316,6 +337,59 @@ impl Reviewer {
             return Err(e).context(failed);
         }
     }
+
+    /// Sends `request` and gives back the reply with how long it took. When the API asks for
+    /// `allowed_openai_params`, sends it again with the field.
+    async fn send(
+        &self,
+        model: &str,
+        request: &ChatRequest,
+        options: &ChatOptions,
+        turn: usize,
+        trace: &(dyn Fn(Trace) + Sync),
+    ) -> genai::Result<(ChatResponse, Duration)> {
+        // The options always carry a budget, so whether the request names an effort shows only
+        // in the extra body.
+        let effort = options
+            .extra_body
+            .as_ref()
+            .is_some_and(|body| body.get("reasoning_effort").is_some());
+        loop {
+            let allowing = effort
+                && self
+                    .allowing_effort
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(model);
+            let options = if allowing {
+                with_effort_allowed(options)
+            } else {
+                options.clone()
+            };
+            trace(Trace::Request { turn });
+            let asked = Instant::now();
+            let e = match self
+                .client
+                .exec_chat(model, request.clone(), Some(&options))
+                .await
+            {
+                Ok(response) => return Ok((response, asked.elapsed())),
+                Err(e) => e,
+            };
+            if effort
+                && !allowing
+                && let Some(body) = asks_to_allow_effort(&e)
+            {
+                self.allowing_effort
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(model.to_string());
+                trace(Trace::EffortNotAllowed { turn, body });
+                continue;
+            }
+            return Err(e);
+        }
+    }
 }
 
 impl Step for Reviewer {
@@ -326,6 +400,41 @@ impl Step for Reviewer {
     ) -> StepFuture<'a> {
         Box::pin(async move { Ok(Outcome::Decided(self.review(input, trace).await?)) })
     }
+}
+
+/// What the answer to a check says of the model and effort.
+fn checked(answer: genai::Result<(ChatResponse, Duration)>) -> Checked {
+    match answer {
+        // genai could not read a reply that came with a success status, which a reply cut off
+        // after one token, such as in the middle of a tool call, need not be.
+        Ok(_) | Err(genai::Error::ChatResponseGeneration { .. }) => Checked::Accepted,
+        Err(e) => match refused(&e) {
+            Some(message) => Checked::Refused(message),
+            None => Checked::Unknown(why_failed(&e)),
+        },
+    }
+}
+
+/// The options of every request: the tools at the model's choice and the effort.
+fn options(effort: &Effort) -> ChatOptions {
+    // genai knows only a fixed list of efforts, and without one in the options it reads one from
+    // the end of the model name, so that `qwen3-max` would go out as `qwen3` at effort `max`. A
+    // budget stops that and adds nothing to an OpenAI request, so the effort goes in as given
+    // through the extra body.
+    let options = ChatOptions::default()
+        .with_tool_choice(ToolChoice::Auto)
+        .with_reasoning_effort(ReasoningEffort::Budget(0));
+    match effort.sent() {
+        Some(effort) => options.with_extra_body(json!({ "reasoning_effort": effort })),
+        None => options,
+    }
+}
+
+/// The tools the model may call, the verdict last.
+fn definitions() -> Vec<Tool> {
+    let mut definitions = Tools::definitions();
+    definitions.push(verdict_tool());
+    definitions
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -369,7 +478,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        EFFORT_NOT_ALLOWED, Reply, bad_request, fake_model, too_many_requests, tool_call,
+        EFFORT_NOT_ALLOWED, EFFORT_REFUSED, Reply, bad_request, failure, fake_model, one_token,
+        too_many_requests, tool_call,
     };
     use crate::watcher::Change;
 
@@ -836,5 +946,159 @@ mod tests {
              than fair-witness waits (60 s)"
         );
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn checks_a_model_with_one_request_shaped_like_a_review() {
+        let (url, server) = fake_model(vec![one_token()]);
+        let reviewer = reviewer(url);
+
+        let checked = reviewer.check(&reviewer.choice()).await;
+
+        assert_eq!(checked, Checked::Accepted);
+        let requests = server.join().unwrap();
+        let body = &requests[0].1;
+        assert_eq!(body["messages"][0]["content"], SYSTEM_PROMPT);
+        let tools: Vec<&Value> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| &tool["function"]["name"])
+            .collect();
+        assert_eq!(tools, ["list_dir", "read_file", "report_verdict"]);
+        assert_eq!(
+            (
+                &body["tool_choice"],
+                &body["reasoning_effort"],
+                &body["max_tokens"]
+            ),
+            (&json!("auto"), &json!("low"), &json!(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn turns_down_an_effort_the_api_refuses_with_its_message() {
+        let (url, server) = fake_model(vec![
+            bad_request(EFFORT_NOT_ALLOWED),
+            bad_request(EFFORT_REFUSED),
+            bad_request(EFFORT_REFUSED),
+        ]);
+        let reviewer = reviewer(url);
+
+        let checked = reviewer
+            .check(&ModelChoice {
+                model: "test".to_string(),
+                effort: "high".parse().unwrap(),
+            })
+            .await;
+
+        assert_eq!(checked, Checked::Refused(EFFORT_REFUSED.to_string()));
+        let requests = server.join().unwrap();
+        let sent: Vec<(&Value, &Value, &Value)> = requests
+            .iter()
+            .map(|(_, body)| {
+                (
+                    &body["reasoning_effort"],
+                    &body["allowed_openai_params"],
+                    &body["max_tokens"],
+                )
+            })
+            .collect();
+        let (high, allowed, one) = (json!("high"), json!(["reasoning_effort"]), json!(1));
+        assert_eq!(
+            sent,
+            [
+                (&high, &Value::Null, &one),
+                (&high, &allowed, &one),
+                (&high, &allowed, &Value::Null),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn hides_the_api_key_in_what_a_check_reports() {
+        // A message that quotes a body escaped as JSON, which may escape any character.
+        let refused =
+            r"Incorrect API key provided: sk-test, or {\u0022key\u0022: \u0022\u0073k-test\u0022}.";
+        let (url, _server) = fake_model(vec![bad_request(refused), bad_request(refused)]);
+        let reviewer = reviewer(url);
+
+        let checked = reviewer.check(&reviewer.choice()).await;
+
+        assert_eq!(
+            checked,
+            Checked::Refused(
+                r"Incorrect API key provided: [API key], or {\u0022key\u0022: \u0022[API key]\u0022}."
+                    .to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn checks_again_without_the_token_limit_when_the_api_refuses_it() {
+        let (url, server) = fake_model(vec![
+            bad_request(
+                "Unsupported parameter: 'max_tokens' is not supported with this model. Use \
+                 'max_completion_tokens' instead.",
+            ),
+            one_token().into(),
+        ]);
+        let reviewer = reviewer(url);
+
+        let checked = reviewer.check(&reviewer.choice()).await;
+
+        assert_eq!(checked, Checked::Accepted);
+        let requests = server.join().unwrap();
+        let limits: Vec<&Value> = requests
+            .iter()
+            .map(|(_, body)| &body["max_tokens"])
+            .collect();
+        assert_eq!(limits, [&json!(1), &Value::Null]);
+    }
+
+    #[tokio::test]
+    async fn cannot_tell_when_the_api_cannot_be_reached_is_busy_or_fails() {
+        // A port that was just free, so the API cannot be reached.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let unreachable = reviewer(format!("http://127.0.0.1:{port}/v1"));
+        let mut answers = vec![unreachable.check(&unreachable.choice()).await];
+        for reply in [
+            failure("408 Request Timeout", "The gateway timed out."),
+            failure("409 Conflict", "No replica is free."),
+            too_many_requests(None, "Rate limit exceeded."),
+            failure("503 Service Unavailable", "The model is loading."),
+        ] {
+            let (url, _server) = fake_model(vec![reply]);
+            let reviewer = reviewer(url);
+            answers.push(reviewer.check(&reviewer.choice()).await);
+        }
+
+        assert!(
+            matches!(&answers[0], Checked::Unknown(why) if why.starts_with(&format!(
+                "could not reach the API: error sending request for url \
+                 (http://127.0.0.1:{port}/v1/chat/completions)"
+            ))),
+            "{answers:?}"
+        );
+        // Another request would find no API, so these are the answers to the first.
+        assert_eq!(
+            answers[1..],
+            [
+                Checked::Unknown(
+                    "the API answered 408 Request Timeout: The gateway timed out.".to_string()
+                ),
+                Checked::Unknown("the API answered 409 Conflict: No replica is free.".to_string()),
+                Checked::Unknown(
+                    "the API answered 429 Too Many Requests: Rate limit exceeded.".to_string()
+                ),
+                Checked::Unknown(
+                    "the API answered 503 Service Unavailable: The model is loading.".to_string()
+                ),
+            ]
+        );
     }
 }

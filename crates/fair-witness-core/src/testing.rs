@@ -33,6 +33,21 @@ pub fn tool_call(name: &str, arguments: Value) -> Value {
     })
 }
 
+/// A reply cut off at the token limit after one token, as the check of a model gets it.
+pub fn one_token() -> Value {
+    json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "length",
+            "message": { "role": "assistant", "content": "Nothing" }
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+    })
+}
+
 /// What the fake model answers to one request.
 pub struct Reply {
     status: &'static str,
@@ -68,10 +83,22 @@ pub const EFFORT_NOT_ALLOWED: &str = "aqueduct.UnsupportedParamsError: openai do
     If you want to use these params dynamically send allowed_openai_params=['reasoning_effort'] in \
     your request.. Received Model Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
 
+/// What Aqueduct answered on 2026-10-25, with 400 Bad Request, to `qwen-3.8-27b` at the effort
+/// `high`, which Qwen 3.8's chat template refuses.
+pub const EFFORT_REFUSED: &str = "aqueduct.BadRequestError: OpenAIException - Error code: 400 - \
+    {'error': {'message': 'Unexpected reasoning effort high. Supported types are xhigh (default), \
+    medium, and low.', 'type': 'BadRequestError', 'param': None, 'code': 400}}. Received Model \
+    Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
+
 /// A refusal with 400 Bad Request and `message` in the body, as Aqueduct sends it.
 pub fn bad_request(message: &str) -> Reply {
+    failure("400 Bad Request", message)
+}
+
+/// An answer with `status`, such as `503 Service Unavailable`, and `message` in the body.
+pub fn failure(status: &'static str, message: &str) -> Reply {
     Reply {
-        status: "400 Bad Request",
+        status,
         headers: String::new(),
         body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
     }
