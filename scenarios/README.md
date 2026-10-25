@@ -87,7 +87,7 @@ explanation = "The DMP keeps the soil measurements as CSV, and now they are an E
 |---|---|
 | `description` | What the researcher does, in a sentence or two. Required |
 | `[[set]]` | One for each change set, in the order the script makes them |
-| `changes` | The changes fair-witness should report, in any order, as its `changes` events give them: `created`, `changed` or `deleted` with a path, or `renamed` with `from` and `to`. Paths are relative to the project folder. Leave it out to skip the comparison, such as for a bulk import |
+| `changes` | The changes fair-witness should report, in any order, as its `changes` events give them: `created`, `changed` or `deleted` with a path, or `renamed` with `from` and `to`. A file created in the set and written again under the same name is only `created`, and a file changed more than once is `changed` once. Paths are relative to the project folder. Leave it out to skip the comparison, such as for a bulk import |
 | `contradicts` | Whether the changes contradict the DMP. Required |
 | `dmp_field` | The DMP field they contradict, such as `dataset[0].personal_data`, or a list of the fields a careful reviewer could name, only when `contradicts` is true. A verdict's field counts when it is one of them or a field inside one, such as `dataset[0].distribution[0].format[0]` for `dataset[0].distribution[0].format`, with or without a leading `dmp.`. Left out, any field counts. The fake model hands in the first |
 | `explanation` | Why this verdict is right, for the person who checks the scenario. The fake model hands it in as its explanation, and a model's own explanation is not compared with it. Required |
