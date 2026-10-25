@@ -114,8 +114,9 @@ pub fn asks_to_allow_effort(error: &genai::Error) -> Option<String> {
     (*status == StatusCode::BAD_REQUEST && asks_for_effort(body)).then(|| body.clone())
 }
 
-/// What the API said when it refused a request with a 4xx status other than 429 Too Many
-/// Requests, which sending it again would not change.
+/// What the API said when it refused a request with a 4xx status that sending it again would
+/// not change. OpenAI's SDK sends a request again after 408 Request Timeout, 409 Conflict and 429
+/// Too Many Requests, which a busy API answers.
 pub fn refused(error: &genai::Error) -> Option<String> {
     let genai::Error::WebModelCall {
         webc_error: webc::Error::ResponseFailedStatus { status, body, .. },
@@ -124,7 +125,12 @@ pub fn refused(error: &genai::Error) -> Option<String> {
     else {
         return None;
     };
-    (status.is_client_error() && *status != StatusCode::TOO_MANY_REQUESTS).then(|| message(body))
+    let busy = [
+        StatusCode::REQUEST_TIMEOUT,
+        StatusCode::CONFLICT,
+        StatusCode::TOO_MANY_REQUESTS,
+    ];
+    (status.is_client_error() && !busy.contains(status)).then(|| message(body))
 }
 
 /// Why a request failed, without the request and the full answer that genai's errors hold.

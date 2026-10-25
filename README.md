@@ -232,7 +232,7 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
-Before it watches, `run` asks the API once whether it takes the model and effort, with a request like the first of a review but cut off after one token. If the API refuses them, `run` stops with the API's message, which often names what the model takes, instead of failing every review later. If the API cannot be reached, answers `429 Too Many Requests` or fails on its side, `run` starts anyway, and the header warns that the model could not be checked.
+Before it watches, `run` asks the API once whether it takes the model and effort, with a request like the first of a review but cut off after one token. If the API refuses them, `run` stops with the API's message, which often names what the model takes, instead of failing every review later. If the API cannot be reached, answers that it is busy with `408 Request Timeout`, `409 Conflict` or `429 Too Many Requests`, or fails on its side, `run` starts anyway, and the header warns that the model could not be checked.
 
 If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, also when `--dmp` names it, and not for another DMP given with `--dmp`.
 

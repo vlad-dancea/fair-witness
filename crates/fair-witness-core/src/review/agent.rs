@@ -128,11 +128,11 @@ pub struct Reviewer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Checked {
     Accepted,
-    /// The API refused the request with a 4xx status other than 429 Too Many Requests, and said
-    /// this.
+    /// The API refused the request with a 4xx status other than 408 Request Timeout, 409
+    /// Conflict and 429 Too Many Requests, and said this.
     Refused(String),
     /// The check could not tell, for this reason, such as an API that could not be reached,
-    /// answered 429 Too Many Requests or failed on its side.
+    /// answered that it is busy with 408, 409 or 429, or failed on its side.
     Unknown(String),
 }
 
@@ -1067,6 +1067,8 @@ mod tests {
         let unreachable = reviewer(format!("http://127.0.0.1:{port}/v1"));
         let mut answers = vec![unreachable.check(&unreachable.choice()).await];
         for reply in [
+            failure("408 Request Timeout", "The gateway timed out."),
+            failure("409 Conflict", "No replica is free."),
             too_many_requests(None, "Rate limit exceeded."),
             failure("503 Service Unavailable", "The model is loading."),
         ] {
@@ -1086,6 +1088,10 @@ mod tests {
         assert_eq!(
             answers[1..],
             [
+                Checked::Unknown(
+                    "the API answered 408 Request Timeout: The gateway timed out.".to_string()
+                ),
+                Checked::Unknown("the API answered 409 Conflict: No replica is free.".to_string()),
                 Checked::Unknown(
                     "the API answered 429 Too Many Requests: Rate limit exceeded.".to_string()
                 ),
