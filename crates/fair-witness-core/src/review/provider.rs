@@ -115,14 +115,9 @@ fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
         if let Ok(seconds) = value.parse() {
             return wait(seconds);
         }
-        let date = HTTP_DATES
-            .iter()
-            .find_map(|format| DateTime::strptime(format, value).ok())?
-            .to_zoned(TimeZone::UTC)
-            .ok()?
-            .timestamp();
-        // A date that has passed asks for no wait at all.
-        Some(Duration::try_from(date.duration_since(Timestamp::now())).unwrap_or_default())
+        // A date that seems to have passed, such as when the clocks differ, gives no hint, so
+        // that the waits grow as without one instead of the retries going out at once.
+        Duration::try_from(http_date(value)?.duration_since(Timestamp::now())).ok()
     });
     from_header.or_else(|| {
         let body = body.to_ascii_lowercase();
@@ -136,6 +131,13 @@ fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
         }
         wait(seconds.parse().ok()?)
     })
+}
+
+fn http_date(value: &str) -> Option<Timestamp> {
+    let date = HTTP_DATES
+        .iter()
+        .find_map(|format| DateTime::strptime(format, value).ok())?;
+    Some(date.to_zoned(TimeZone::UTC).ok()?.timestamp())
 }
 
 /// A wait of `seconds`, or none for a negative one. One too long for a `Duration` stays too
@@ -189,13 +191,7 @@ mod tests {
             Some(Duration::MAX)
         );
         assert_eq!(retry_after(Some("-1"), aqueduct), secs(44));
-        for date in [
-            "Thu, 01 Jan 1970 00:00:01 GMT",
-            "Thursday, 01-Jan-70 00:00:01 GMT",
-            "Thu Jan  1 00:00:01 1970",
-        ] {
-            assert_eq!(retry_after(Some(date), ""), secs(0), "{date}");
-        }
+        assert_eq!(retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), ""), None);
         let in_a_minute = (Timestamp::now() + Duration::from_secs(60)).to_zoned(TimeZone::UTC);
         for format in HTTP_DATES {
             let date = in_a_minute.strftime(format).to_string();
@@ -204,6 +200,18 @@ mod tests {
                 wait > secs(58).unwrap() && wait <= secs(60).unwrap(),
                 "{date}: {wait:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reads_dates_in_each_form_http_allows() {
+        let date: Timestamp = "1994-11-06T08:49:37Z".parse().unwrap();
+        for value in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(http_date(value), Some(date), "{value}");
         }
     }
 }
