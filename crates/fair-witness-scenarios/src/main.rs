@@ -28,7 +28,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 use url::{Host, Url};
 
-use report::{Accuracy, Outcome};
+use report::{Accuracy, Outcome, Refused};
 use run::{API_KEY, Model, Settings, can_hide};
 use scenario::Scenario;
 
@@ -45,8 +45,10 @@ const AQUEDUCT: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
     about = "Run the researcher scenarios against headless fair-witness, with a fake model or \
              real ones",
     after_help = "With --model, the scenarios run against real models, each at every --effort, \
-                  and the runner reports how often each gave the expected verdict. The API key \
-                  comes from FAIR_WITNESS_API_KEY, which only fair-witness gets."
+                  and the runner reports how often each gave the expected verdict. It first asks \
+                  the API once about each model and effort, and one the API refuses does not \
+                  run. The API key comes from FAIR_WITNESS_API_KEY, which only these checks and \
+                  fair-witness get."
 )]
 struct Args {
     #[arg(help = "Run only the scenarios whose names contain one of these")]
@@ -137,6 +139,9 @@ struct Results<'a> {
     debounce_ms: u64,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     accuracy: &'a [Accuracy],
+    /// The models and efforts the API refused, which did not run.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    refused: &'a [Refused],
     runs: &'a [Outcome],
 }
 
@@ -161,7 +166,7 @@ fn run() -> Result<bool> {
         None => built_binary()?,
     };
     let scenarios = load(&args.scenarios, &args.names)?;
-    let models = models(&args)?;
+    let mut models = models(&args)?;
     let fake = models == [Model::Fake];
     let repeats = args
         .repeats
@@ -191,6 +196,13 @@ fn run() -> Result<bool> {
         debounce: Duration::from_millis(args.debounce_ms),
         api_key,
     };
+    let refused = run::check(&models, &settings)?;
+    let tried = models.len();
+    models.retain(|model| {
+        !refused
+            .iter()
+            .any(|refused| refused.model == model.name() && refused.effort == model.effort())
+    });
     let mut jobs = Vec::new();
     for repeat in 1..=repeats {
         for (scenario_index, scenario) in scenarios.iter().enumerate() {
@@ -233,14 +245,16 @@ fn run() -> Result<bool> {
         repeats,
         debounce_ms: args.debounce_ms,
         accuracy: &accuracy,
+        refused: &refused,
         runs: &outcomes,
     };
     let one_each = jobs.len() == scenarios.len();
     if fake {
         print!("{}", tables::passed(&outcomes, one_each));
-    } else {
+    } else if !outcomes.is_empty() {
         print!("{}", tables::accuracy(&outcomes, &accuracy));
     }
+    print!("{}", tables::refused(&refused));
     print!("{}", tables::problems(&outcomes, fake, one_each));
     write_results(&folder, &results, &events)?;
     let passed = outcomes.iter().filter(|outcome| outcome.passed).count();
@@ -250,12 +264,16 @@ fn run() -> Result<bool> {
     } else {
         "ran without problems"
     };
+    let refusals = match refused.len() {
+        0 => String::new(),
+        count => format!(", and the API refused {count} of {tried} models and efforts"),
+    };
     println!(
-        "\n{passed} of {} {runs} {went}. Results and events are in {}",
+        "\n{passed} of {} {runs} {went}{refusals}. Results and events are in {}",
         outcomes.len(),
         folder.display()
     );
-    Ok(passed == outcomes.len())
+    Ok(passed == outcomes.len() && refused.is_empty())
 }
 
 /// Stops the scripts that are running when the runner is stopped, since they run in process

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,10 +9,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use fair_witness_core::project::Effort;
+use fair_witness_core::project::{AiConfig, Effort};
+use fair_witness_core::review::{Checked, ModelChoice, Reviewer};
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
 
+use crate::report::Refused;
 use crate::scenario::{DMP, FILES, SCRIPT, Scenario};
 
 /// Generous, so that a slow CI machine still makes it, while a scenario that hangs fails.
@@ -40,7 +43,7 @@ static GROUPS: Mutex<Option<Vec<u32>>> = Mutex::new(Some(Vec::new()));
 pub struct Settings {
     pub binary: PathBuf,
     pub debounce: Duration,
-    /// The key for the API of the real models, which only fair-witness gets.
+    /// The key for the API of the real models, which only the checks and fair-witness get.
     pub api_key: Option<String>,
 }
 
@@ -92,6 +95,51 @@ fn file_name(name: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+/// Asks the API once whether it takes each real model at its effort, as fair-witness does when it
+/// starts, and gives back the ones it refused, which are not worth a run. Says on stderr which
+/// ones the check could not tell about, which run anyway.
+pub fn check(models: &[Model], settings: &Settings) -> Result<Vec<Refused>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start checking the models")?;
+    let key = settings.api_key.as_deref();
+    // One reviewer for each API, which remembers the models it asked to allow an effort for.
+    let mut reviewers: HashMap<&str, Reviewer> = HashMap::new();
+    let mut refused = Vec::new();
+    for model in models {
+        let Model::Real { url, name, effort } = model else {
+            continue;
+        };
+        let reviewer = reviewers.entry(url).or_insert_with(|| {
+            let ai = AiConfig {
+                url: url.clone(),
+                model: name.clone(),
+                effort: effort.clone(),
+            };
+            Reviewer::new(&ai, settings.api_key.clone())
+        });
+        let choice = ModelChoice {
+            model: name.clone(),
+            effort: effort.clone(),
+        };
+        match runtime.block_on(reviewer.check(&choice)) {
+            Checked::Accepted => {}
+            Checked::Refused(error) => refused.push(Refused {
+                model: name.clone(),
+                effort: effort.clone(),
+                error: hide(error, key),
+            }),
+            Checked::Unknown(why) => eprintln!(
+                "Could not check {name} {}, so it runs anyway: {}",
+                effort.name(),
+                hide(why, key)
+            ),
+        }
+    }
+    Ok(refused)
 }
 
 /// What a run of a scenario produced: every event fair-witness printed and, when the run went
@@ -208,14 +256,13 @@ fn witness_command(
         .args(["--ai-url", url, "--model", model.name()])
         // In one argument, so that a name starting with `-` is not read as a flag.
         .arg(format!("--effort={}", model.effort().name()))
+        // `check` asked the API about each real model and effort before all their runs, and the
+        // fake model answers only what the scenario expects.
+        .arg("--skip-model-check")
         .env(
             "FAIR_WITNESS_DEBOUNCE_MS",
             settings.debounce.as_millis().to_string(),
         );
-    // The fake model answers only what the scenario expects.
-    if *model == Model::Fake {
-        command.arg("--skip-model-check");
-    }
     match (model, &settings.api_key) {
         (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
         // A key meant for a real model must not go to the fake one.
@@ -642,8 +689,10 @@ fn left(deadline: Instant) -> Duration {
 mod tests {
     use std::io::Cursor;
 
-    use super::*;
+    use fair_witness_core::testing::{EFFORT_REFUSED, bad_request, one_token};
     use serde_json::json;
+
+    use super::*;
 
     fn scenario() -> Scenario {
         Scenario {
@@ -709,12 +758,69 @@ mod tests {
                 "https://api.example.org/v1",
                 "--model",
                 "large",
-                "--effort=high"
+                "--effort=high",
+                "--skip-model-check"
             ]
         );
         assert_eq!(api_key(&witness), Some(Some("sk-secret")));
         assert_eq!(api_key(&fake), Some(None));
         assert_eq!(api_key(&script_command(&scenario(), folder)), Some(None));
+    }
+
+    #[test]
+    fn reports_the_models_and_efforts_the_api_refuses_with_its_message() {
+        let gone = "The model gone is not available with the key sk-secret.";
+        let (url, server) = fake_model(vec![
+            bad_request(EFFORT_REFUSED),
+            bad_request(EFFORT_REFUSED),
+            one_token().into(),
+            bad_request(gone),
+            bad_request(gone),
+        ]);
+        let model = |name: &str, effort: &str| Model::Real {
+            url: url.clone(),
+            name: name.to_string(),
+            effort: effort.parse().unwrap(),
+        };
+        let settings = Settings {
+            binary: PathBuf::from("fair-witness"),
+            debounce: Duration::from_millis(500),
+            api_key: Some("sk-secret".to_string()),
+        };
+
+        let refused = check(
+            &[
+                Model::Fake,
+                model("qwen", "high"),
+                model("qwen", "xhigh"),
+                model("gone", "default"),
+            ],
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(
+            refused,
+            [
+                Refused {
+                    model: "qwen".to_string(),
+                    effort: "high".parse().unwrap(),
+                    error: EFFORT_REFUSED.to_string(),
+                },
+                Refused {
+                    model: "gone".to_string(),
+                    effort: Effort::default(),
+                    error: "The model gone is not available with the key [API key].".to_string(),
+                },
+            ]
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|(head, _)| head.contains("authorization: Bearer sk-secret")),
+            "{requests:?}"
+        );
     }
 
     #[test]

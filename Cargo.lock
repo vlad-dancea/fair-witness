@@ -1050,6 +1050,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+ "tokio",
  "toml",
  "url",
 ]

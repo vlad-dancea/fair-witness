@@ -8,6 +8,17 @@ use serde::Serialize;
 use crate::run::{Model, Ran};
 use crate::scenario::{Expected, Scenario};
 
+/// A model and effort that the API refused when the runner checked them, so that they did not
+/// run.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Refused {
+    pub model: String,
+    #[serde(skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
+    /// What the API said.
+    pub error: String,
+}
+
 /// How a run of a scenario went.
 #[derive(Debug, Serialize)]
 pub struct Outcome {
