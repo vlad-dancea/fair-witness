@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use fair_witness_core::project::{Effort, Project};
-use fair_witness_core::review::{self, ModelChoice, Reviewer};
+use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
 
@@ -65,10 +65,25 @@ enum Focus {
 pub enum Outcome {
     Open,
     Closed,
-    Chosen(ModelChoice),
+    /// A choice to use, with why it could not be checked, if it could not.
+    Chosen(ModelChoice, Option<String>),
+}
+
+/// Whether the API takes the choice, which the panel asks before using it.
+enum Check {
+    None,
+    Running {
+        choice: ModelChoice,
+        checked: Receiver<Checked>,
+    },
+    Refused {
+        choice: ModelChoice,
+        message: String,
+    },
 }
 
 pub struct ModelPanel {
+    reviewer: Arc<Reviewer>,
     current: ModelChoice,
     models: Models,
     filter: String,
@@ -76,6 +91,7 @@ pub struct ModelPanel {
     efforts: Vec<Effort>,
     effort: ListState,
     focus: Focus,
+    check: Check,
 }
 
 impl ModelPanel {
@@ -98,6 +114,7 @@ impl ModelPanel {
         }
         let effort = efforts.iter().position(|e| *e == current.effort);
         Self {
+            reviewer: settings.reviewer.clone(),
             current,
             models: Models::Loading(models),
             filter: String::new(),
@@ -105,18 +122,21 @@ impl ModelPanel {
             efforts,
             effort: ListState::default().with_selected(effort),
             focus: Focus::Model,
+            check: Check::None,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
         match key.code {
             KeyCode::Esc => return Outcome::Closed,
-            KeyCode::Enter => {
-                return match self.chosen() {
-                    Some(choice) => Outcome::Chosen(choice),
-                    None => Outcome::Open,
-                };
-            }
+            // The choice being checked stays as it is until the API answers.
+            _ if matches!(self.check, Check::Running { .. }) => {}
+            KeyCode::Enter => match self.chosen() {
+                // The one in use needs no check.
+                Some(choice) if choice == self.current => return Outcome::Chosen(choice, None),
+                Some(choice) => self.start_check(choice),
+                None => {}
+            },
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                 self.focus = match self.focus {
                     Focus::Model => Focus::Effort,
@@ -137,6 +157,39 @@ impl ModelPanel {
             _ => {}
         }
         Outcome::Open
+    }
+
+    fn start_check(&mut self, choice: ModelChoice) {
+        let (sender, checked) = oneshot::channel();
+        let reviewer = self.reviewer.clone();
+        let asked = choice.clone();
+        tokio::spawn(async move {
+            let _ = sender.send(reviewer.check(&asked).await);
+        });
+        self.check = Check::Running { choice, checked };
+    }
+
+    /// What came of checking the choice: `Chosen` once the API took it or the check could not
+    /// tell, and `Open` while it checks, after the API refused it, or before any check.
+    pub fn checked(&mut self) -> Outcome {
+        let Check::Running { choice, checked } = &mut self.check else {
+            return Outcome::Open;
+        };
+        let checked = match checked.try_recv() {
+            Ok(checked) => checked,
+            Err(TryRecvError::Empty) => return Outcome::Open,
+            Err(TryRecvError::Closed) => Checked::Unknown("the check stopped".to_string()),
+        };
+        let choice = choice.clone();
+        self.check = Check::None;
+        match checked {
+            Checked::Accepted => Outcome::Chosen(choice, None),
+            Checked::Unknown(why) => Outcome::Chosen(choice, Some(why)),
+            Checked::Refused(message) => {
+                self.check = Check::Refused { choice, message };
+                Outcome::Open
+            }
+        }
     }
 
     fn list(&mut self) -> &mut ListState {
@@ -201,7 +254,12 @@ impl ModelPanel {
         let [area] = Layout::horizontal([Constraint::Max(72)])
             .flex(Flex::Center)
             .areas(area);
-        let [area] = Layout::vertical([Constraint::Max(rows + 5)])
+        let check = self.check_message();
+        // The borders and the padding take 4 columns, and a blank row goes above the message.
+        let check_rows = check.as_ref().map_or(0, |check| {
+            check.line_count(area.width.saturating_sub(4)) as u16 + 1
+        });
+        let [area] = Layout::vertical([Constraint::Max(rows + 5 + check_rows)])
             .flex(Flex::Center)
             .areas(area);
         frame.render_widget(Clear, area);
@@ -225,12 +283,18 @@ impl ModelPanel {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let [filter, _, columns] = Layout::vertical([
+        let [filter, _, columns, check_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Fill(1),
+            Constraint::Length(check_rows),
         ])
         .areas(inner);
+        if let Some(check) = check {
+            let [_, message] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(check_area);
+            frame.render_widget(check, message);
+        }
         self.draw_filter(frame, filter);
         // Room for the longest effort and the mark of the one in use, since --effort takes any,
         // but at most half the width, so that the models stay readable.
@@ -250,6 +314,23 @@ impl ModelPanel {
             divider.inner(Margin::new(1, 0)),
         );
         self.draw_efforts(frame, efforts);
+    }
+
+    /// What the panel says about the check of the choice, if anything.
+    fn check_message(&self) -> Option<Paragraph<'static>> {
+        let text = match &self.check {
+            Check::None => return None,
+            Check::Running { choice, .. } => Text::styled(
+                format!("Checking {} with the API…", describe(choice)),
+                Modifier::DIM,
+            ),
+            // The API's message can span lines, which `Text` keeps apart.
+            Check::Refused { choice, message } => Text::styled(
+                format!("The API refuses {}: {message}", describe(choice)),
+                Color::Red,
+            ),
+        };
+        Some(Paragraph::new(text).wrap(Wrap { trim: false }))
     }
 
     fn draw_filter(&self, frame: &mut Frame, area: Rect) {
@@ -341,23 +422,31 @@ mod tests {
     use std::time::Duration;
 
     use fair_witness_core::project::AiConfig;
-    use fair_witness_core::testing::fake_model;
+    use fair_witness_core::testing::{
+        EFFORT_REFUSED, Reply, bad_request, fake_model, one_token, too_many_requests,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
 
     use super::*;
 
-    /// A panel that has listed the models of a fake server, with qwen3:8b at `effort` in use.
-    async fn loaded(effort: &str) -> ModelPanel {
-        let (url, _server) = fake_model(vec![json!({
-            "object": "list",
-            "data": [
-                { "id": "qwen3:8b", "object": "model" },
-                { "id": "llama3.2", "object": "model" },
-                { "id": "mistral-small", "object": "model" }
-            ]
-        })]);
+    /// A panel that has listed the models of a fake server, with qwen3:8b at `effort` in use. The
+    /// server answers the checks with `checks`.
+    async fn loaded(effort: &str, checks: Vec<Reply>) -> ModelPanel {
+        let mut replies: Vec<Reply> = vec![
+            json!({
+                "object": "list",
+                "data": [
+                    { "id": "qwen3:8b", "object": "model" },
+                    { "id": "llama3.2", "object": "model" },
+                    { "id": "mistral-small", "object": "model" }
+                ]
+            })
+            .into(),
+        ];
+        replies.extend(checks);
+        let (url, _server) = fake_model(replies);
         let ai = AiConfig {
             url: url.clone(),
             model: "qwen3:8b".to_string(),
@@ -381,8 +470,27 @@ mod tests {
         panel
     }
 
+    /// What happens once the API has answered the check of the choice.
+    async fn once_checked(panel: &mut ModelPanel) -> Outcome {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outcome = panel.checked();
+                if !matches!(panel.check, Check::Running { .. }) {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the check did not end in time")
+    }
+
     fn drawn(panel: &mut ModelPanel) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        drawn_rows(panel, 14)
+    }
+
+    fn drawn_rows(panel: &mut ModelPanel, rows: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, rows)).unwrap();
         terminal
             .draw(|frame| panel.draw(frame, frame.area()))
             .unwrap();
@@ -391,12 +499,12 @@ mod tests {
 
     #[tokio::test]
     async fn lists_the_models_and_marks_the_one_in_use() {
-        insta::assert_snapshot!(drawn(&mut loaded("medium").await));
+        insta::assert_snapshot!(drawn(&mut loaded("medium", Vec::new()).await));
     }
 
     #[tokio::test]
     async fn filters_the_models_and_moves_to_the_efforts() {
-        let mut panel = loaded("medium").await;
+        let mut panel = loaded("medium", Vec::new()).await;
         for key in [
             KeyCode::Char('l'),
             KeyCode::Char('l'),
@@ -411,11 +519,12 @@ mod tests {
     #[tokio::test]
     async fn keeps_an_effort_it_does_not_offer_however_long() {
         let effort = "ultra".repeat(13);
-        let mut panel = loaded(&effort).await;
+        let mut panel = loaded(&effort, Vec::new()).await;
 
         let shown = drawn(&mut panel);
         assert!(shown.contains("│ mistral-small "), "{shown}");
-        let Outcome::Chosen(choice) = panel.handle_key(KeyCode::Enter.into()) else {
+        // The choice in use needs no check.
+        let Outcome::Chosen(choice, None) = panel.handle_key(KeyCode::Enter.into()) else {
             panic!("nothing chosen");
         };
         assert_eq!(
@@ -424,6 +533,65 @@ mod tests {
                 model: "qwen3:8b".to_string(),
                 effort: effort.parse().unwrap(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn turns_down_an_effort_the_api_refuses_with_its_message() {
+        let mut panel = loaded(
+            "medium",
+            vec![bad_request(EFFORT_REFUSED), bad_request(EFFORT_REFUSED)],
+        )
+        .await;
+
+        for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
+            assert!(matches!(panel.handle_key(key.into()), Outcome::Open));
+        }
+        let checking = drawn(&mut panel);
+        // While it checks, the choice stays as it is.
+        panel.handle_key(KeyCode::Down.into());
+        let outcome = once_checked(&mut panel).await;
+
+        assert!(
+            checking.contains("│ Checking qwen3:8b (high effort) with the API…"),
+            "{checking}"
+        );
+        assert!(matches!(outcome, Outcome::Open));
+        insta::assert_snapshot!(drawn_rows(&mut panel, 22));
+    }
+
+    #[tokio::test]
+    async fn uses_a_choice_the_api_takes_or_that_it_could_not_check() {
+        let mut outcomes = Vec::new();
+        for answer in [
+            one_token().into(),
+            too_many_requests(None, "Rate limit exceeded."),
+        ] {
+            let mut panel = loaded("medium", vec![answer]).await;
+            for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
+                panel.handle_key(key.into());
+            }
+            match once_checked(&mut panel).await {
+                Outcome::Chosen(choice, unchecked) => outcomes.push((choice, unchecked)),
+                _ => panic!("nothing chosen"),
+            }
+        }
+
+        let high = ModelChoice {
+            model: "qwen3:8b".to_string(),
+            effort: "high".parse().unwrap(),
+        };
+        assert_eq!(
+            outcomes,
+            [
+                (high.clone(), None),
+                (
+                    high,
+                    Some(
+                        "the API answered 429 Too Many Requests: Rate limit exceeded.".to_string()
+                    )
+                ),
+            ]
         );
     }
 }

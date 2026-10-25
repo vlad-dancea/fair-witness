@@ -197,7 +197,7 @@ Press `m` to change the model without restarting:
 
 - Type to filter the model list, and use `↑↓` to choose.
 - `Tab` switches to the **effort** column for models that support reasoning effort: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. Each model takes only some of these names, and its API refuses, ignores or rounds the others. The list also holds an effort given with `--effort` that it does not offer.
-- `Enter` uses the choice from the next change set on and saves it to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. `Esc` cancels.
+- `Enter` first asks the API once whether it takes the model and effort, as `run` does when it starts. If the API refuses them, the panel stays open with its message, which often names the efforts the model takes. Otherwise the choice is used from the next change set on and saved to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. When the check cannot tell, such as when the API answers `429 Too Many Requests`, the Changes pane says so. `Esc` cancels, also while the panel checks.
 
 To use a different API or key, quit and run `fair-witness setup`.
 

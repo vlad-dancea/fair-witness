@@ -169,6 +169,10 @@ impl Screen {
         let mut tick = tokio::time::interval(TICK);
         let mut watching = true;
         while !self.quit {
+            if let Some(panel) = &mut self.panel {
+                let outcome = panel.checked();
+                self.handle_outcome(outcome);
+            }
             terminal.draw(|frame| self.draw(frame))?;
             tokio::select! {
                 event = terminal_events.next() => match event {
@@ -202,14 +206,8 @@ impl Screen {
                 self.quit = true;
                 return;
             }
-            match panel.handle_key(key) {
-                Outcome::Open => {}
-                Outcome::Closed => self.panel = None,
-                Outcome::Chosen(choice) => {
-                    self.panel = None;
-                    self.use_model(choice);
-                }
-            }
+            let outcome = panel.handle_key(key);
+            self.handle_outcome(outcome);
             return;
         }
         match key.code {
@@ -235,11 +233,31 @@ impl Screen {
         }
     }
 
-    fn use_model(&mut self, choice: ModelChoice) {
+    fn handle_outcome(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Open => {}
+            Outcome::Closed => self.panel = None,
+            Outcome::Chosen(choice, unchecked) => {
+                self.panel = None;
+                self.use_model(choice, unchecked);
+            }
+        }
+    }
+
+    /// Uses `choice` from the next review on, saying why it could not be checked, if it could
+    /// not.
+    fn use_model(&mut self, choice: ModelChoice, unchecked: Option<String>) {
         let Some(settings) = &self.settings else {
             return;
         };
         let described = model_panel::describe(&choice);
+        if let Some(why) = unchecked {
+            let warning = format!(
+                "Could not check {described}, so the reviews will show whether the API takes it: \
+                 {why}"
+            );
+            self.log.push(Line::from(warning.yellow()).into());
+        }
         if let Err(e) = settings.apply(choice) {
             self.log.push(
                 Line::from(
