@@ -83,9 +83,12 @@ pub const EFFORT_NOT_ALLOWED: &str = "aqueduct.UnsupportedParamsError: openai do
     If you want to use these params dynamically send allowed_openai_params=['reasoning_effort'] in \
     your request.. Received Model Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
 
-/// What Aqueduct answers when Qwen 3.8's chat template refuses the effort `high`.
-pub const EFFORT_REFUSED: &str =
-    "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.";
+/// What Aqueduct answered on 2026-10-25, with 400 Bad Request, to `qwen-3.8-27b` at the effort
+/// `high`, which Qwen 3.8's chat template refuses.
+pub const EFFORT_REFUSED: &str = "aqueduct.BadRequestError: OpenAIException - Error code: 400 - \
+    {'error': {'message': 'Unexpected reasoning effort high. Supported types are xhigh (default), \
+    medium, and low.', 'type': 'BadRequestError', 'param': None, 'code': 400}}. Received Model \
+    Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
 
 /// A refusal with 400 Bad Request and `message` in the body, as Aqueduct sends it.
 pub fn bad_request(message: &str) -> Reply {

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use fair_witness_core::project::{Config, DamapConfig, Project};
-use fair_witness_core::testing::{fake_model, tool_call};
+use fair_witness_core::testing::{EFFORT_REFUSED, bad_request, fake_model, one_token, tool_call};
 use serde_json::{Value, json};
 
 /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -129,6 +129,15 @@ fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+/// A port that was just free, so that nothing answers there.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 #[test]
 fn prints_the_events_of_a_folder_that_was_never_set_up() {
     let parent = tempfile::tempdir().unwrap();
@@ -141,14 +150,17 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     let elsewhere = tempfile::tempdir().unwrap();
     let dmp_file = elsewhere.path().join("dmp.json");
     std::fs::write(&dmp_file, DMP).unwrap();
-    let (endpoint, server) = fake_model(vec![tool_call(
-        "report_verdict",
-        json!({
-            "contradicts": true,
-            "dmp_field": "dataset[0].personal_data",
-            "explanation": "Patient names, but the DMP says no personal data."
-        }),
-    )]);
+    let (endpoint, server) = fake_model(vec![
+        one_token(),
+        tool_call(
+            "report_verdict",
+            json!({
+                "contradicts": true,
+                "dmp_field": "dataset[0].personal_data",
+                "explanation": "Patient names, but the DMP says no personal data."
+            }),
+        ),
+    ]);
 
     let run = Run::start(
         &current,
@@ -210,8 +222,10 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     );
     assert!(!project.join(".fair-witness").exists());
     let requests = server.join().unwrap();
-    assert!(requests[0].1.to_string().contains("Soil samples"));
-    assert_eq!(requests[0].1["reasoning_effort"], "ultra");
+    // The first request checks the model and effort.
+    assert_eq!(requests[0].1["max_tokens"], 1);
+    assert!(requests[1].1.to_string().contains("Soil samples"));
+    assert_eq!(requests[1].1["reasoning_effort"], "ultra");
     assert_eq!(run.stop(), Some(0));
 }
 
@@ -219,15 +233,9 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
 fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
     let root = tempfile::tempdir().unwrap();
     let project = Project::new(root.path().to_path_buf());
-    // A port that was just free, so DAMAP cannot be reached.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     let config = Config {
         damap: DamapConfig {
-            frontend_url: format!("http://127.0.0.1:{port}"),
+            frontend_url: format!("http://127.0.0.1:{}", free_port()),
             dmp_id: Some(3),
         },
         ai: None,
@@ -240,10 +248,15 @@ fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
             &serde_json::from_str(DMP).unwrap(),
         )
         .unwrap();
-    let (endpoint, server) = fake_model(vec![tool_call(
-        "report_verdict",
-        json!({ "contradicts": false, "explanation": "Notes are not data." }),
-    )]);
+    // Each run checks the model first.
+    let (endpoint, server) = fake_model(vec![
+        one_token(),
+        one_token(),
+        tool_call(
+            "report_verdict",
+            json!({ "contradicts": false, "explanation": "Notes are not data." }),
+        ),
+    ]);
     let ai = ["--ai-url", &endpoint, "--model", "test"];
 
     let mut other_dmp = Run::start(root.path(), &[&["--dmp", "4"], &ai[..]].concat());
@@ -272,7 +285,7 @@ fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
     let events = run.events_until_verdict();
     assert_eq!(events.last().unwrap()["verdict"]["contradicts"], false);
     assert!(
-        server.join().unwrap()[0]
+        server.join().unwrap()[2]
             .1
             .to_string()
             .contains("Soil samples")
@@ -296,6 +309,85 @@ fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
         })
         .collect();
     assert_eq!(logged, events);
+}
+
+/// A folder that was never set up, with a DMP file to check its changes against.
+fn unset_folder_with_a_dmp() -> (tempfile::TempDir, String) {
+    let root = tempfile::tempdir().unwrap();
+    let dmp_file = root.path().join("dmp.json");
+    std::fs::write(&dmp_file, DMP).unwrap();
+    let dmp_file = path(&dmp_file).to_string();
+    (root, dmp_file)
+}
+
+#[test]
+fn stops_when_the_api_refuses_the_model_and_effort() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let (endpoint, server) = fake_model(vec![
+        bad_request(EFFORT_REFUSED),
+        bad_request(EFFORT_REFUSED),
+    ]);
+
+    let mut run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            &endpoint,
+            "--model",
+            "test",
+            "--effort",
+            "high",
+        ],
+    );
+
+    assert_eq!(run.exit_code(), Some(2));
+    assert_eq!(
+        run.stderr_until("Pass another").join("\n"),
+        format!(
+            "error: {endpoint} refuses test (high effort): {EFFORT_REFUSED}\nPass another model \
+             with --model or another effort with --effort, or choose a model with \
+             `fair-witness setup`"
+        )
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+}
+
+#[test]
+fn starts_when_the_model_cannot_be_checked() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let endpoint = format!("http://127.0.0.1:{}/v1", free_port());
+
+    let run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            &endpoint,
+            "--model",
+            "test",
+        ],
+    );
+
+    let status = run.stderr_until("Warning:");
+    assert_eq!(
+        status[..2],
+        [
+            format!("Watching {}", root.path().display()),
+            format!("Comparing changes with the DMP in {dmp_file}."),
+        ]
+    );
+    assert!(
+        status[2].starts_with(
+            "Warning: could not check test, so the reviews will show whether the API takes it: \
+             could not reach the API: "
+        ),
+        "{}",
+        status[2]
+    );
+    assert_eq!(run.stop(), Some(0));
 }
 
 #[test]
@@ -340,10 +432,13 @@ fn start_with_a_large_dmp(project: &Path) -> Run {
     let dmp_file = elsewhere.path().join("dmp.json");
     let title = "x".repeat(1 << 20);
     std::fs::write(&dmp_file, json!({ "dmp": { "title": title } }).to_string()).unwrap();
-    let (endpoint, _server) = fake_model(vec![tool_call(
-        "report_verdict",
-        json!({ "contradicts": false, "explanation": "Notes are not data." }),
-    )]);
+    let (endpoint, _server) = fake_model(vec![
+        one_token(),
+        tool_call(
+            "report_verdict",
+            json!({ "contradicts": false, "explanation": "Notes are not data." }),
+        ),
+    ]);
     let run = Run::start_unread(
         project,
         &[

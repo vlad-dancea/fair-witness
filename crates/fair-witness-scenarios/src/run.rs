@@ -212,6 +212,10 @@ fn witness_command(
             "FAIR_WITNESS_DEBOUNCE_MS",
             settings.debounce.as_millis().to_string(),
         );
+    // The fake model answers only what the scenario expects.
+    if *model == Model::Fake {
+        command.arg("--skip-model-check");
+    }
     match (model, &settings.api_key) {
         (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
         // A key meant for a real model must not go to the fake one.
