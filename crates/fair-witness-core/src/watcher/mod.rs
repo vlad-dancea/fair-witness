@@ -4,6 +4,7 @@ mod summary;
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::mem;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -276,10 +277,17 @@ impl FolderWatcher {
                 self.discover(folder, &mut changes);
             }
         }
-        changes
-            .into_iter()
-            .map(|change| change.relative_to(&self.root))
-            .collect()
+        // inotify watches a new folder only once the watcher has added it, so a file written
+        // into it right away can come with its write but without its create. Walking the folder
+        // reports the file as created, and its write then finds it known.
+        let mut set = Vec::new();
+        extend_set(
+            &mut set,
+            changes
+                .into_iter()
+                .map(|change| change.relative_to(&self.root)),
+        );
+        set
     }
 
     fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
@@ -363,19 +371,9 @@ impl Held {
     }
 
     fn add(&mut self, batch: Held) {
-        // A file written again is still one change.
-        let changed: HashSet<&Path> = self
-            .changes
-            .iter()
-            .filter(|change| change.kind() == Kind::Changed)
-            .map(Change::path)
-            .collect();
-        let new: Vec<Change> = batch
-            .changes
-            .into_iter()
-            .filter(|change| change.kind() != Kind::Changed || !changed.contains(change.path()))
-            .collect();
-        self.changes.extend(new);
+        // The debouncer drops a write after a create only while it still holds the create, so
+        // a file written again comes in a later batch.
+        extend_set(&mut self.changes, batch.changes);
         self.last = self.last.max(batch.last);
     }
 
@@ -385,6 +383,27 @@ impl Held {
         // It hands on an event once the event is a debounce old and checks for such events
         // every quarter debounce, so this leaves a quarter to spare for a late check.
         end + debounce * 3 / 2
+    }
+}
+
+/// Adds `new` to the changes of a set, leaving out a `changed` for a file the set already has as
+/// created or changed, because the model would read it as one more change.
+fn extend_set(set: &mut Vec<Change>, new: impl IntoIterator<Item = Change>) {
+    let mut written = HashSet::new();
+    // Going through the set again keeps all of it, because a `changed` left out never changes
+    // `written`.
+    for change in mem::take(set).into_iter().chain(new) {
+        match &change {
+            Change::Changed(path) if written.contains(path) => continue,
+            Change::Created(path) | Change::Changed(path) => {
+                written.insert(path.clone());
+            }
+            // A path deleted or moved away comes back only as created or as where a rename
+            // went, and a rename brings another file there than the set has written.
+            Change::Renamed { to, .. } => written.retain(|path| !path.starts_with(to)),
+            Change::Deleted(_) => {}
+        }
+        set.push(change);
     }
 }
 
@@ -891,6 +910,100 @@ mod tests {
         assert_eq!(
             watcher.next().await.unwrap().unwrap(),
             [Change::Changed(PathBuf::from("c.csv"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_file_written_into_a_new_folder_only_as_created() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+
+        write(root, "analysis/plot_ph.py", "x");
+        // As inotify can report `mkdir -p analysis` and a file written into it right after,
+        // without the file's create.
+        let folder = notify::Event::new(EventKind::Create(notify::event::CreateKind::Folder))
+            .add_path(root.join("analysis"));
+        let edit = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(root.join("analysis/plot_ph.py"));
+        let changes = watcher.handle(vec![
+            DebouncedEvent::new(folder, Instant::now()),
+            DebouncedEvent::new(edit, Instant::now()),
+        ]);
+
+        assert_eq!(
+            changes,
+            ["analysis", "analysis/plot_ph.py"].map(|path| Change::Created(PathBuf::from(path)))
+        );
+    }
+
+    #[test]
+    fn lists_an_edit_to_a_file_moved_onto_a_path_the_set_wrote() {
+        let path = PathBuf::from;
+        let changes = vec![
+            Change::Created(path("a.csv")),
+            Change::Renamed {
+                from: path("a.csv"),
+                to: path("b.csv"),
+            },
+            Change::Renamed {
+                from: path("c.csv"),
+                to: path("a.csv"),
+            },
+            Change::Changed(path("a.csv")),
+            Change::Created(path("data/x.csv")),
+            Change::Deleted(path("data")),
+            Change::Renamed {
+                from: path("archive"),
+                to: path("data"),
+            },
+            Change::Changed(path("data/x.csv")),
+        ];
+        let mut set = Vec::new();
+
+        // Each in a batch of its own, so that every batch is checked against the ones before.
+        for change in changes.clone() {
+            extend_set(&mut set, [change]);
+        }
+
+        assert_eq!(set, changes);
+    }
+
+    #[tokio::test]
+    async fn lists_a_file_written_again_in_a_set_once() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::write(root.join("notes.txt"), "a").unwrap();
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        fs::write(root.join("results.csv"), "x").unwrap();
+
+        let start = Instant::now() - DEBOUNCE * 10;
+        let event = |kind, name: &str, time| {
+            DebouncedEvent::new(notify::Event::new(kind).add_path(root.join(name)), time)
+        };
+        let create = EventKind::Create(notify::event::CreateKind::File);
+        let edit = EventKind::Modify(ModifyKind::Any);
+        for batch in [
+            vec![
+                event(create, "results.csv", start),
+                event(edit, "notes.txt", start),
+            ],
+            vec![
+                event(edit, "results.csv", start + DEBOUNCE / 2),
+                event(edit, "notes.txt", start + DEBOUNCE / 2),
+            ],
+        ] {
+            batches.send(Ok(batch)).unwrap();
+        }
+
+        assert_eq!(
+            watcher.next().await.unwrap().unwrap(),
+            [
+                Change::Created(PathBuf::from("results.csv")),
+                Change::Changed(PathBuf::from("notes.txt")),
+            ]
         );
     }
 }
