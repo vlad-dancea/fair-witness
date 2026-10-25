@@ -183,7 +183,7 @@ What you do about a contradiction is up to you. Either undo the change, or, if t
 
 ### 4. See what the AI did
 
-Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts and how long each reply took.
+Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts, how long each reply took and how long a request waited when the API had too many.
 
 - `Tab` switches which pane the arrow keys scroll.
 - `c` collapses or expands long blocks, such as the DMP JSON.
@@ -274,6 +274,7 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"… does not look like an OpenAI-compatible API"**: the AI URL usually needs to end in `/v1`.
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
+- **"429 Too Many Requests"**: the API limits how many requests a model gets a minute, and a review takes 2 or 3. fair-witness waits as long as the API asks, at most a minute each time, and sends the request again, up to 10 times. The review fails when the API keeps refusing or asks for a longer wait, as for a daily quota. Wait and change the files again, or pick a model with a higher limit with `m`.
 - **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly; try a larger one with `m`.
 - **Something else went wrong**: run `FAIR_WITNESS_LOG=debug fair-witness run` and read the newest `-diagnostics.log` in `.fair-witness/log/`.
 - **No desktop notification**: the change list shows "could not show a notification" with the reason. Verdicts still appear in the terminal.

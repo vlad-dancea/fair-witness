@@ -294,6 +294,9 @@ mod tests {
                 }
                 Trace::Sent(text) => format!("#{set} sent {text}"),
                 Trace::Request { turn } => format!("#{set} request {turn}"),
+                Trace::RateLimited { turn, wait_ms, .. } => {
+                    format!("#{set} request {turn} waits {wait_ms} ms")
+                }
                 Trace::Reply { turn, calls, .. } => format!("#{set} reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output, .. } => format!("#{set} {name}: {output}"),
                 Trace::Failed(e) => format!("#{set} failed: {e}"),
