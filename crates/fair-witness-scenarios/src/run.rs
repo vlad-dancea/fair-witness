@@ -206,7 +206,8 @@ fn witness_command(
         .arg("--dmp-file")
         .arg(scenario.dir.join(DMP))
         .args(["--ai-url", url, "--model", model.name()])
-        .args(["--effort", model.effort().name()])
+        // In one argument, so that a name starting with `-` is not read as a flag.
+        .arg(format!("--effort={}", model.effort().name()))
         .env(
             "FAIR_WITNESS_DEBOUNCE_MS",
             settings.debounce.as_millis().to_string(),
@@ -704,8 +705,7 @@ mod tests {
                 "https://api.example.org/v1",
                 "--model",
                 "large",
-                "--effort",
-                "high"
+                "--effort=high"
             ]
         );
         assert_eq!(api_key(&witness), Some(Some("sk-secret")));

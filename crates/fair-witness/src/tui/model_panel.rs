@@ -232,12 +232,14 @@ impl ModelPanel {
         ])
         .areas(inner);
         self.draw_filter(frame, filter);
-        // Room for the longest effort and the mark of the one in use, since --effort takes any.
+        // Room for the longest effort and the mark of the one in use, since --effort takes any,
+        // but at most half the width, so that the models stay readable.
         let width = self.efforts.iter().map(|e| e.name().chars().count() + 2);
+        let width = (width.max().unwrap_or(0) as u16).min(columns.width / 2);
         let [models, divider, efforts] = Layout::horizontal([
             Constraint::Fill(1),
             Constraint::Length(3),
-            Constraint::Length(width.max().unwrap_or(0) as u16),
+            Constraint::Length(width),
         ])
         .areas(columns);
         self.draw_models(frame, models);
@@ -407,9 +409,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_an_effort_it_does_not_offer() {
-        let mut panel = loaded("ultra").await;
+    async fn keeps_an_effort_it_does_not_offer_however_long() {
+        let effort = "ultra".repeat(13);
+        let mut panel = loaded(&effort).await;
 
+        let shown = drawn(&mut panel);
+        assert!(shown.contains("│ mistral-small "), "{shown}");
         let Outcome::Chosen(choice) = panel.handle_key(KeyCode::Enter.into()) else {
             panic!("nothing chosen");
         };
@@ -417,7 +422,7 @@ mod tests {
             choice,
             ModelChoice {
                 model: "qwen3:8b".to_string(),
-                effort: "ultra".parse().unwrap(),
+                effort: effort.parse().unwrap(),
             }
         );
     }
