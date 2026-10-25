@@ -149,7 +149,7 @@ mkdir -p data
 printf 'name,birthdate,diagnosis\nAnna Muster,1980-04-02,asthma\n' > data/patients.csv
 ```
 
-About two seconds after the folder goes quiet, the changes show up as one numbered **change set**:
+About five seconds later, the changes show up as one numbered **change set**:
 
 ```
 created: data                                                    #1
@@ -157,7 +157,7 @@ created: data/patients.csv                                       #1
   ↳ checking against the DMP… 4s
 ```
 
-Changes that happen close together are grouped into one set. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Files that are not research data are left out, as described in [What is ignored](#what-is-ignored).
+Changes less than two seconds apart go into one set. In a folder that never stays quiet that long, such as during a long copy, a set ends a minute after its first change. Writes to a file that a program keeps open, such as a log, show up only once they pause for two seconds. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Files that are not research data are left out, as described in [What is ignored](#what-is-ignored).
 
 A set of more than 50 changes is listed per folder instead, for you and for the AI, such as `created: 412 paths under data/raw/`. The AI can still list the folder to see what is in it.
 
@@ -245,7 +245,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
 | `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, `default`, `none`, `low`, `medium` or `high`, instead of the effort chosen with `m`. `default` sends no effort, so the model uses its own |
-| | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000) |
+| | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000). A set ends 30 times as long after its first change at the latest |
 
 With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:
 

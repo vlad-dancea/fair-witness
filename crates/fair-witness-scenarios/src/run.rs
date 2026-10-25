@@ -185,10 +185,10 @@ fn run_into(
             scenario.sets.len()
         );
     }
-    // Changes the script made after it last waited come once they are older than the debounce,
-    // which the watcher checks every quarter of it.
+    // A set of changes the script made after it last waited comes two and a half debounces
+    // after the last of them.
     witness.collect_for(
-        settings.debounce * 3 / 2 + Duration::from_millis(200),
+        settings.debounce * 5 / 2 + Duration::from_millis(200),
         records,
     )?;
     witness.stop(records)

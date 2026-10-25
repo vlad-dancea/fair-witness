@@ -1,12 +1,12 @@
 mod filter;
 mod summary;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
@@ -23,6 +23,9 @@ pub use summary::{Listed, summarize};
 /// How long the folder stays quiet before its changes count as one change set, unless a
 /// caller asks for another time.
 pub const DEBOUNCE: Duration = Duration::from_secs(2);
+/// A folder that never stays quiet for the debounce, such as during a long copy, still gets a
+/// change set once its first change is this many debounces old.
+const LONGEST_SET: u32 = 30;
 /// The debouncer checks for quiet every quarter of the wait, so a wait of zero would have it
 /// spin.
 const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
@@ -115,6 +118,8 @@ impl Change {
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     events: UnboundedReceiver<DebounceEventResult>,
+    debounce: Duration,
+    held: Option<Held>,
     root: PathBuf,
     known: BTreeSet<PathBuf>,
     filter: Filter,
@@ -138,6 +143,8 @@ impl FolderWatcher {
         Ok(Self {
             _debouncer: debouncer,
             events,
+            debounce,
+            held: None,
             root: root.to_path_buf(),
             known,
             filter,
@@ -229,8 +236,7 @@ impl FolderWatcher {
         self.discover(to, changes);
     }
 
-    fn handle(&mut self, result: DebounceEventResult) -> Result<Vec<Change>, Vec<notify::Error>> {
-        let events = result?;
+    fn handle(&mut self, events: Vec<DebouncedEvent>) -> Vec<Change> {
         // Opening a tag to read it is an event too, so only writes count, or
         // every read would cause another.
         let tagged: Vec<&Path> = events
@@ -270,10 +276,10 @@ impl FolderWatcher {
                 self.discover(folder, &mut changes);
             }
         }
-        Ok(changes
+        changes
             .into_iter()
             .map(|change| change.relative_to(&self.root))
-            .collect())
+            .collect()
     }
 
     fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
@@ -289,11 +295,104 @@ impl FolderWatcher {
         subtree
     }
 
-    /// The next batch of changes, once the folder has been quiet for a moment.
+    /// The next change set, once the folder has been quiet for the debounce or the set's first
+    /// change is 30 debounces old.
     pub async fn next(&mut self) -> Option<Result<Vec<Change>, Vec<notify::Error>>> {
-        let result = self.events.recv().await?;
-        Some(self.handle(result))
+        loop {
+            let received = match &self.held {
+                // `timeout_at` polls the channel first, so batches that waited there while the
+                // session was busy still go into sets by when their events happened.
+                Some(held) => {
+                    let complete = held.complete(self.debounce).into();
+                    tokio::time::timeout_at(complete, self.events.recv())
+                        .await
+                        .unwrap_or(None)
+                }
+                None => self.events.recv().await,
+            };
+            let events = match received {
+                Some(Ok(events)) => events,
+                Some(Err(errors)) => return Some(Err(errors)),
+                // The set is complete, or the debouncer stopped.
+                None => return self.held.take().map(|held| Ok(held.changes)),
+            };
+            // Only events that can make a change count, so that reading a file bridges no
+            // pause, and a batch that made none, such as in a folder the filter leaves out, keeps
+            // no set open.
+            let times = events
+                .iter()
+                .filter(|event| can_change(&event.kind))
+                .map(|event| event.time);
+            let (Some(first), Some(last)) = (times.clone().min(), times.max()) else {
+                continue;
+            };
+            let changes = self.handle(events);
+            if changes.is_empty() {
+                continue;
+            }
+            let batch = Held {
+                changes,
+                first,
+                last,
+            };
+            match &mut self.held {
+                Some(held) if held.takes(first, self.debounce) => held.add(batch),
+                held => {
+                    if let Some(done) = held.replace(batch) {
+                        return Some(Ok(done.changes));
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Changes held back until no more can join them, with when the first and the last of the
+/// events behind them happened.
+struct Held {
+    changes: Vec<Change>,
+    first: Instant,
+    last: Instant,
+}
+
+impl Held {
+    /// Whether changes from events that began at `first` join the set, which they do unless the
+    /// folder was quiet for `debounce` before them or the set has grown for its longest.
+    fn takes(&self, first: Instant, debounce: Duration) -> bool {
+        first <= self.last + debounce && first < self.first + debounce * LONGEST_SET
+    }
+
+    fn add(&mut self, batch: Held) {
+        // A file written again is still one change.
+        let changed: HashSet<&Path> = self
+            .changes
+            .iter()
+            .filter(|change| change.kind() == Kind::Changed)
+            .map(Change::path)
+            .collect();
+        let new: Vec<Change> = batch
+            .changes
+            .into_iter()
+            .filter(|change| change.kind() != Kind::Changed || !changed.contains(change.path()))
+            .collect();
+        self.changes.extend(new);
+        self.last = self.last.max(batch.last);
+    }
+
+    /// When the debouncer has handed on every event that could still join the set.
+    fn complete(&self, debounce: Duration) -> Instant {
+        let end = (self.last + debounce).min(self.first + debounce * LONGEST_SET);
+        // It hands on an event once the event is a debounce old and checks for such events
+        // every quarter debounce, so this leaves a quarter to spare for a late check.
+        end + debounce * 3 / 2
+    }
+}
+
+/// Whether `FolderWatcher::apply` can make a change of an event of this kind, which it cannot
+/// of a read or of a change to a file's metadata.
+fn can_change(kind: &EventKind) -> bool {
+    !matches!(kind, EventKind::Modify(ModifyKind::Metadata(_)))
+        && (kind.is_create() || kind.is_remove() || kind.is_modify())
 }
 
 fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
@@ -321,7 +420,6 @@ fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
-    use std::time::Instant;
 
     use super::*;
 
@@ -493,12 +591,10 @@ mod tests {
             .add_path(root.join("target/app"));
         let removal = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
             .add_path(root.join("target/build.log"));
-        let changes = watcher
-            .handle(Ok(vec![
-                DebouncedEvent::new(edit, Instant::now()),
-                DebouncedEvent::new(removal, Instant::now()),
-            ]))
-            .unwrap();
+        let changes = watcher.handle(vec![
+            DebouncedEvent::new(edit, Instant::now()),
+            DebouncedEvent::new(removal, Instant::now()),
+        ]);
 
         assert_eq!(changes, []);
     }
@@ -558,9 +654,7 @@ mod tests {
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
             .add_path(root.join("a.csv"))
             .add_path(outside.path().join("a.csv"));
-        let changes = watcher
-            .handle(Ok(vec![DebouncedEvent::new(event, Instant::now())]))
-            .unwrap();
+        let changes = watcher.handle(vec![DebouncedEvent::new(event, Instant::now())]);
 
         assert_eq!(changes, [Change::Deleted(PathBuf::from("a.csv"))]);
     }
@@ -692,6 +786,111 @@ mod tests {
         assert_eq!(
             drain(&mut watcher).await,
             [Change::Changed(PathBuf::from("notes.txt"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_changes_less_than_the_debounce_apart_in_one_set() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(300);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        // The debouncer hands on the first files before the last ones are written.
+        let names: Vec<String> = (1..=10).map(|run| format!("run-{run}.csv")).collect();
+        for name in &names {
+            fs::write(root.join(name), "x").unwrap();
+            tokio::time::sleep(debounce / 4).await;
+        }
+
+        let set = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        assert_eq!(
+            set.unwrap().unwrap().unwrap(),
+            names
+                .iter()
+                .map(|name| Change::Created(PathBuf::from(name)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn ends_a_set_in_a_folder_that_keeps_changing() {
+        use std::io::Write;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::write(root.join("run.log"), "").unwrap();
+        // Long enough that a busy machine does not pause the writes for that long.
+        let debounce = Duration::from_millis(100);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        let writing = Arc::new(AtomicBool::new(true));
+        let writer = std::thread::spawn({
+            let log = root.join("run.log");
+            let writing = writing.clone();
+            // The debouncer holds back the writes to a file that stays open until they pause, so
+            // each write opens it again, as `>>` in a shell loop does.
+            move || {
+                while writing.load(Ordering::Relaxed) {
+                    let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+                    file.write_all(b"step\n").unwrap();
+                    std::thread::sleep(debounce / 10);
+                }
+            }
+        });
+        let started = Instant::now();
+        let set = tokio::time::timeout(Duration::from_secs(10), watcher.next()).await;
+        let waited = started.elapsed();
+        writing.store(false, Ordering::Relaxed);
+        writer.join().unwrap();
+
+        assert_eq!(
+            set.expect("no set while the folder kept changing")
+                .unwrap()
+                .unwrap(),
+            [Change::Changed(PathBuf::from("run.log"))]
+        );
+        assert!(waited >= debounce * LONGEST_SET, "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn sorts_changes_into_sets_by_when_the_files_were_written() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["a.csv", "b.csv", "c.csv"] {
+            fs::write(root.join(name), "a").unwrap();
+        }
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+
+        // The session reads batches only between reviews, so these all waited for it.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let event = |kind, name: &str, quarters: u32| {
+            let event = notify::Event::new(kind).add_path(root.join(name));
+            DebouncedEvent::new(event, start + DEBOUNCE * quarters / 4)
+        };
+        let edit = EventKind::Modify(ModifyKind::Any);
+        let read = EventKind::Access(notify::event::AccessKind::Read);
+        for batch in [
+            vec![event(edit, "a.csv", 0)],
+            vec![event(edit, "b.csv", 2)],
+            // A debounce and a half after the last edit, so c.csv starts the next set even
+            // though b.csv was read before a debounce had passed.
+            vec![event(read, "b.csv", 5), event(edit, "c.csv", 8)],
+        ] {
+            batches.send(Ok(batch)).unwrap();
+        }
+
+        assert_eq!(
+            watcher.next().await.unwrap().unwrap(),
+            ["a.csv", "b.csv"].map(|name| Change::Changed(PathBuf::from(name)))
+        );
+        assert_eq!(
+            watcher.next().await.unwrap().unwrap(),
+            [Change::Changed(PathBuf::from("c.csv"))]
         );
     }
 }
