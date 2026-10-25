@@ -15,8 +15,8 @@ pub struct Outcome {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    #[serde(skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
     /// Which run of the scenario with this model and effort it is, from 1.
     pub repeat: usize,
     /// The file with the run's events, relative to `results.json`.
@@ -61,8 +61,8 @@ pub struct SetOutcome {
 #[derive(Debug, PartialEq, Serialize)]
 pub struct Accuracy {
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    #[serde(skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
     pub sets: usize,
     pub correct: usize,
     /// Sets whose verdict says the opposite of what the scenario expects.
@@ -256,13 +256,13 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ou
 
 /// The accuracy of each model and effort in `outcomes`, in the order they first come.
 pub fn accuracy(outcomes: &[Outcome]) -> Vec<Accuracy> {
-    let mut groups: Vec<(&str, Option<Effort>, Vec<&SetOutcome>)> = Vec::new();
+    let mut groups: Vec<(&str, &Effort, Vec<&SetOutcome>)> = Vec::new();
     for outcome in outcomes {
         let group = groups
             .iter()
-            .position(|(model, effort, _)| *model == outcome.model && *effort == outcome.effort);
+            .position(|(model, effort, _)| *model == outcome.model && **effort == outcome.effort);
         let group = group.unwrap_or_else(|| {
-            groups.push((&outcome.model, outcome.effort, Vec::new()));
+            groups.push((&outcome.model, &outcome.effort, Vec::new()));
             groups.len() - 1
         });
         groups[group].2.extend(&outcome.sets);
@@ -291,7 +291,7 @@ pub fn accuracy(outcomes: &[Outcome]) -> Vec<Accuracy> {
                 .collect();
             Accuracy {
                 model: model.to_string(),
-                effort,
+                effort: effort.clone(),
                 sets: sets.len(),
                 correct,
                 wrong,
@@ -462,7 +462,7 @@ mod tests {
         let model = Model::Real {
             url: "https://api.example.org/v1".to_string(),
             name: "openai/large".to_string(),
-            effort: Some(Effort::High),
+            effort: "high".parse().unwrap(),
         };
         let mut records = review(1, 0, 2, (100, 10), verdict(false, None));
         records.extend(review(
@@ -530,7 +530,7 @@ mod tests {
             accuracy(&[first, second]),
             [Accuracy {
                 model: "openai/large".to_string(),
-                effort: Some(Effort::High),
+                effort: "high".parse().unwrap(),
                 sets: 6,
                 correct: 4,
                 wrong: 0,

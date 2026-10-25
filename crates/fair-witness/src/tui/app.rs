@@ -508,7 +508,7 @@ fn change_line(listed: &Listed) -> Line<'static> {
 mod tests {
     use std::sync::Arc;
 
-    use fair_witness_core::project::{AiConfig, Effort, Project};
+    use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::{Reviewer, Trace, Verdict};
     use fair_witness_core::watcher::Change;
     use ratatui::Terminal;
@@ -522,7 +522,7 @@ mod tests {
         let ai = AiConfig {
             url: "http://localhost:11434/v1".to_string(),
             model: "qwen3:8b".to_string(),
-            effort: Some(Effort::Medium),
+            effort: "medium".parse().unwrap(),
         };
         let settings = ModelSettings {
             project: Project::new(root.to_path_buf()),
@@ -540,7 +540,7 @@ mod tests {
         let mut screen = screen();
         let choice = ModelChoice {
             model: "qwen3:8b".to_string(),
-            effort: Some(Effort::Medium),
+            effort: "medium".parse().unwrap(),
         };
         let reply = |turn, text: &str, name: &str, arguments| Trace::Reply {
             turn,

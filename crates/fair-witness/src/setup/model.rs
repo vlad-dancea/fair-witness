@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
-use fair_witness_core::project::{AiConfig, Project};
+use fair_witness_core::project::{AiConfig, Effort, Project};
 use fair_witness_core::review;
 use reqwest::Client;
 
@@ -74,15 +74,15 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
 /// with the API and model it was chosen for, since an effort one model takes can fail every
 /// review on another.
 fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, String) {
-    let (effort, line) = match previous.and_then(|ai| Some((ai.effort?, ai))) {
-        Some((effort, ai)) if ai.url == url && ai.model == model => (
-            Some(effort),
-            format!(
+    let (effort, line) = match previous.filter(|ai| !ai.effort.is_default()) {
+        Some(ai) if ai.url == url && ai.model == model => {
+            let line = format!(
                 "Changes will be checked with {model} ({} effort).",
-                effort.name()
-            ),
-        ),
-        Some((effort, ai)) => {
+                ai.effort.name()
+            );
+            (ai.effort, line)
+        }
+        Some(ai) => {
             let was_for = if ai.model == model {
                 format!("{} at {}", ai.model, ai.url)
             } else {
@@ -91,11 +91,14 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
             let line = format!(
                 "Changes will be checked with {model} (default effort), since the {} effort \
                  saved before was for {was_for}. Press `m` in `fair-witness run` to choose one.",
-                effort.name()
+                ai.effort.name()
             );
-            (None, line)
+            (Effort::default(), line)
         }
-        None => (None, format!("Changes will be checked with {model}.")),
+        None => (
+            Effort::default(),
+            format!("Changes will be checked with {model}."),
+        ),
     };
     (AiConfig { url, model, effort }, line)
 }
@@ -171,17 +174,15 @@ fn choose_model(
 
 #[cfg(test)]
 mod tests {
-    use fair_witness_core::project::Effort;
-
     use super::*;
 
     #[test]
     fn keeps_the_saved_effort_only_for_the_same_model() {
-        let saved = |effort| {
+        let saved = |effort: &str| {
             Some(AiConfig {
                 url: "https://api.example.org/v1".to_string(),
                 model: "small".to_string(),
-                effort,
+                effort: effort.parse().unwrap(),
             })
         };
         let outcome = |previous, url: &str, model: &str| {
@@ -191,43 +192,34 @@ mod tests {
 
         assert_eq!(
             [
-                outcome(
-                    saved(Some(Effort::High)),
-                    "https://api.example.org/v1",
-                    "small"
-                ),
-                outcome(
-                    saved(Some(Effort::High)),
-                    "https://api.example.org/v1",
-                    "large"
-                ),
+                outcome(saved("high"), "https://api.example.org/v1", "small"),
+                outcome(saved("high"), "https://api.example.org/v1", "large"),
                 // The same name on another API can be another model, or refuse the effort.
-                outcome(
-                    saved(Some(Effort::Low)),
-                    "https://other.example.org/v1",
-                    "small"
-                ),
-                outcome(saved(None), "https://api.example.org/v1", "large"),
+                outcome(saved("low"), "https://other.example.org/v1", "small"),
+                outcome(saved("default"), "https://api.example.org/v1", "large"),
             ],
             [
                 (
-                    Some(Effort::High),
+                    "high".parse().unwrap(),
                     "Changes will be checked with small (high effort).".to_string()
                 ),
                 (
-                    None,
+                    Effort::default(),
                     "Changes will be checked with large (default effort), since the high effort \
                      saved before was for small. Press `m` in `fair-witness run` to choose one."
                         .to_string()
                 ),
                 (
-                    None,
+                    Effort::default(),
                     "Changes will be checked with small (default effort), since the low effort \
                      saved before was for small at https://api.example.org/v1. Press `m` in \
                      `fair-witness run` to choose one."
                         .to_string()
                 ),
-                (None, "Changes will be checked with large.".to_string()),
+                (
+                    Effort::default(),
+                    "Changes will be checked with large.".to_string()
+                ),
             ]
         );
     }

@@ -3,7 +3,6 @@
 use std::fmt::Write;
 
 use crate::report::{Accuracy, Outcome};
-use crate::run::effort_name;
 
 /// Names the run of a scenario. `one_each` says that each scenario ran once.
 pub fn label(outcome: &Outcome, fake: bool, one_each: bool) -> String {
@@ -16,7 +15,7 @@ pub fn label(outcome: &Outcome, fake: bool, one_each: bool) -> String {
             "{}, {} {}, run {}",
             outcome.name,
             outcome.model,
-            effort_name(outcome.effort),
+            outcome.effort.name(),
             outcome.repeat
         )
     }
@@ -70,7 +69,7 @@ pub fn accuracy(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
     for row in accuracy {
         rows.push(vec![
             row.model.clone(),
-            effort_name(row.effort).to_string(),
+            row.effort.name().to_string(),
             row.sets.to_string(),
             row.correct.to_string(),
             row.wrong.to_string(),
@@ -128,7 +127,7 @@ fn sets(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
     header.extend(
         accuracy
             .iter()
-            .map(|row| format!("{} {}", row.model, effort_name(row.effort))),
+            .map(|row| format!("{} {}", row.model, row.effort.name())),
     );
     let mut rows = vec![header];
     for set in sets {
@@ -156,7 +155,7 @@ struct Failed<'a> {
 fn failed_reviews(outcomes: &[Outcome]) -> String {
     let mut failed: Vec<Failed> = Vec::new();
     for outcome in outcomes {
-        let model = format!("{} {}", outcome.model, effort_name(outcome.effort));
+        let model = format!("{} {}", outcome.model, outcome.effort.name());
         for error in outcome
             .sets
             .iter()
@@ -267,8 +266,6 @@ fn indent(problem: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fair_witness_core::project::Effort;
-
     use super::*;
     use crate::fixtures::{expected, review, review_failed, scenario, verdict};
     use crate::report::{self, judge};
@@ -284,12 +281,12 @@ mod tests {
                 expected(None, true, Some("dataset[0].personal_data")),
             ],
         );
-        let model = |name: &str, effort| Model::Real {
+        let model = |name: &str, effort: &str| Model::Real {
             url: "https://api.example.org/v1".to_string(),
             name: name.to_string(),
-            effort,
+            effort: effort.parse().unwrap(),
         };
-        let (large, small) = (model("large", Some(Effort::High)), model("small", None));
+        let (large, small) = (model("large", "high"), model("small", "default"));
         let ran = |reviews: Vec<Vec<_>>| Ran {
             records: reviews.concat(),
             error: None,

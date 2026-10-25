@@ -103,8 +103,8 @@ pub struct Reviewer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
 }
 
 impl Reviewer {
@@ -113,7 +113,7 @@ impl Reviewer {
             client: openai_compatible(&config.url, api_key),
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
-                effort: config.effort,
+                effort: config.effort.clone(),
             }),
         }
     }
@@ -153,11 +153,18 @@ impl Reviewer {
         let mut request = ChatRequest::new(vec![ChatMessage::user(first)])
             .with_system(SYSTEM_PROMPT)
             .with_tools(definitions);
-        let mut options = ChatOptions::default().with_tool_choice(ToolChoice::Auto);
-        if let Some(effort) = choice.effort {
-            options = options
-                .with_reasoning_effort(reasoning_effort(effort))
-                .with_extra_body(json!({ "allowed_openai_params": ["reasoning_effort"] }));
+        // genai knows only a fixed list of efforts, and without one in the options it reads one
+        // from the end of the model name, so that `qwen3-max` would go out as `qwen3` at effort
+        // `max`. A budget stops that and adds nothing to an OpenAI request, so the effort goes
+        // in as given through the extra body.
+        let mut options = ChatOptions::default()
+            .with_tool_choice(ToolChoice::Auto)
+            .with_reasoning_effort(ReasoningEffort::Budget(0));
+        if let Some(effort) = choice.effort.sent() {
+            options = options.with_extra_body(json!({
+                "reasoning_effort": effort,
+                "allowed_openai_params": ["reasoning_effort"],
+            }));
         }
 
         for turn in 1..=MAX_TURNS {
@@ -285,15 +292,6 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn reasoning_effort(effort: Effort) -> ReasoningEffort {
-    match effort {
-        Effort::None => ReasoningEffort::None,
-        Effort::Low => ReasoningEffort::Low,
-        Effort::Medium => ReasoningEffort::Medium,
-        Effort::High => ReasoningEffort::High,
-    }
-}
-
 fn verdict_tool() -> Tool {
     Tool::new("report_verdict")
         .with_description("Hand in the verdict. Ends the review.")
@@ -339,7 +337,7 @@ mod tests {
             &AiConfig {
                 url,
                 model: "test".to_string(),
-                effort: Some(Effort::Low),
+                effort: "low".parse().unwrap(),
             },
             Some("sk-test".to_string()),
         )
@@ -429,6 +427,44 @@ mod tests {
                 "read_file: name,diagnosis\n",
                 "request 2",
                 "reply 2: report_verdict",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_the_model_and_the_effort_by_the_names_given() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bodies = Vec::new();
+        for effort in ["default", "ultra"] {
+            let (url, server) = fake_model(vec![verdict()]);
+            let reviewer = Reviewer::new(
+                &AiConfig {
+                    url,
+                    model: "qwen3-max".to_string(),
+                    effort: effort.parse().unwrap(),
+                },
+                None,
+            );
+            reviewer
+                .review(&input(root.path(), "{}", &[]), &|_| {})
+                .await
+                .unwrap();
+            let mut body = server.join().unwrap().remove(0).1;
+            body.as_object_mut().unwrap().retain(|key, _| {
+                ["model", "reasoning_effort", "allowed_openai_params"].contains(&key.as_str())
+            });
+            bodies.push(body);
+        }
+
+        assert_eq!(
+            bodies,
+            [
+                json!({ "model": "qwen3-max" }),
+                json!({
+                    "model": "qwen3-max",
+                    "reasoning_effort": "ultra",
+                    "allowed_openai_params": ["reasoning_effort"]
+                }),
             ]
         );
     }

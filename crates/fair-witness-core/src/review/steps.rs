@@ -67,7 +67,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::project::AiConfig;
+    use crate::project::{AiConfig, Effort};
     use crate::review::Reviewer;
     use crate::testing::{Reply, fake_model, tool_call};
 
@@ -84,7 +84,7 @@ mod tests {
         let config = AiConfig {
             url,
             model: "test".to_string(),
-            effort: None,
+            effort: Effort::default(),
         };
         Arc::new(Reviewer::new(&config, None))
     }

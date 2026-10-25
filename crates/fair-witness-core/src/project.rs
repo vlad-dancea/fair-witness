@@ -1,8 +1,9 @@
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -46,27 +47,84 @@ pub struct DamapConfig {
 pub struct AiConfig {
     pub url: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Effort {
-    None,
-    Low,
-    Medium,
-    High,
-}
+/// How much a model reasons: a name the API gets as `reasoning_effort`, or `default`, which sends
+/// none so that the model uses its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Effort(String);
+
+const DEFAULT_EFFORT: &str = "default";
+/// The efforts the model panel offers. `none` asks for no reasoning, which some models ignore.
+const OFFERED_EFFORTS: [&str; 8] = [
+    DEFAULT_EFFORT,
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+];
 
 impl Effort {
-    pub fn name(self) -> &'static str {
-        match self {
-            Effort::None => "none",
-            Effort::Low => "low",
-            Effort::Medium => "medium",
-            Effort::High => "high",
+    pub fn offered() -> Vec<Effort> {
+        OFFERED_EFFORTS
+            .iter()
+            .map(|name| Effort(name.to_string()))
+            .collect()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.0 == DEFAULT_EFFORT
+    }
+
+    /// What goes to the API as `reasoning_effort`, nothing for `default`.
+    pub fn sent(&self) -> Option<&str> {
+        (!self.is_default()).then_some(&self.0)
+    }
+}
+
+impl Default for Effort {
+    fn default() -> Self {
+        Effort(DEFAULT_EFFORT.to_string())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = anyhow::Error;
+
+    // No standard fixes the names, and each model takes its own with its own meaning, so any
+    // name passes on as given.
+    fn from_str(name: &str) -> Result<Self> {
+        if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            bail!(
+                "{name:?} is not a reasoning effort; name one such as `low` or `high`, or \
+                 `default` to send none"
+            );
         }
+        Ok(Effort(name.to_string()))
+    }
+}
+
+impl TryFrom<String> for Effort {
+    type Error = anyhow::Error;
+
+    fn try_from(name: String) -> Result<Self> {
+        name.parse()
+    }
+}
+
+impl From<Effort> for String {
+    fn from(effort: Effort) -> Self {
+        effort.0
     }
 }
 
@@ -465,7 +523,7 @@ mod tests {
                 ai: Some(AiConfig {
                     url: "https://api.example.org/v1".to_string(),
                     model: "small".to_string(),
-                    effort: Some(Effort::Low),
+                    effort: "low".parse().unwrap(),
                 }),
             })
             .unwrap();
@@ -477,7 +535,49 @@ mod tests {
         );
         let config = project.config().unwrap().unwrap();
         assert_eq!(config.damap.dmp_id, Some(7));
-        assert_eq!(config.ai.unwrap().effort, Some(Effort::Low));
+        assert_eq!(config.ai.unwrap().effort.sent(), Some("low"));
+    }
+
+    #[test]
+    fn reads_any_effort_name_but_an_empty_one() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        let effort = |line: &str| {
+            fs::write(
+                root.path().join(".fair-witness/config.toml"),
+                format!(
+                    "[damap]\nfrontend_url = \"http://localhost:8085\"\n\n\
+                     [ai]\nurl = \"https://api.example.org/v1\"\nmodel = \"small\"\n{line}"
+                ),
+            )
+            .unwrap();
+            match project.config() {
+                Ok(config) => Ok(config
+                    .unwrap()
+                    .ai
+                    .unwrap()
+                    .effort
+                    .sent()
+                    .map(str::to_string)),
+                Err(e) => Err(format!("{:#}", e.root_cause())),
+            }
+        };
+
+        assert_eq!(
+            effort("effort = \"ultra\"\n"),
+            Ok(Some("ultra".to_string()))
+        );
+        assert_eq!(effort("effort = \"default\"\n"), Ok(None));
+        assert_eq!(effort(""), Ok(None));
+        let refused = effort("effort = \" low\"\n").unwrap_err();
+        assert!(
+            refused.contains(
+                "\" low\" is not a reasoning effort; name one such as `low` or `high`, or \
+                 `default` to send none"
+            ),
+            "{refused}"
+        );
     }
 
     #[test]
