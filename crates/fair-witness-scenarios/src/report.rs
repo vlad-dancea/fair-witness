@@ -1,18 +1,28 @@
+use fair_witness_core::project::Effort;
 use fair_witness_core::review::{Trace, Verdict};
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::Change;
 use jiff::Timestamp;
 use serde::Serialize;
 
-use crate::run::Ran;
+use crate::run::{Model, Ran};
 use crate::scenario::{Expected, Scenario};
 
-/// How a scenario went.
+/// How a run of a scenario went.
 #[derive(Debug, Serialize)]
 pub struct Outcome {
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// Which run of the scenario with this model and effort it is, from 1.
+    pub repeat: usize,
+    /// The file with the run's events, relative to `results.json`.
+    pub events: String,
+    /// Whether the run went as the scenario expects. With a real model, a wrong verdict or a
+    /// failed review does not fail it, since that is what the run measures.
     pub passed: bool,
     /// What went wrong outside any one change set, such as a script that failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -28,33 +38,58 @@ pub struct SetOutcome {
     pub changes: Option<Vec<Change>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
+    /// Whether the verdict is the expected one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correct: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_failed: Option<String>,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    /// From the start of the review to its verdict.
+    /// From the start of the review to its verdict or failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_ms: Option<i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
     #[serde(skip)]
     reviewing: Option<Timestamp>,
+    /// The tool calls that failed, with why.
+    #[serde(skip)]
+    failed_calls: Vec<String>,
+}
+
+/// How often a model at one effort gave the expected verdict, and what a review took.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Accuracy {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    pub sets: usize,
+    pub correct: usize,
+    /// Sets whose verdict says the opposite of what the scenario expects.
+    pub wrong: usize,
+    /// Sets whose verdict finds the expected contradiction but names a field that `dmp_field`
+    /// does not accept.
+    pub wrong_field: usize,
+    /// Sets without a verdict, since the review failed or never ended.
+    pub failed: usize,
+    /// The share of the sets with the expected verdict.
+    pub accuracy: f64,
+    /// The means of the reviews that ended, with a verdict or a failure.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub review_ms: u64,
 }
 
 impl Outcome {
-    /// A scenario that could not be read.
-    pub fn invalid(name: String, error: String) -> Self {
-        Self {
-            name,
-            description: String::new(),
-            passed: false,
-            problems: vec![error],
-            sets: Vec::new(),
-        }
-    }
-
     pub fn sets_passed(&self) -> usize {
         self.sets.iter().filter(|set| set.passed()).count()
+    }
+
+    pub fn sets_correct(&self) -> usize {
+        self.sets
+            .iter()
+            .filter(|set| set.correct == Some(true))
+            .count()
     }
 }
 
@@ -64,12 +99,14 @@ impl SetOutcome {
             expected,
             changes: None,
             verdict: None,
+            correct: None,
             review_failed: None,
             tokens_in: 0,
             tokens_out: 0,
             review_ms: None,
             problems: Vec::new(),
             reviewing: None,
+            failed_calls: Vec::new(),
         }
     }
 
@@ -95,14 +132,12 @@ impl SetOutcome {
             }
             Event::Verdict { verdict, .. } => {
                 self.verdict = Some(verdict.clone());
-                self.review_ms = self.reviewing.map(|start| {
-                    let elapsed = record.time.duration_since(start).as_millis();
-                    i64::try_from(elapsed).unwrap_or(i64::MAX)
-                });
+                self.review_ms = self.since_reviewing(record.time);
             }
-            Event::ReviewFailed { error, .. } => self.review_failed = Some(error.clone()),
-            // The fake model's calls are the scenario's own, so one that fails is a mistake in
-            // the scenario or a broken tool.
+            Event::ReviewFailed { error, .. } => {
+                self.review_failed = Some(error.clone());
+                self.review_ms = self.since_reviewing(record.time);
+            }
             Event::Trace {
                 trace:
                     Trace::ToolResult {
@@ -113,16 +148,29 @@ impl SetOutcome {
                 ..
             } => {
                 let error = output.strip_prefix("error: ").unwrap_or(output);
-                self.problems
+                self.failed_calls
                     .push(format!("the tool call {name} failed: {error}"));
             }
             _ => {}
         }
     }
 
+    fn since_reviewing(&self, time: Timestamp) -> Option<i64> {
+        self.reviewing.map(|start| {
+            let elapsed = time.duration_since(start).as_millis();
+            i64::try_from(elapsed).unwrap_or(i64::MAX)
+        })
+    }
+
     /// Lists how the set differs from what was expected. A run that stopped early has already
-    /// said why, so a `finished` one alone reports the sets it never got to.
-    fn compare(&mut self, finished: bool) {
+    /// said why, so a `finished` one alone reports the sets it never got to. The fake model's
+    /// tool calls and verdict are the scenario's own, so with it a failed call, a failed review
+    /// or another verdict is a mistake in the scenario or a broken tool. A real model's are what
+    /// the run measures.
+    fn compare(&mut self, finished: bool, fake: bool) {
+        if fake {
+            self.problems.append(&mut self.failed_calls);
+        }
         let expected = &self.expected;
         let decided = self.verdict.is_some() || self.review_failed.is_some();
         match (&expected.changes, &self.changes) {
@@ -136,7 +184,7 @@ impl SetOutcome {
             (_, None) if finished || decided => self.problems.push("no change set".to_string()),
             _ => {}
         }
-        if let Some(error) = &self.review_failed {
+        if fake && let Some(error) = &self.review_failed {
             self.problems.push(format!("the review failed: {error}"));
         }
         let Some(verdict) = &self.verdict else {
@@ -145,20 +193,23 @@ impl SetOutcome {
             }
             return;
         };
-        let field_differs = expected.dmp_field.is_some() && verdict.dmp_field != expected.dmp_field;
-        if verdict.contradicts != expected.contradicts || (verdict.contradicts && field_differs) {
+        let correct = expected.accepts(verdict);
+        self.correct = Some(correct);
+        if fake && !correct {
             self.problems.push(format!(
                 "expected {}, but the verdict is {}: {:?}",
-                describe(expected.contradicts, expected.dmp_field.as_deref()),
-                describe(verdict.contradicts, verdict.dmp_field.as_deref()),
+                describe(expected.contradicts, &expected.dmp_field),
+                describe(verdict.contradicts, verdict.dmp_field.as_slice()),
                 verdict.explanation
             ));
         }
     }
 }
 
-/// Compares the events of a run with what the scenario expects of each change set.
-pub fn judge(scenario: &Scenario, ran: &Ran) -> Outcome {
+/// Compares the events of run `repeat` of a scenario with `model` with what the scenario
+/// expects of each change set.
+pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Outcome {
+    let fake = *model == Model::Fake;
     let mut problems: Vec<String> = ran.error.iter().cloned().collect();
     let mut sets: Vec<SetOutcome> = scenario.sets.iter().cloned().map(SetOutcome::new).collect();
     for record in &ran.records {
@@ -188,15 +239,85 @@ pub fn judge(scenario: &Scenario, ran: &Ran) -> Outcome {
         }
     }
     for set in &mut sets {
-        set.compare(ran.error.is_none());
+        set.compare(ran.error.is_none(), fake);
     }
     Outcome {
         name: scenario.name.clone(),
         description: scenario.description.clone(),
-        passed: problems.is_empty() && sets.iter().all(SetOutcome::passed),
+        model: model.name().to_string(),
+        effort: model.effort(),
+        repeat,
+        events: format!("{}/{}-{repeat}.jsonl", model.folder(), scenario.name),
+        passed: problems.is_empty() && sets.iter().all(|set| set.problems.is_empty()),
         problems,
         sets,
     }
+}
+
+/// The accuracy of each model and effort in `outcomes`, in the order they first come.
+pub fn accuracy(outcomes: &[Outcome]) -> Vec<Accuracy> {
+    let mut groups: Vec<(&str, Option<Effort>, Vec<&SetOutcome>)> = Vec::new();
+    for outcome in outcomes {
+        let group = groups
+            .iter()
+            .position(|(model, effort, _)| *model == outcome.model && *effort == outcome.effort);
+        let group = group.unwrap_or_else(|| {
+            groups.push((&outcome.model, outcome.effort, Vec::new()));
+            groups.len() - 1
+        });
+        groups[group].2.extend(&outcome.sets);
+    }
+    groups
+        .into_iter()
+        .map(|(model, effort, sets)| {
+            let count = |counts: fn(&SetOutcome, &Verdict) -> bool| {
+                sets.iter()
+                    .filter(|set| {
+                        set.verdict
+                            .as_ref()
+                            .is_some_and(|verdict| counts(set, verdict))
+                    })
+                    .count()
+            };
+            let correct = count(|set, _| set.correct == Some(true));
+            let wrong = count(|set, verdict| verdict.contradicts != set.expected.contradicts);
+            let wrong_field = count(|set, verdict| {
+                set.correct == Some(false) && verdict.contradicts == set.expected.contradicts
+            });
+            let reviewed: Vec<&SetOutcome> = sets
+                .iter()
+                .copied()
+                .filter(|set| set.verdict.is_some() || set.review_failed.is_some())
+                .collect();
+            Accuracy {
+                model: model.to_string(),
+                effort,
+                sets: sets.len(),
+                correct,
+                wrong,
+                wrong_field,
+                failed: sets.len() - correct - wrong - wrong_field,
+                accuracy: if sets.is_empty() {
+                    0.0
+                } else {
+                    correct as f64 / sets.len() as f64
+                },
+                tokens_in: mean(reviewed.iter().map(|set| set.tokens_in)),
+                tokens_out: mean(reviewed.iter().map(|set| set.tokens_out)),
+                review_ms: mean(
+                    sets.iter()
+                        .filter_map(|set| set.review_ms)
+                        .map(|ms| u64::try_from(ms).unwrap_or(0)),
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The mean of `values`, rounded, or 0 without any.
+fn mean(values: impl Iterator<Item = u64>) -> u64 {
+    let (sum, count) = values.fold((0, 0), |(sum, count), value| (sum + value, count + 1));
+    (sum + count / 2).checked_div(count).unwrap_or(0)
 }
 
 fn same_changes(want: &[Change], got: &[Change]) -> bool {
@@ -221,45 +342,26 @@ fn describe_change(change: &Change) -> String {
     }
 }
 
-fn describe(contradicts: bool, field: Option<&str>) -> String {
-    match (contradicts, field) {
+fn describe(contradicts: bool, fields: &[String]) -> String {
+    match (contradicts, fields) {
         (false, _) => "no contradiction".to_string(),
-        (true, Some(field)) => format!("a contradiction in {field}"),
-        (true, None) => "a contradiction".to_string(),
+        (true, []) => "a contradiction".to_string(),
+        (true, fields) => format!("a contradiction in {}", fields.join(" or ")),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use serde_json::json;
 
     use super::*;
-
-    fn record(event: serde_json::Value) -> Record {
-        let mut record = event;
-        record["time"] = json!("2026-10-24T10:00:00Z");
-        serde_json::from_value(record).unwrap()
-    }
-
-    fn expected(changes: Option<Vec<Change>>, contradicts: bool, field: Option<&str>) -> Expected {
-        Expected {
-            changes,
-            contradicts,
-            dmp_field: field.map(str::to_string),
-            explanation: "Why.".to_string(),
-            fake_tool_calls: Vec::new(),
-        }
-    }
+    use crate::fixtures::{expected, record, review, review_failed, scenario, verdict};
 
     #[test]
     fn lists_what_differs_from_each_expected_change_set() {
-        let scenario = Scenario {
-            name: "patients".to_string(),
-            dir: PathBuf::new(),
-            description: String::new(),
-            sets: vec![
+        let scenario = scenario(
+            "patients",
+            vec![
                 expected(
                     Some(vec![
                         Change::Created("notes".into()),
@@ -272,7 +374,7 @@ mod tests {
                 expected(None, true, Some("dataset[0].personal_data")),
                 expected(Some(vec![Change::Created("notes.txt".into())]), false, None),
             ],
-        };
+        );
         let ran = Ran {
             records: vec![
                 // The same changes as expected, in another order.
@@ -316,7 +418,7 @@ mod tests {
             error: None,
         };
 
-        let outcome = judge(&scenario, &ran);
+        let outcome = judge(&scenario, &Model::Fake, 1, &ran);
 
         assert!(!outcome.passed);
         assert_eq!(outcome.sets_passed(), 1);
@@ -344,6 +446,103 @@ mod tests {
                     "no change set".to_string()
                 ],
             ]
+        );
+    }
+
+    #[test]
+    fn measures_a_real_model_instead_of_failing_on_its_verdicts() {
+        let scenario = scenario(
+            "patients",
+            vec![
+                expected(None, false, None),
+                expected(None, true, Some("dataset[0].personal_data")),
+                expected(None, true, None),
+            ],
+        );
+        let model = Model::Real {
+            url: "https://api.example.org/v1".to_string(),
+            name: "openai/large".to_string(),
+            effort: Some(Effort::High),
+        };
+        let mut records = review(1, 0, 2, (100, 10), verdict(false, None));
+        records.extend(review(
+            2,
+            2,
+            6,
+            (300, 30),
+            verdict(true, Some("dataset[0].sensitive_data")),
+        ));
+        // A real model may ask for a file that is not there.
+        records.insert(
+            records.len() - 1,
+            record(
+                json!({ "event": "trace", "set": 2, "trace": { "tool_result": {
+                "name": "read_file", "output": "error: not found", "failed": true
+            } } }),
+            ),
+        );
+        records.extend(review(
+            3,
+            6,
+            7,
+            (50, 5),
+            review_failed("429 Too Many Requests"),
+        ));
+        let first = judge(
+            &scenario,
+            &model,
+            1,
+            &Ran {
+                records,
+                error: None,
+            },
+        );
+        let mut records = review(1, 0, 1, (100, 10), verdict(false, None));
+        records.extend(review(
+            2,
+            1,
+            2,
+            (100, 10),
+            verdict(true, Some("dmp.dataset[0].personal_data")),
+        ));
+        records.extend(review(
+            3,
+            2,
+            3,
+            (100, 10),
+            verdict(true, Some("dataset[0].title")),
+        ));
+        let second = judge(
+            &scenario,
+            &model,
+            2,
+            &Ran {
+                records,
+                error: None,
+            },
+        );
+
+        assert!(first.passed && second.passed, "{first:?}\n{second:?}");
+        assert_eq!(first.events, "openai_large-high/patients-1.jsonl");
+        let correct: Vec<Option<bool>> = first.sets.iter().map(|set| set.correct).collect();
+        assert_eq!(correct, [Some(true), Some(false), None]);
+        assert_eq!(
+            accuracy(&[first, second]),
+            [Accuracy {
+                model: "openai/large".to_string(),
+                effort: Some(Effort::High),
+                sets: 6,
+                correct: 4,
+                wrong: 0,
+                wrong_field: 1,
+                failed: 1,
+                accuracy: 4.0 / 6.0,
+                // (100 + 300 + 50 + 3 * 100) / 6 and (10 + 30 + 5 + 3 * 10) / 6, rounded
+                tokens_in: 125,
+                tokens_out: 13,
+                // (2 + 4 + 1 + 3 * 1) seconds / 6
+                review_ms: 1667,
+            }]
         );
     }
 }

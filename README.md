@@ -244,6 +244,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
 | `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
+| `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, `default`, `none`, `low`, `medium` or `high`, instead of the effort chosen with `m`. `default` sends no effort, so the model uses its own |
 | | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000) |
 
 With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:
@@ -304,7 +305,7 @@ mise run check          # everything CI checks: formatting, clippy, tests, scena
 
 Clippy warnings fail the check.
 
-The code is split into three crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface. `fair-witness-scenarios` runs the scenarios in `scenarios/` against the binary and is not released. [scenarios/README.md](scenarios/README.md) describes them.
+The code is split into three crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface. `fair-witness-scenarios` runs the scenarios in `scenarios/` against the binary, with a fake model or a real one, and is not released. [scenarios/README.md](scenarios/README.md) describes them.
 
 ## Releasing
 

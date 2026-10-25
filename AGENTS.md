@@ -175,7 +175,9 @@ disagrees with it.
   finds to the rest.
 - `fair-witness-scenarios` is a development tool that dist does not release. It runs each
   scenario in `scenarios/` against `fair-witness run --headless` with the fake model from
-  `testing.rs`. `scenarios/README.md` describes the format, so update it with the format.
+  `testing.rs` or, with `--model`, a real model, whose accuracy it measures. Only the
+  maintainer runs real models, with their API key. `scenarios/README.md` describes the format,
+  so update it with the format.
 - Only the binary knows about the terminal. The core never depends on ratatui, crossterm,
   dialoguer or notify-rust (`cargo tree -p fair-witness-core` shows none of them) and never
   prompts or prints, so the review logic can run without the interface.

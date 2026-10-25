@@ -45,6 +45,7 @@ impl Run {
             .env_remove("FAIR_WITNESS_AI_URL")
             .env_remove("FAIR_WITNESS_API_KEY")
             .env_remove("FAIR_WITNESS_MODEL")
+            .env_remove("FAIR_WITNESS_EFFORT")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -160,6 +161,8 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
             &endpoint,
             "--model",
             "test",
+            "--effort",
+            "high",
         ],
     );
     assert_eq!(
@@ -208,6 +211,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     assert!(!project.join(".fair-witness").exists());
     let requests = server.join().unwrap();
     assert!(requests[0].1.to_string().contains("Soil samples"));
+    assert_eq!(requests[0].1["reasoning_effort"], "high");
     assert_eq!(run.stop(), Some(0));
 }
 
