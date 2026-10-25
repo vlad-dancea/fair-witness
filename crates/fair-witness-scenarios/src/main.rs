@@ -74,7 +74,8 @@ struct Args {
         long,
         value_name = "MS",
         default_value_t = 500,
-        help = "How old a change must be to go into a change set, as FAIR_WITNESS_DEBOUNCE_MS"
+        help = "How long the folder must be quiet before its changes count as one set, as \
+                FAIR_WITNESS_DEBOUNCE_MS"
     )]
     debounce_ms: u64,
     #[arg(

@@ -125,7 +125,6 @@ impl Session {
         let mut set = 0;
         while let Some(batch) = watcher.next().await {
             let changes = match batch {
-                Ok(changes) if changes.is_empty() => continue,
                 Ok(changes) => changes,
                 Err(errors) => {
                     let errors = errors.iter().map(ToString::to_string).collect();
