@@ -305,7 +305,7 @@ mise run check          # everything CI checks: formatting, clippy, tests, scena
 
 Clippy warnings fail the check.
 
-The code is split into three crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface. `fair-witness-scenarios` runs the scenarios in `scenarios/` against the binary and is not released. [scenarios/README.md](scenarios/README.md) describes them.
+The code is split into three crates in `crates/`. `fair-witness-core` is a library that watches the folder, talks to DAMAP and reviews changes, without any terminal code. `fair-witness` is the binary with the commands, the setup questions and the full-screen interface. `fair-witness-scenarios` runs the scenarios in `scenarios/` against the binary, with a fake model or a real one, and is not released. [scenarios/README.md](scenarios/README.md) describes them.
 
 ## Releasing
 

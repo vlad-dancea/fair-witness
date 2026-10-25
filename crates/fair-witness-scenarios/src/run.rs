@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use fair_witness_core::project::Effort;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
 
@@ -15,9 +16,17 @@ use crate::scenario::{DMP, FILES, SCRIPT, Scenario};
 
 /// Generous, so that a slow CI machine still makes it, while a scenario that hangs fails.
 const STARTUP: Duration = Duration::from_secs(20);
-const REVIEW: Duration = Duration::from_secs(20);
+const FAKE_REVIEW: Duration = Duration::from_secs(20);
+/// Generous, since a real model's review can take up to 12 replies at a high effort from a busy
+/// API, while a review that hangs still fails.
+const REAL_REVIEW: Duration = Duration::from_secs(10 * 60);
 const SCRIPT_STEP: Duration = Duration::from_secs(60);
 const STOP: Duration = Duration::from_secs(10);
+
+/// fair-witness reads the API key from here, so that it is not on a command line.
+pub const API_KEY: &str = "FAIR_WITNESS_API_KEY";
+/// Stands in for the API key in whatever the runner keeps from fair-witness.
+const HIDDEN_KEY: &str = "[API key]";
 
 /// The line `wait_for_verdict` prints to hand the folder over for review.
 const WAIT: &str = "::fair-witness-scenarios::wait_for_verdict::";
@@ -31,6 +40,61 @@ static GROUPS: Mutex<Option<Vec<u32>>> = Mutex::new(Some(Vec::new()));
 pub struct Settings {
     pub binary: PathBuf,
     pub debounce: Duration,
+    /// The key for the API of the real models, which only fair-witness gets.
+    pub api_key: Option<String>,
+}
+
+/// The model that reviews the change sets of a run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Model {
+    /// The fake model from `testing.rs`, which makes the scenario's tool calls and hands in its
+    /// expected verdict.
+    Fake,
+    /// A model behind an OpenAI-compatible API, whose verdicts are measured.
+    Real {
+        url: String,
+        name: String,
+        effort: Option<Effort>,
+    },
+}
+
+impl Model {
+    pub fn name(&self) -> &str {
+        match self {
+            Model::Fake => "fake",
+            Model::Real { name, .. } => name,
+        }
+    }
+
+    pub fn effort(&self) -> Option<Effort> {
+        match self {
+            Model::Fake => None,
+            Model::Real { effort, .. } => *effort,
+        }
+    }
+
+    /// The folder for the events of its runs, named after the model and effort with what a file
+    /// name cannot hold, such as the `/` in `openai/gpt-5`, replaced.
+    pub fn folder(&self) -> String {
+        match self {
+            Model::Fake => "fake".to_string(),
+            Model::Real { name, effort, .. } => {
+                let name: String = name
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+                        _ => '_',
+                    })
+                    .collect();
+                format!("{name}-{}", effort_name(*effort))
+            }
+        }
+    }
+}
+
+/// The name of an effort as `fair-witness run --effort` takes it.
+pub fn effort_name(effort: Option<Effort>) -> &'static str {
+    effort.map_or("default", Effort::name)
 }
 
 /// What a run of a scenario produced: every event fair-witness printed and, when the run went
@@ -40,17 +104,22 @@ pub struct Ran {
     pub error: Option<String>,
 }
 
-/// Copies the scenario's files into a new folder, watches it with headless fair-witness and the
-/// fake model, and runs the script, which stops after each change set until it is reviewed.
-pub fn run(scenario: &Scenario, settings: &Settings) -> Ran {
+/// Copies the scenario's files into a new folder, watches it with headless fair-witness and
+/// `model`, and runs the script, which stops after each change set until it is reviewed.
+pub fn run(scenario: &Scenario, model: &Model, settings: &Settings) -> Ran {
     let mut records = Vec::new();
-    let error = run_into(scenario, settings, &mut records)
+    let error = run_into(scenario, model, settings, &mut records)
         .err()
         .map(|e| format!("{e:#}"));
     Ran { records, error }
 }
 
-fn run_into(scenario: &Scenario, settings: &Settings, records: &mut Vec<Record>) -> Result<()> {
+fn run_into(
+    scenario: &Scenario,
+    model: &Model,
+    settings: &Settings,
+    records: &mut Vec<Record>,
+) -> Result<()> {
     let folder = tempfile::Builder::new()
         .prefix("fair-witness-scenario-")
         .tempdir()
@@ -59,34 +128,20 @@ fn run_into(scenario: &Scenario, settings: &Settings, records: &mut Vec<Record>)
     if files.is_dir() {
         copy_dir(&files, folder.path())?;
     }
-    let (endpoint, _model) = fake_model(scenario.fake_replies());
+    let (url, review) = match model {
+        Model::Fake => (fake_model(scenario.fake_replies()).0, FAKE_REVIEW),
+        Model::Real { url, .. } => (url.clone(), REAL_REVIEW),
+    };
     let mut witness = Process::start(
         "fair-witness",
-        Command::new(&settings.binary)
-            .args(["run", "--headless", "--project"])
-            .arg(folder.path())
-            .arg("--dmp-file")
-            .arg(scenario.dir.join(DMP))
-            .args(["--ai-url", &endpoint, "--model", "fake"])
-            .env(
-                "FAIR_WITNESS_DEBOUNCE_MS",
-                settings.debounce.as_millis().to_string(),
-            )
-            // A key meant for a real model must not go to the fake one.
-            .env_remove("FAIR_WITNESS_API_KEY"),
+        &mut witness_command(scenario, folder.path(), &url, model, settings),
+        settings.api_key.clone(),
     )
     .with_context(|| format!("could not start {}", settings.binary.display()))?;
     witness.until_watching()?;
 
-    let mut script = Process::start_group(
-        SCRIPT,
-        Command::new("bash")
-            .arg("-c")
-            .arg(prelude())
-            .arg(scenario.dir.join(SCRIPT))
-            .current_dir(folder.path()),
-    )
-    .context("could not start bash")?;
+    let mut script = Process::start_group(SCRIPT, &mut script_command(scenario, folder.path()))
+        .context("could not start bash")?;
     let mut set = 0;
     let mut deadline = Instant::now() + SCRIPT_STEP;
     let code = loop {
@@ -99,7 +154,7 @@ fn run_into(scenario: &Scenario, settings: &Settings, records: &mut Vec<Record>)
                         scenario.sets.len()
                     );
                 }
-                witness.until_decided(set, records)?;
+                witness.until_decided(set, review, records)?;
                 script.answer();
                 deadline = Instant::now() + SCRIPT_STEP;
             }
@@ -137,6 +192,47 @@ fn run_into(scenario: &Scenario, settings: &Settings, records: &mut Vec<Record>)
         records,
     )?;
     witness.stop(records)
+}
+
+/// Headless fair-witness watching `folder` and reviewing with `model` at `url`.
+fn witness_command(
+    scenario: &Scenario,
+    folder: &Path,
+    url: &str,
+    model: &Model,
+    settings: &Settings,
+) -> Command {
+    let mut command = Command::new(&settings.binary);
+    command
+        .args(["run", "--headless", "--project"])
+        .arg(folder)
+        .arg("--dmp-file")
+        .arg(scenario.dir.join(DMP))
+        .args(["--ai-url", url, "--model", model.name()])
+        .args(["--effort", effort_name(model.effort())])
+        .env(
+            "FAIR_WITNESS_DEBOUNCE_MS",
+            settings.debounce.as_millis().to_string(),
+        );
+    match (model, &settings.api_key) {
+        (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
+        // A key meant for a real model must not go to the fake one.
+        _ => command.env_remove(API_KEY),
+    };
+    command
+}
+
+/// bash running the scenario's script in `folder`.
+fn script_command(scenario: &Scenario, folder: &Path) -> Command {
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(prelude())
+        .arg(scenario.dir.join(SCRIPT))
+        .current_dir(folder)
+        // The script needs no key, and its output could show it.
+        .env_remove(API_KEY);
+    command
 }
 
 /// Defines `wait_for_verdict` and runs the script given as `$0` in a subshell. bash then says how
@@ -200,7 +296,8 @@ struct Process {
 }
 
 impl Process {
-    fn start(name: &'static str, command: &mut Command) -> Result<Self> {
+    /// Starts `command` and reads its output with `secret` hidden.
+    fn start(name: &'static str, command: &mut Command, secret: Option<String>) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -210,8 +307,11 @@ impl Process {
             name,
             group: None,
             stdin: child.stdin.take(),
-            stdout: lines(child.stdout.take().expect("stdout is piped")),
-            stderr: lines(child.stderr.take().expect("stderr is piped")),
+            stdout: lines(
+                child.stdout.take().expect("stdout is piped"),
+                secret.clone(),
+            ),
+            stderr: lines(child.stderr.take().expect("stderr is piped"), secret),
             stderr_lines: Vec::new(),
             child,
         })
@@ -228,7 +328,7 @@ impl Process {
         let Some(groups) = groups.as_mut() else {
             bail!("the runner is stopping");
         };
-        let mut process = Self::start(name, command)?;
+        let mut process = Self::start(name, command, None)?;
         // The leader's process id is the id of its group.
         let group = process.child.id();
         groups.push(group);
@@ -270,17 +370,23 @@ impl Process {
         }
     }
 
-    /// Reads events until change set `set` has its verdict or its review failed.
-    fn until_decided(&mut self, set: usize, records: &mut Vec<Record>) -> Result<()> {
-        let deadline = Instant::now() + REVIEW;
+    /// Reads events until change set `set` has its verdict or its review failed, for at most
+    /// `review`.
+    fn until_decided(
+        &mut self,
+        set: usize,
+        review: Duration,
+        records: &mut Vec<Record>,
+    ) -> Result<()> {
+        let deadline = Instant::now() + review;
         let mut changed = false;
         loop {
             let record = match self.next_record(deadline)? {
                 Some(record) => record,
-                None if changed => bail!("change set {set} got no verdict within {REVIEW:?}"),
+                None if changed => bail!("change set {set} got no verdict within {review:?}"),
                 None => bail!(
                     "fair-witness saw no changes before {SCRIPT} waited for verdict {set}, \
-                     within {REVIEW:?}"
+                     within {review:?}"
                 ),
             };
             let decided = match &record.event {
@@ -386,11 +492,12 @@ impl Drop for Process {
     }
 }
 
-fn lines(output: impl Read + Send + 'static) -> Receiver<String> {
+/// The lines of `output`, with `secret` hidden in them.
+fn lines(output: impl Read + Send + 'static, secret: Option<String>) -> Receiver<String> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(output).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
+            if sender.send(hide(line, secret.as_deref())).is_err() {
                 return;
             }
         }
@@ -398,6 +505,297 @@ fn lines(output: impl Read + Send + 'static) -> Receiver<String> {
     receiver
 }
 
+/// Whether `hide` finds `key` behind every escape JSON has for it: a key of printable ASCII
+/// without a backslash, which could not be told from the backslashes of the escapes.
+pub fn can_hide(key: &str) -> bool {
+    key.chars().all(|c| c.is_ascii_graphic() && c != '\\')
+}
+
+/// Replaces `secret` in `line`, in case an error message from the API repeats the key. An
+/// event holds it escaped as JSON, twice when it quotes a JSON response body, and JSON may
+/// escape any character, such as `/` as `\/` or `s` as `\u0073`.
+fn hide(line: String, secret: Option<&str>) -> String {
+    let Some(secret) = secret.filter(|secret| !secret.is_empty()) else {
+        return line;
+    };
+    let line = replace_escaped(line, secret);
+    if !reveals(&line, secret) {
+        return line;
+    }
+    // Escapes can escape the backslashes of other escapes, so what is left of the key is
+    // found only by reading the escapes over and over. Every string that holds it goes.
+    if let Ok(mut event) = serde_json::from_str::<serde_json::Value>(&line) {
+        wipe(&mut event, secret);
+        let wiped = event.to_string();
+        if !reveals(&wiped, secret) {
+            return wiped;
+        }
+    }
+    HIDDEN_KEY.to_string()
+}
+
+/// `line` with each place that holds `secret`, escaped or not, replaced.
+fn replace_escaped(line: String, secret: &str) -> String {
+    let secret: Vec<char> = secret.chars().collect();
+    let mut hidden = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(next) = rest.chars().next() {
+        match escaped_len(rest, &secret) {
+            Some(len) => {
+                hidden.push_str(HIDDEN_KEY);
+                rest = &rest[len..];
+            }
+            None => {
+                hidden.push(next);
+                rest = &rest[next.len_utf8()..];
+            }
+        }
+    }
+    hidden
+}
+
+/// How long `secret` is at the start of `text`, with each of its characters escaped as JSON
+/// any number of times or not at all.
+fn escaped_len(text: &str, secret: &[char]) -> Option<usize> {
+    let Some((&c, secret_rest)) = secret.split_first() else {
+        return Some(0);
+    };
+    let after = text.trim_start_matches('\\');
+    let slashes = text.len() - after.len();
+    // The `u` that starts an escape can also be the key's own `u`, so both readings are tried.
+    [
+        (slashes > 0 && unicode_escape(after) == Some(c)).then_some(slashes + "u0000".len()),
+        after.starts_with(c).then_some(slashes + c.len_utf8()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|at| escaped_len(&text[at..], secret_rest).map(|rest| at + rest))
+}
+
+/// Replaces each string in `value` that reveals `secret`.
+fn wipe(value: &mut serde_json::Value, secret: &str) {
+    match value {
+        serde_json::Value::String(text) if reveals(text, secret) => *text = HIDDEN_KEY.to_string(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|item| wipe(item, secret)),
+        serde_json::Value::Object(fields) => {
+            fields.values_mut().for_each(|field| wipe(field, secret))
+        }
+        _ => {}
+    }
+}
+
+/// Whether `text` holds `secret`, as it is or behind JSON escapes, as deep as they go.
+fn reveals(text: &str, secret: &str) -> bool {
+    let mut text = text.to_string();
+    loop {
+        if text.contains(secret) {
+            return true;
+        }
+        // Each read makes the text shorter, so this ends.
+        let read = unescape(&text);
+        if read == text {
+            return false;
+        }
+        text = read;
+    }
+}
+
+/// `text` with the JSON escapes in it read once, wherever they stand, and the ones that do
+/// not matter for finding a key, such as `\n`, left as they are.
+fn unescape(text: &str) -> String {
+    let mut read = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('\\') {
+        read.push_str(&rest[..at]);
+        let escape = &rest[at + 1..];
+        let (c, len) = match escape.chars().next() {
+            Some(c @ ('"' | '\\' | '/')) => (c, 1),
+            Some('u') => match unicode_escape(escape) {
+                Some(c) => (c, "u0000".len()),
+                None => ('\\', 0),
+            },
+            _ => ('\\', 0),
+        };
+        read.push(c);
+        rest = &escape[len..];
+    }
+    read.push_str(rest);
+    read
+}
+
+/// The character that a `uXXXX` escape at the start of `text` stands for.
+fn unicode_escape(text: &str) -> Option<char> {
+    let hex = text.strip_prefix('u')?.get(..4)?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    char::from_u32(u32::from_str_radix(hex, 16).ok()?)
+}
+
 fn left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use serde_json::json;
+
+    fn scenario() -> Scenario {
+        Scenario {
+            name: "notes".to_string(),
+            dir: PathBuf::from("/scenarios/notes"),
+            description: String::new(),
+            sets: Vec::new(),
+        }
+    }
+
+    /// What `command` does with the API key: `None` when it inherits it, `Some(None)` when it
+    /// removes it and `Some(Some(key))` when it sets it.
+    fn api_key(command: &Command) -> Option<Option<&str>> {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == API_KEY)
+            .map(|(_, value)| value.map(|value| value.to_str().unwrap()))
+    }
+
+    #[test]
+    fn hands_the_api_key_to_fair_witness_alone_and_only_for_a_real_model() {
+        let settings = Settings {
+            binary: PathBuf::from("fair-witness"),
+            debounce: Duration::from_millis(500),
+            api_key: Some("sk-secret".to_string()),
+        };
+        let real = Model::Real {
+            url: "https://api.example.org/v1".to_string(),
+            name: "large".to_string(),
+            effort: Some(Effort::High),
+        };
+        let folder = Path::new("/tmp/project");
+
+        let witness = witness_command(
+            &scenario(),
+            folder,
+            "https://api.example.org/v1",
+            &real,
+            &settings,
+        );
+        let fake = witness_command(
+            &scenario(),
+            folder,
+            "http://127.0.0.1:9/v1",
+            &Model::Fake,
+            &settings,
+        );
+
+        let arguments: Vec<&str> = witness
+            .get_args()
+            .map(|argument| argument.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            arguments,
+            [
+                "run",
+                "--headless",
+                "--project",
+                "/tmp/project",
+                "--dmp-file",
+                "/scenarios/notes/dmp.json",
+                "--ai-url",
+                "https://api.example.org/v1",
+                "--model",
+                "large",
+                "--effort",
+                "high"
+            ]
+        );
+        assert_eq!(api_key(&witness), Some(Some("sk-secret")));
+        assert_eq!(api_key(&fake), Some(None));
+        assert_eq!(api_key(&script_command(&scenario(), folder)), Some(None));
+    }
+
+    #[test]
+    fn hides_the_api_key_in_what_fair_witness_prints() {
+        let output = Cursor::new("{\"error\":\"sk-secret is not a key\"}\nsk-secre\n");
+
+        let read: Vec<String> = lines(output, Some("sk-secret".to_string()))
+            .iter()
+            .collect();
+
+        assert_eq!(read, ["{\"error\":\"[API key] is not a key\"}", "sk-secre"]);
+        assert_eq!(hide("sk-secret".to_string(), Some("")), "sk-secret");
+    }
+
+    #[test]
+    fn hides_an_api_key_however_json_escapes_it() {
+        // An error event that names the key and quotes the response body of the API, which
+        // repeats it with escapes that serde_json does not use.
+        let event = |key: &str, in_body: &str| {
+            let body = format!(r#"{{"error":"{in_body} is not a key"}}"#);
+            let error = format!("{key} failed: Response body:\n{body}");
+            json!({ "event": "review_failed", "error": error }).to_string()
+        };
+        let key = r#"sk-u/"secret"key"#;
+        let escape = |c: char| match c {
+            '"' | '/' => format!("\\{c}"),
+            c => c.to_string(),
+        };
+
+        // Each character in turn as a Unicode escape, and the others as JSON may write them.
+        for i in 0..key.chars().count() {
+            let in_body: String = key
+                .chars()
+                .enumerate()
+                .map(|(j, c)| {
+                    if i == j {
+                        format!("\\u{:04x}", u32::from(c))
+                    } else {
+                        escape(c)
+                    }
+                })
+                .collect();
+            assert_eq!(
+                hide(event(key, &in_body), Some(key)),
+                event(HIDDEN_KEY, HIDDEN_KEY),
+                "{in_body}"
+            );
+        }
+    }
+
+    #[test]
+    fn hides_an_api_key_behind_escaped_escapes() {
+        let key = "sk-secret";
+        // A response body whose backslash, written as an escape, starts the escape of `s`
+        // once the body is read twice.
+        let body = r#"{"detail": "{\"error\":\"\u005cu0073k-secret\"}"}"#;
+        let event = json!({ "event": "review_failed", "set": 1, "error": body }).to_string();
+
+        let hidden: serde_json::Value = serde_json::from_str(&hide(event, Some(key))).unwrap();
+
+        assert_eq!(
+            hidden,
+            json!({ "event": "review_failed", "set": 1, "error": HIDDEN_KEY })
+        );
+        assert_eq!(
+            hide(r"error: \u005cu0073k-secret".to_string(), Some(key)),
+            HIDDEN_KEY
+        );
+    }
+
+    #[test]
+    fn takes_only_keys_it_can_hide() {
+        assert_eq!(
+            [
+                "sk-u/\"secret\"+=~",
+                "sk-\\secret",
+                "sk-\tsecret",
+                "sk-secret ",
+                "sk-\u{1f600}-secret"
+            ]
+            .map(can_hide),
+            [true, false, false, false, false]
+        );
+    }
 }
