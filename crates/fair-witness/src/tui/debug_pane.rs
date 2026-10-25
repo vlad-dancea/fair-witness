@@ -39,6 +39,12 @@ enum Entry {
         wait_ms: u64,
         body: String,
     },
+    /// The API asked to name the effort in `allowed_openai_params`, and the request goes again
+    /// with the field.
+    EffortNotAllowed {
+        turn: usize,
+        body: String,
+    },
     Failed(String),
 }
 
@@ -181,22 +187,17 @@ impl DebugLog {
                 wait_ms,
                 body,
             } => {
-                // The request goes again, so it no longer waits for a reply.
-                if let Some(Entry::Turn(Turn {
-                    number,
-                    reply: None,
-                    ..
-                })) = self.entries.last()
-                    && *number == turn
-                {
-                    self.entries.pop();
-                }
+                self.goes_again(turn);
                 self.push(Entry::RateLimited {
                     turn,
                     retry,
                     wait_ms,
                     body,
                 });
+            }
+            Trace::EffortNotAllowed { turn, body } => {
+                self.goes_again(turn);
+                self.push(Entry::EffortNotAllowed { turn, body });
             }
             Trace::Reply {
                 turn,
@@ -279,6 +280,19 @@ impl DebugLog {
         &self.rendered.as_ref().expect("rendered above").1
     }
 
+    /// Request `turn` goes again, so it no longer waits for a reply.
+    fn goes_again(&mut self, turn: usize) {
+        if let Some(Entry::Turn(Turn {
+            number,
+            reply: None,
+            ..
+        })) = self.entries.last()
+            && *number == turn
+        {
+            self.entries.pop();
+        }
+    }
+
     /// The entries of the review in progress, latest first.
     fn this_review(&mut self) -> impl Iterator<Item = &mut Entry> {
         self.entries
@@ -333,6 +347,12 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
                 *wait_ms as f64 / 1000.0
             );
             lines.push(badge("RATE LIMIT", Color::Yellow, &details));
+            let body = text_lines(body, Style::new().add_modifier(Modifier::DIM));
+            push_body(lines, &indent, &body, width);
+        }
+        Entry::EffortNotAllowed { turn, body } => {
+            let details = format!("turn {turn} · again with allowed_openai_params");
+            lines.push(badge("REFUSED", Color::Yellow, &details));
             let body = text_lines(body, Style::new().add_modifier(Modifier::DIM));
             push_body(lines, &indent, &body, width);
         }
@@ -855,6 +875,27 @@ mod tests {
             [
                 " RATE LIMIT   turn 1 · retry 1 in 4.0 s",
                 "  Retry after 4s.",
+                "",
+                " AI   turn 1",
+                "  waiting for the reply…",
+            ]
+        );
+    }
+
+    #[test]
+    fn shows_a_request_that_goes_again_with_allowed_openai_params() {
+        let mut log = DebugLog::default();
+        log.add_trace(Trace::Request { turn: 1 });
+        log.add_trace(Trace::EffortNotAllowed {
+            turn: 1,
+            body: "send allowed_openai_params=['reasoning_effort']".to_string(),
+        });
+        log.add_trace(Trace::Request { turn: 1 });
+        assert_eq!(
+            texts(&mut log, 80),
+            [
+                " REFUSED   turn 1 · again with allowed_openai_params",
+                "  send allowed_openai_params=['reasoning_effort']",
                 "",
                 " AI   turn 1",
                 "  waiting for the reply…",
