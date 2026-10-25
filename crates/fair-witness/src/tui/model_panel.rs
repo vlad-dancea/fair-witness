@@ -12,6 +12,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
+use tokio::task::JoinHandle;
 
 use crate::setup::damap::http_client;
 
@@ -75,11 +76,22 @@ enum Check {
     Running {
         choice: ModelChoice,
         checked: Receiver<Checked>,
+        _task: CheckTask,
     },
     Refused {
         choice: ModelChoice,
         message: String,
     },
+}
+
+/// The task that checks a choice. It stops when the panel closes, so that a check nobody waits
+/// for sends no request without the token limit, which a model may answer at length.
+struct CheckTask(JoinHandle<()>);
+
+impl Drop for CheckTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub struct ModelPanel {
@@ -163,16 +175,23 @@ impl ModelPanel {
         let (sender, checked) = oneshot::channel();
         let reviewer = self.reviewer.clone();
         let asked = choice.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _ = sender.send(reviewer.check(&asked).await);
         });
-        self.check = Check::Running { choice, checked };
+        self.check = Check::Running {
+            choice,
+            checked,
+            _task: CheckTask(task),
+        };
     }
 
     /// What came of checking the choice: `Chosen` once the API took it or the check could not
     /// tell, and `Open` while it checks, after the API refused it, or before any check.
     pub fn checked(&mut self) -> Outcome {
-        let Check::Running { choice, checked } = &mut self.check else {
+        let Check::Running {
+            choice, checked, ..
+        } = &mut self.check
+        else {
             return Outcome::Open;
         };
         let checked = match checked.try_recv() {
@@ -418,6 +437,8 @@ fn highlighted(list: List<'_>, focused: bool) -> List<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -592,6 +613,53 @@ mod tests {
                     )
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_checking_once_it_closes() {
+        // An API that takes the check's request and never answers.
+        let api = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", api.local_addr().unwrap());
+        let (asked, request) = oneshot::channel();
+        let closed = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = api.accept().unwrap();
+            let mut buffer = [0; 4096];
+            stream.read_exact(&mut buffer[..1]).unwrap();
+            asked.send(()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            // Reads the rest of the request until the connection closes.
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => return true,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+        });
+        let mut panel = loaded("medium", Vec::new()).await;
+        let ai = AiConfig {
+            url,
+            model: "qwen3:8b".to_string(),
+            effort: "medium".parse().unwrap(),
+        };
+        panel.reviewer = Arc::new(Reviewer::new(&ai, None));
+        for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
+            panel.handle_key(key.into());
+        }
+        request.await.unwrap();
+
+        assert!(matches!(
+            panel.handle_key(KeyCode::Esc.into()),
+            Outcome::Closed
+        ));
+        drop(panel);
+
+        assert!(
+            closed.await.unwrap(),
+            "the check went on after the panel closed"
         );
     }
 }
