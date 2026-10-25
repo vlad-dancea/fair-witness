@@ -354,7 +354,7 @@ fn models(args: &Args) -> Result<Vec<Model>> {
     for name in &args.models {
         for effort in &efforts {
             let model = Model::Real {
-                url: args.ai_url.clone(),
+                url: with_scheme(&args.ai_url),
                 name: name.clone(),
                 effort: effort.clone(),
             };
@@ -482,6 +482,17 @@ fn write_results(folder: &Path, results: &Results, events: &[Vec<Record>]) -> Re
     Ok(())
 }
 
+/// `ai_url` as fair-witness reads it, with HTTPS for an address without a scheme, so that the
+/// checks ask the API that the runs use.
+fn with_scheme(ai_url: &str) -> String {
+    let ai_url = ai_url.trim();
+    if ai_url.contains("://") {
+        ai_url.to_string()
+    } else {
+        format!("https://{ai_url}")
+    }
+}
+
 /// Whether a key sent to `ai_url` would cross the network unencrypted: plain HTTP to another
 /// machine than this one. fair-witness reads an address without a scheme as HTTPS.
 fn in_the_clear(ai_url: &str) -> bool {
@@ -559,6 +570,32 @@ mod tests {
         assert_eq!(
             folders(&["--model", "large", "--effort", ""]),
             Err(clap::error::ErrorKind::ValueValidation)
+        );
+    }
+
+    #[test]
+    fn reads_an_api_without_a_scheme_as_fair_witness_does() {
+        let urls: Vec<String> = ["models.example.org/v1", " http://127.0.0.1:8080/v1"]
+            .iter()
+            .map(|url| {
+                let args = Args::try_parse_from([
+                    "fair-witness-scenarios",
+                    "--model",
+                    "large",
+                    "--ai-url",
+                    url,
+                ])
+                .unwrap();
+                let Model::Real { url, .. } = models(&args).unwrap().remove(0) else {
+                    panic!("no real model");
+                };
+                url
+            })
+            .collect();
+
+        assert_eq!(
+            urls,
+            ["https://models.example.org/v1", "http://127.0.0.1:8080/v1"]
         );
     }
 
