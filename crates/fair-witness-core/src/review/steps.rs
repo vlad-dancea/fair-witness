@@ -69,7 +69,7 @@ mod tests {
     use super::*;
     use crate::project::AiConfig;
     use crate::review::Reviewer;
-    use crate::testing::{fake_model, tool_call};
+    use crate::testing::{Reply, fake_model, tool_call};
 
     /// A step that gives the same outcome for every change set.
     struct Fixed(fn() -> Outcome);
@@ -100,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn stops_at_the_first_step_that_decides() {
         let root = tempfile::tempdir().unwrap();
-        let (endpoint, server) = fake_model(Vec::new());
+        let (endpoint, server) = fake_model(Vec::<Reply>::new());
         let steps = [
             Arc::new(Fixed(|| Outcome::Decided(verdict()))),
             model(endpoint),
