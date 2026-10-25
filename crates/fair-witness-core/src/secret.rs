@@ -16,6 +16,10 @@ pub fn hide(line: String, secret: Option<&str>) -> String {
     let Some(secret) = secret.filter(|secret| !secret.is_empty()) else {
         return line;
     };
+    // Such a key could stand behind an escape that this does not read, such as `\t` for a tab.
+    if !can_hide(secret) {
+        return HIDDEN_KEY.to_string();
+    }
     let line = replace_escaped(line, secret);
     if !reveals(&line, secret) {
         return line;
@@ -190,6 +194,13 @@ mod tests {
             hide(r"error: \u005cu0073k-secret".to_string(), Some(key)),
             HIDDEN_KEY
         );
+    }
+
+    #[test]
+    fn hides_the_whole_text_for_a_key_it_cannot_find_behind_every_escape() {
+        let message = r#"{"error":{"message":"Invalid API key: sk-\tsecret"}}"#;
+
+        assert_eq!(hide(message.to_string(), Some("sk-\tsecret")), HIDDEN_KEY);
     }
 
     #[test]
