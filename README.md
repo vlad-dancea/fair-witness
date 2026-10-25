@@ -56,7 +56,7 @@ Run `fair-witness run` to start watching this folder.
 Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to ignore.
 ```
 
-Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in.
+Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
 ### Setting up without prompts
 
