@@ -113,13 +113,19 @@ pub fn asks_to_allow_effort(error: &genai::Error) -> Option<String> {
     (*status == StatusCode::BAD_REQUEST && asks_for_effort(body)).then(|| body.clone())
 }
 
-/// Whether `body` asks to send `allowed_openai_params` with `reasoning_effort` among them.
-/// Gateways rename LiteLLM in their messages, as Aqueduct's `aqueduct.UnsupportedParamsError`
-/// does, so only what the message asks for counts.
+/// Whether `body` asks to send `allowed_openai_params` with `reasoning_effort` alone, the one
+/// parameter the request goes again with. A request refused for others too, such as
+/// `tool_choice`, would only be refused again. Gateways rename LiteLLM in their messages, as
+/// Aqueduct's `aqueduct.UnsupportedParamsError` does, so only what the message asks for counts.
 fn asks_for_effort(body: &str) -> bool {
-    body.split_once("allowed_openai_params=")
+    body.split_once("allowed_openai_params=[")
         .and_then(|(_, asked)| asked.split_once(']'))
-        .is_some_and(|(asked, _)| asked.contains("'reasoning_effort'"))
+        .is_some_and(|(asked, _)| {
+            asked
+                .split(',')
+                .map(|name| name.trim().trim_matches('\''))
+                .eq(["reasoning_effort"])
+        })
 }
 
 /// The forms of a date in HTTP, always in GMT: the one in use, then two obsolete ones that
@@ -238,7 +244,11 @@ mod tests {
                        send allowed_openai_params=['tool_choice', 'reasoning_effort'] in your \
                        request.";
         assert!(asks_for_effort(&body(EFFORT_NOT_ALLOWED)));
-        assert!(asks_for_effort(&body(litellm)));
+        assert!(asks_for_effort(&body(&litellm.replace(
+            "'tool_choice', 'reasoning_effort'",
+            "'reasoning_effort'"
+        ))));
+        assert!(!asks_for_effort(&body(litellm)));
         assert!(!asks_for_effort(&body(
             &litellm.replace("'tool_choice', 'reasoning_effort'", "'tool_choice'")
         )));
