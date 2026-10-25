@@ -29,6 +29,8 @@ const MAX_WAIT: Duration = Duration::from_secs(60);
 /// How long a check waits for the API: long enough for a busy one to answer with one token, and
 /// short enough that `run` does not seem to hang when it starts.
 const CHECK_WAIT: Duration = Duration::from_secs(30);
+/// Stands in for the API key in what a check reports.
+const HIDDEN_KEY: &str = "[API key]";
 /// What a check sends in place of the DMP and the changes.
 const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the API takes the \
                              model, its effort and the tools.";
@@ -119,6 +121,8 @@ pub struct Reviewer {
     /// asks for each model it does not know to take an effort, and the field would make it
     /// pass an effort on raw to one it does know, such as Anthropic's, which refuses it.
     allowing_effort: Mutex<HashSet<String>>,
+    /// Kept to hide it in what a check reports, since an API may repeat a key it refuses.
+    api_key: Option<String>,
 }
 
 /// What the API made of a model and effort when a check asked it once, as a review would.
@@ -143,12 +147,13 @@ pub struct ModelChoice {
 impl Reviewer {
     pub fn new(config: &AiConfig, api_key: Option<String>) -> Self {
         Self {
-            client: openai_compatible(&config.url, api_key),
+            client: openai_compatible(&config.url, api_key.clone()),
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
                 effort: config.effort.clone(),
             }),
             allowing_effort: Mutex::default(),
+            api_key: api_key.filter(|key| !key.is_empty()),
         }
     }
 
@@ -266,14 +271,23 @@ impl Reviewer {
                 answered => answered,
             }
         };
-        tokio::time::timeout(CHECK_WAIT, asked)
+        let checked = tokio::time::timeout(CHECK_WAIT, asked)
             .await
             .unwrap_or_else(|_| {
                 Checked::Unknown(format!(
                     "the API did not answer within {} s",
                     CHECK_WAIT.as_secs()
                 ))
-            })
+            });
+        let hide = |text: String| match &self.api_key {
+            Some(key) => text.replace(key.as_str(), HIDDEN_KEY),
+            None => text,
+        };
+        match checked {
+            Checked::Accepted => Checked::Accepted,
+            Checked::Refused(message) => Checked::Refused(hide(message)),
+            Checked::Unknown(why) => Checked::Unknown(hide(why)),
+        }
     }
 
     /// Sends `request` and gives back the reply with how long it took. When the API refuses the
@@ -1002,6 +1016,23 @@ mod tests {
                 (&high, &allowed, &one),
                 (&high, &allowed, &Value::Null),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn hides_the_api_key_in_what_a_check_reports() {
+        let refused = "Incorrect API key provided: sk-test. Find your key at https://example.org.";
+        let (url, _server) = fake_model(vec![bad_request(refused), bad_request(refused)]);
+        let reviewer = reviewer(url);
+
+        let checked = reviewer.check(&reviewer.choice()).await;
+
+        assert_eq!(
+            checked,
+            Checked::Refused(
+                "Incorrect API key provided: [API key]. Find your key at https://example.org."
+                    .to_string()
+            )
         );
     }
 
