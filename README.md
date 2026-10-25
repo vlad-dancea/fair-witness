@@ -244,6 +244,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
 | `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
+| `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, `default`, `none`, `low`, `medium` or `high`, instead of the effort chosen with `m`. `default` sends no effort, so the model uses its own |
 | | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000) |
 
 With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:

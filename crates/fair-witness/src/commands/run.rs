@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
-use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
+use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::Reviewer;
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -65,6 +65,36 @@ pub struct Args {
         help = "The model to use, instead of the one chosen in `setup`"
     )]
     model: Option<String>,
+    #[arg(
+        long,
+        env = "FAIR_WITNESS_EFFORT",
+        value_enum,
+        help = "How much the model reasons, instead of the saved effort; `default` sends no \
+                effort"
+    )]
+    effort: Option<EffortArg>,
+}
+
+/// A reasoning effort on the command line, where `default` leaves it to the model.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum EffortArg {
+    Default,
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl EffortArg {
+    fn effort(self) -> Option<Effort> {
+        match self {
+            EffortArg::Default => None,
+            EffortArg::None => Some(Effort::None),
+            EffortArg::Low => Some(Effort::Low),
+            EffortArg::Medium => Some(Effort::Medium),
+            EffortArg::High => Some(Effort::High),
+        }
+    }
 }
 
 /// What `run` watches with, once it has everything it needs.
@@ -210,10 +240,13 @@ fn ai(
         (None, Some(ai)) => ai.model.clone(),
         (None, None) => bail!("no model chosen for {url}; pass --model"),
     };
-    let effort = saved
-        .as_ref()
-        .filter(|ai| ai.model == model)
-        .and_then(|ai| ai.effort);
+    let effort = match args.effort {
+        Some(effort) => effort.effort(),
+        None => saved
+            .as_ref()
+            .filter(|ai| ai.model == model)
+            .and_then(|ai| ai.effort),
+    };
     let api_key = match (&args.api_key, &saved) {
         (Some(key), _) => Some(key.clone()),
         (None, Some(_)) => project.credentials()?.api_key,
@@ -413,5 +446,67 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
                 let _ = lines.send(line);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fair_witness_core::project::DamapConfig;
+
+    use super::*;
+
+    fn args(model: Option<&str>, effort: Option<EffortArg>) -> Args {
+        Args {
+            dmp: None,
+            dmp_file: None,
+            project: None,
+            headless: true,
+            ai_url: None,
+            api_key: None,
+            model: model.map(str::to_string),
+            effort,
+        }
+    }
+
+    #[test]
+    fn takes_the_effort_from_the_flag_before_the_saved_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::new(dir.path().to_path_buf());
+        let config = Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: None,
+            },
+            ai: Some(AiConfig {
+                url: "https://api.example.org/v1".to_string(),
+                model: "small".to_string(),
+                effort: Some(Effort::Low),
+            }),
+        };
+        let effort = |args: Args| {
+            ai(&project, Some(&config), &args)
+                .unwrap()
+                .unwrap()
+                .0
+                .effort
+        };
+
+        assert_eq!(
+            [
+                effort(args(None, None)),
+                // The saved effort belongs to the saved model.
+                effort(args(Some("large"), None)),
+                effort(args(None, Some(EffortArg::High))),
+                effort(args(None, Some(EffortArg::Default))),
+                effort(args(Some("large"), Some(EffortArg::None))),
+            ],
+            [
+                Some(Effort::Low),
+                None,
+                Some(Effort::High),
+                None,
+                Some(Effort::None)
+            ]
+        );
     }
 }
