@@ -18,6 +18,7 @@ use super::provider::{
 use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
 use crate::project::{AiConfig, Effort};
+use crate::secret;
 
 const MAX_TURNS: usize = 12;
 /// How often a request goes again after the API refused it with 429 Too Many Requests. Reviews
@@ -29,8 +30,6 @@ const MAX_WAIT: Duration = Duration::from_secs(60);
 /// How long a check waits for the API: long enough for a busy one to answer with one token, and
 /// short enough that `run` does not seem to hang when it starts.
 const CHECK_WAIT: Duration = Duration::from_secs(30);
-/// Stands in for the API key in what a check reports.
-const HIDDEN_KEY: &str = "[API key]";
 /// What a check sends in place of the DMP and the changes.
 const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the API takes the \
                              model, its effort and the tools.";
@@ -153,7 +152,7 @@ impl Reviewer {
                 effort: config.effort.clone(),
             }),
             allowing_effort: Mutex::default(),
-            api_key: api_key.filter(|key| !key.is_empty()),
+            api_key,
         }
     }
 
@@ -279,10 +278,7 @@ impl Reviewer {
                     CHECK_WAIT.as_secs()
                 ))
             });
-        let hide = |text: String| match &self.api_key {
-            Some(key) => text.replace(key.as_str(), HIDDEN_KEY),
-            None => text,
-        };
+        let hide = |text| secret::hide(text, self.api_key.as_deref());
         match checked {
             Checked::Accepted => Checked::Accepted,
             Checked::Refused(message) => Checked::Refused(hide(message)),
@@ -1021,7 +1017,9 @@ mod tests {
 
     #[tokio::test]
     async fn hides_the_api_key_in_what_a_check_reports() {
-        let refused = "Incorrect API key provided: sk-test. Find your key at https://example.org.";
+        // A message that quotes a body escaped as JSON, which may escape any character.
+        let refused =
+            r"Incorrect API key provided: sk-test, or {\u0022key\u0022: \u0022\u0073k-test\u0022}.";
         let (url, _server) = fake_model(vec![bad_request(refused), bad_request(refused)]);
         let reviewer = reviewer(url);
 
@@ -1030,7 +1028,7 @@ mod tests {
         assert_eq!(
             checked,
             Checked::Refused(
-                "Incorrect API key provided: [API key]. Find your key at https://example.org."
+                r"Incorrect API key provided: [API key], or {\u0022key\u0022: \u0022[API key]\u0022}."
                     .to_string()
             )
         );
