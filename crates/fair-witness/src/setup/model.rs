@@ -2,10 +2,11 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::project::{AiConfig, Effort, Project};
-use fair_witness_core::review;
+use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
 use reqwest::Client;
 
 use super::damap::{http_client, web_url};
+use crate::tui::model_panel::describe;
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 
@@ -35,7 +36,7 @@ pub struct ModelArgs {
 pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     let mut config = project.config()?.context("this folder is not set up yet")?;
     let http = http_client()?;
-    let previous = config.ai.take();
+    let mut previous = config.ai.take();
     let saved_key = project.credentials()?.api_key;
     let (url, api_key, models) = match args.ai_url {
         Some(url) => {
@@ -54,13 +55,46 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             .await?
         }
     };
-    let model = choose_model(
+    let mut model = choose_model(
         &url,
-        models,
-        args.model,
+        &models,
+        args.model.clone(),
         previous.as_ref().map(|ai| ai.model.clone()),
     )?;
-    let (ai, line) = chosen(previous, url, model);
+    // The model and effort are checked last, so that one the API refuses is chosen again.
+    let (ai, line) = loop {
+        let (ai, line) = chosen(previous.clone(), url.clone(), model.clone());
+        let choice = ModelChoice {
+            model: ai.model.clone(),
+            effort: ai.effort.clone(),
+        };
+        let described = describe(&choice);
+        match Reviewer::new(&ai, api_key.clone()).check(&choice).await {
+            Checked::Accepted => break (ai, line),
+            Checked::Unknown(why) => {
+                println!(
+                    "Could not check {described}, so the reviews will show whether the API takes \
+                     it: {why}"
+                );
+                break (ai, line);
+            }
+            // `setup` asks for no effort, so the one kept from before goes, and the model is
+            // checked at its own.
+            Checked::Refused(message) if !ai.effort.is_default() => {
+                println!("{url} refuses {described}: {message}");
+                previous = None;
+            }
+            Checked::Refused(message) if args.model.is_some() => bail!(
+                "{url} refuses {described}: {message}\nChoose another with --model, or leave it \
+                 out to choose one from the list"
+            ),
+            Checked::Refused(message) => {
+                println!("{url} refuses {described}: {message}");
+                println!("Choose another model, or press Ctrl+C to stop.");
+                model = choose_model(&url, &models, None, Some(model))?;
+            }
+        }
+    };
 
     let mut credentials = project.credentials()?;
     credentials.api_key = api_key;
@@ -148,7 +182,7 @@ async fn ask_for_api(
 
 fn choose_model(
     url: &str,
-    models: Vec<String>,
+    models: &[String],
     given: Option<String>,
     previous: Option<String>,
 ) -> Result<String> {
@@ -166,7 +200,7 @@ fn choose_model(
         .unwrap_or(0);
     let index = FuzzySelect::new()
         .with_prompt("Model (type to filter)")
-        .items(&models)
+        .items(models)
         .default(default)
         .interact()?;
     Ok(models[index].clone())
@@ -174,7 +208,94 @@ fn choose_model(
 
 #[cfg(test)]
 mod tests {
+    use fair_witness_core::project::{Config, DamapConfig};
+    use fair_witness_core::testing::{
+        EFFORT_REFUSED, Reply, Request, bad_request, fake_model, one_token,
+    };
+    use serde_json::{Value, json};
+
     use super::*;
+
+    /// Sets up the model of a folder whose config holds `saved`, with `model` given and an API
+    /// that lists `small` and then answers with `checks`. Gives back the AI settings it saved,
+    /// or why it failed, and the requests the API got.
+    async fn set_up(
+        saved: Option<(&str, &str)>,
+        model: &str,
+        checks: Vec<Reply>,
+    ) -> (Result<Option<AiConfig>, String>, String, Vec<Request>) {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let mut replies: Vec<Reply> = vec![
+            json!({ "object": "list", "data": [{ "id": "small", "object": "model" }] }).into(),
+        ];
+        replies.extend(checks);
+        let (url, server) = fake_model(replies);
+        let config = Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: Some(3),
+            },
+            ai: saved.map(|(model, effort)| AiConfig {
+                url: url.clone(),
+                model: model.to_string(),
+                effort: effort.parse().unwrap(),
+            }),
+        };
+        project.save_config(&config).unwrap();
+
+        let args = ModelArgs {
+            ai_url: Some(url.clone()),
+            api_key: None,
+            model: Some(model.to_string()),
+        };
+        let set_up = setup(&project, args)
+            .await
+            .map(|()| project.config().unwrap().unwrap().ai)
+            .map_err(|e| e.to_string());
+        (set_up, url, server.join().unwrap())
+    }
+
+    #[tokio::test]
+    async fn drops_a_saved_effort_the_api_refuses() {
+        let (set_up, _, requests) = set_up(
+            Some(("small", "high")),
+            "small",
+            vec![
+                bad_request(EFFORT_REFUSED),
+                bad_request(EFFORT_REFUSED),
+                one_token().into(),
+            ],
+        )
+        .await;
+
+        let ai = set_up.unwrap().unwrap();
+        assert_eq!((ai.model.as_str(), ai.effort), ("small", Effort::default()));
+        let efforts: Vec<&Value> = requests[1..]
+            .iter()
+            .map(|(_, body)| &body["reasoning_effort"])
+            .collect();
+        assert_eq!(efforts, [&json!("high"), &json!("high"), &Value::Null]);
+    }
+
+    #[tokio::test]
+    async fn fails_when_the_api_refuses_the_model_given() {
+        let refused = "The model `gone` does not exist.";
+        let (set_up, url, _) = set_up(
+            Some(("small", "default")),
+            "gone",
+            vec![bad_request(refused), bad_request(refused)],
+        )
+        .await;
+
+        assert_eq!(
+            set_up.unwrap_err(),
+            format!(
+                "{url} refuses gone: {refused}\nChoose another with --model, or leave it out to \
+                 choose one from the list"
+            )
+        );
+    }
 
     #[test]
     fn keeps_the_saved_effort_only_for_the_same_model() {

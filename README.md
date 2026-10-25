@@ -58,6 +58,8 @@ Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to
 
 Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
+Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
+
 ### Setting up without prompts
 
 The DAMAP URL and the AI settings can also be passed as flags or environment variables. That's handy for scripts or for keeping an API key out of your shell history:
