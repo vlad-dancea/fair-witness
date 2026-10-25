@@ -103,8 +103,8 @@ pub struct Reviewer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
 }
 
 impl Reviewer {
@@ -113,7 +113,7 @@ impl Reviewer {
             client: openai_compatible(&config.url, api_key),
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
-                effort: config.effort,
+                effort: config.effort.clone(),
             }),
         }
     }
@@ -160,9 +160,9 @@ impl Reviewer {
         let mut options = ChatOptions::default()
             .with_tool_choice(ToolChoice::Auto)
             .with_reasoning_effort(ReasoningEffort::Budget(0));
-        if let Some(effort) = choice.effort {
+        if let Some(effort) = choice.effort.sent() {
             options = options.with_extra_body(json!({
-                "reasoning_effort": effort.name(),
+                "reasoning_effort": effort,
                 "allowed_openai_params": ["reasoning_effort"],
             }));
         }
@@ -337,7 +337,7 @@ mod tests {
             &AiConfig {
                 url,
                 model: "test".to_string(),
-                effort: Some(Effort::Low),
+                effort: "low".parse().unwrap(),
             },
             Some("sk-test".to_string()),
         )
@@ -435,13 +435,13 @@ mod tests {
     async fn sends_the_model_and_the_effort_by_the_names_given() {
         let root = tempfile::tempdir().unwrap();
         let mut bodies = Vec::new();
-        for effort in [None, Some(Effort::High)] {
+        for effort in ["default", "ultra"] {
             let (url, server) = fake_model(vec![verdict()]);
             let reviewer = Reviewer::new(
                 &AiConfig {
                     url,
                     model: "qwen3-max".to_string(),
-                    effort,
+                    effort: effort.parse().unwrap(),
                 },
                 None,
             );
@@ -462,7 +462,7 @@ mod tests {
                 json!({ "model": "qwen3-max" }),
                 json!({
                     "model": "qwen3-max",
-                    "reasoning_effort": "high",
+                    "reasoning_effort": "ultra",
                     "allowed_openai_params": ["reasoning_effort"]
                 }),
             ]

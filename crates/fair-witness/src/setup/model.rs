@@ -54,7 +54,10 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             .await?
         }
     };
-    let effort = previous.as_ref().and_then(|ai| ai.effort);
+    let effort = previous
+        .as_ref()
+        .map(|ai| ai.effort.clone())
+        .unwrap_or_default();
     let model = choose_model(&url, models, args.model, previous.map(|ai| ai.model))?;
 
     let mut credentials = project.credentials()?;

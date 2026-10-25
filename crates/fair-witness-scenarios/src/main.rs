@@ -94,11 +94,12 @@ struct Args {
     #[arg(
         long = "effort",
         value_name = "EFFORT",
-        value_enum,
         requires = "models",
-        help = "Run each model at this reasoning effort; repeat for more [default: default]"
+        help = "Run each model at this reasoning effort, by a name it takes such as low or \
+                xhigh; repeat for more. `default` sends no effort, so the model uses its own, \
+                and `none` asks for no reasoning, which some models ignore [default: default]"
     )]
-    efforts: Vec<EffortArg>,
+    efforts: Vec<Effort>,
     #[arg(
         long,
         value_name = "URL",
@@ -114,29 +115,6 @@ struct Args {
                 --model, 1 with the fake model]"
     )]
     repeats: Option<NonZeroUsize>,
-}
-
-/// A reasoning effort as `fair-witness run --effort` takes it, where `default` leaves it to the
-/// model.
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum EffortArg {
-    Default,
-    None,
-    Low,
-    Medium,
-    High,
-}
-
-impl EffortArg {
-    fn effort(self) -> Option<Effort> {
-        match self {
-            EffortArg::Default => None,
-            EffortArg::None => Some(Effort::None),
-            EffortArg::Low => Some(Effort::Low),
-            EffortArg::Medium => Some(Effort::Medium),
-            EffortArg::High => Some(Effort::High),
-        }
-    }
 }
 
 /// A run of a scenario with a model, the how-manyth with it.
@@ -348,19 +326,19 @@ fn models(args: &Args) -> Result<Vec<Model>> {
     if args.models.is_empty() {
         return Ok(vec![Model::Fake]);
     }
-    let efforts: Vec<Option<Effort>> = if args.efforts.is_empty() {
-        vec![None]
+    let efforts = if args.efforts.is_empty() {
+        vec![Effort::default()]
     } else {
-        args.efforts.iter().map(|effort| effort.effort()).collect()
+        args.efforts.clone()
     };
     let mut models = Vec::new();
     let mut folders = HashSet::new();
     for name in &args.models {
-        for &effort in &efforts {
+        for effort in &efforts {
             let model = Model::Real {
                 url: args.ai_url.clone(),
                 name: name.clone(),
-                effort,
+                effort: effort.clone(),
             };
             if !folders.insert(model.folder()) {
                 bail!(
@@ -507,16 +485,16 @@ mod tests {
 
     #[test]
     fn takes_turns_between_the_models_before_the_efforts() {
-        let model = |name: &str, effort| Model::Real {
+        let model = |name: &str, effort: &str| Model::Real {
             url: AQUEDUCT.to_string(),
             name: name.to_string(),
-            effort,
+            effort: effort.parse().unwrap(),
         };
         let models = [
-            model("large", None),
-            model("large", Some(Effort::Low)),
-            model("small", None),
-            model("small", Some(Effort::Low)),
+            model("large", "default"),
+            model("large", "low"),
+            model("small", "default"),
+            model("small", "low"),
         ];
 
         let order: Vec<usize> = taking_turns(&models)
@@ -525,6 +503,45 @@ mod tests {
             .collect();
 
         assert_eq!(order, [0, 2, 1, 3]);
+    }
+
+    #[test]
+    fn names_the_folders_after_any_model_and_effort() {
+        let folders = |arguments: &[&str]| {
+            let args = Args::try_parse_from(["fair-witness-scenarios"].iter().chain(arguments))
+                .map_err(|e| e.kind())?;
+            let models = models(&args).map_err(|e| e.to_string());
+            Ok(models.map(|models| models.iter().map(Model::folder).collect::<Vec<_>>()))
+        };
+
+        assert_eq!(
+            folders(&[
+                "--model",
+                "openai/gpt-5",
+                "--effort",
+                "default",
+                "--effort",
+                "ultra"
+            ]),
+            Ok(Ok(vec![
+                "openai_gpt-5-default".to_string(),
+                "openai_gpt-5-ultra".to_string()
+            ]))
+        );
+        assert_eq!(
+            folders(&[
+                "--model", "large", "--effort", "../max", "--effort", ".._max"
+            ]),
+            Ok(Err(
+                "two of the models would write their events to large-.._max; name each \
+                    model and effort once"
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            folders(&["--model", "large", "--effort", ""]),
+            Err(clap::error::ErrorKind::ValueValidation)
+        );
     }
 
     #[test]

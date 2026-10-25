@@ -196,7 +196,7 @@ This is the place to look when a verdict seems wrong. The log in `.fair-witness/
 Press `m` to change the model without restarting:
 
 - Type to filter the model list, and use `↑↓` to choose.
-- `Tab` switches to the **effort** column (`default`, `none`, `low`, `medium`, `high`) for models that support reasoning effort.
+- `Tab` switches to the **effort** column for models that support reasoning effort: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. Each model takes only some of these names, and its API refuses, ignores or rounds the others. The list also holds an effort given with `--effort` that it does not offer.
 - `Enter` uses the choice from the next change set on and saves it to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. `Esc` cancels.
 
 To use a different API or key, quit and run `fair-witness setup`.
@@ -244,7 +244,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
 | `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
-| `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, `default`, `none`, `low`, `medium` or `high`, instead of the effort chosen with `m`. `default` sends no effort, so the model uses its own |
+| `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, instead of the effort chosen with `m`: a name the model takes, such as `low` or `xhigh`, which goes to the API as given. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore |
 | | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000). A set ends 30 times as long after its first change at the latest |
 
 With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:

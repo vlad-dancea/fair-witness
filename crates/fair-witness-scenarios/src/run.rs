@@ -54,7 +54,7 @@ pub enum Model {
     Real {
         url: String,
         name: String,
-        effort: Option<Effort>,
+        effort: Effort,
     },
 }
 
@@ -66,10 +66,10 @@ impl Model {
         }
     }
 
-    pub fn effort(&self) -> Option<Effort> {
+    pub fn effort(&self) -> Effort {
         match self {
-            Model::Fake => None,
-            Model::Real { effort, .. } => *effort,
+            Model::Fake => Effort::default(),
+            Model::Real { effort, .. } => effort.clone(),
         }
     }
 
@@ -79,22 +79,19 @@ impl Model {
         match self {
             Model::Fake => "fake".to_string(),
             Model::Real { name, effort, .. } => {
-                let name: String = name
-                    .chars()
-                    .map(|c| match c {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
-                        _ => '_',
-                    })
-                    .collect();
-                format!("{name}-{}", effort_name(*effort))
+                format!("{}-{}", file_name(name), file_name(effort.name()))
             }
         }
     }
 }
 
-/// The name of an effort as `fair-witness run --effort` takes it.
-pub fn effort_name(effort: Option<Effort>) -> &'static str {
-    effort.map_or("default", Effort::name)
+fn file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect()
 }
 
 /// What a run of a scenario produced: every event fair-witness printed and, when the run went
@@ -209,7 +206,7 @@ fn witness_command(
         .arg("--dmp-file")
         .arg(scenario.dir.join(DMP))
         .args(["--ai-url", url, "--model", model.name()])
-        .args(["--effort", effort_name(model.effort())])
+        .args(["--effort", model.effort().name()])
         .env(
             "FAIR_WITNESS_DEBOUNCE_MS",
             settings.debounce.as_millis().to_string(),
@@ -671,7 +668,7 @@ mod tests {
         let real = Model::Real {
             url: "https://api.example.org/v1".to_string(),
             name: "large".to_string(),
-            effort: Some(Effort::High),
+            effort: "high".parse().unwrap(),
         };
         let folder = Path::new("/tmp/project");
 

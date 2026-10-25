@@ -162,7 +162,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
             "--model",
             "test",
             "--effort",
-            "high",
+            "ultra",
         ],
     );
     assert_eq!(
@@ -211,7 +211,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     assert!(!project.join(".fair-witness").exists());
     let requests = server.join().unwrap();
     assert!(requests[0].1.to_string().contains("Soil samples"));
-    assert_eq!(requests[0].1["reasoning_effort"], "high");
+    assert_eq!(requests[0].1["reasoning_effort"], "ultra");
     assert_eq!(run.stop(), Some(0));
 }
 

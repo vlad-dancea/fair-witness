@@ -256,7 +256,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::project::AiConfig;
+    use crate::project::{AiConfig, Effort};
     use crate::review::Reviewer;
     use crate::testing::{fake_model, tool_call};
 
@@ -358,7 +358,7 @@ mod tests {
             &AiConfig {
                 url: endpoint,
                 model: "test".to_string(),
-                effort: None,
+                effort: Effort::default(),
             },
             None,
         );
