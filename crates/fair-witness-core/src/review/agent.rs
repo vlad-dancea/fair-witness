@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::prompt::{self, SYSTEM_PROMPT};
-use super::provider::{openai_compatible, too_many_requests};
+use super::provider::{asks_to_allow_effort, openai_compatible, too_many_requests};
 use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
 use crate::project::{AiConfig, Effort};
@@ -63,6 +64,14 @@ pub enum Trace {
         /// What the API answered.
         body: String,
     },
+    /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
+    /// as LiteLLM does, so it goes again with the field, which later requests to the model
+    /// carry from the start.
+    EffortNotAllowed {
+        turn: usize,
+        /// What the API answered.
+        body: String,
+    },
     Reply {
         turn: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,6 +107,10 @@ fn is_false(value: &bool) -> bool {
 pub struct Reviewer {
     client: Client,
     choice: Mutex<ModelChoice>,
+    /// The models the API asked to send `allowed_openai_params` with an effort for. LiteLLM
+    /// asks for each model it does not know to take an effort, and the field would make it
+    /// pass an effort on raw to one it does know, such as Anthropic's, which refuses it.
+    allowing_effort: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +128,7 @@ impl Reviewer {
                 model: config.model.clone(),
                 effort: config.effort.clone(),
             }),
+            allowing_effort: Mutex::default(),
         }
     }
 
@@ -161,10 +175,7 @@ impl Reviewer {
             .with_tool_choice(ToolChoice::Auto)
             .with_reasoning_effort(ReasoningEffort::Budget(0));
         if let Some(effort) = choice.effort.sent() {
-            options = options.with_extra_body(json!({
-                "reasoning_effort": effort,
-                "allowed_openai_params": ["reasoning_effort"],
-            }));
+            options = options.with_extra_body(json!({ "reasoning_effort": effort }));
         }
 
         for turn in 1..=MAX_TURNS {
@@ -220,7 +231,8 @@ impl Reviewer {
     }
 
     /// Sends `request` and gives back the reply with how long it took. When the API refuses the
-    /// request with 429 Too Many Requests, waits as long as it asks and sends it again.
+    /// request with 429 Too Many Requests, waits as long as it asks and sends it again. When it
+    /// asks for `allowed_openai_params`, sends it again with the field.
     async fn ask(
         &self,
         model: &str,
@@ -229,18 +241,46 @@ impl Reviewer {
         turn: usize,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<(ChatResponse, Duration)> {
+        // The options always carry a budget, so whether the request names an effort shows only
+        // in the extra body.
+        let effort = options
+            .extra_body
+            .as_ref()
+            .is_some_and(|body| body.get("reasoning_effort").is_some());
         let mut retry = 0;
         loop {
+            let allowing = effort
+                && self
+                    .allowing_effort
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(model);
+            let options = if allowing {
+                with_effort_allowed(options)
+            } else {
+                options.clone()
+            };
             trace(Trace::Request { turn });
             let asked = Instant::now();
             let e = match self
                 .client
-                .exec_chat(model, request.clone(), Some(options))
+                .exec_chat(model, request.clone(), Some(&options))
                 .await
             {
                 Ok(response) => return Ok((response, asked.elapsed())),
                 Err(e) => e,
             };
+            if effort
+                && !allowing
+                && let Some(body) = asks_to_allow_effort(&e)
+            {
+                self.allowing_effort
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(model.to_string());
+                trace(Trace::EffortNotAllowed { turn, body });
+                continue;
+            }
             let failed = match too_many_requests(&e) {
                 None => format!("the model {model} failed"),
                 Some(_) if retry == MAX_RETRIES => format!(
@@ -292,6 +332,14 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `options` with the field that lets LiteLLM pass the effort on to a model it does not know to
+/// take one.
+fn with_effort_allowed(options: &ChatOptions) -> ChatOptions {
+    let mut body = options.extra_body.clone().unwrap_or_else(|| json!({}));
+    body["allowed_openai_params"] = json!(["reasoning_effort"]);
+    options.clone().with_extra_body(body)
+}
+
 fn verdict_tool() -> Tool {
     Tool::new("report_verdict")
         .with_description("Hand in the verdict. Ends the review.")
@@ -320,7 +368,9 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::testing::{Reply, fake_model, too_many_requests, tool_call};
+    use crate::testing::{
+        EFFORT_NOT_ALLOWED, Reply, bad_request, fake_model, too_many_requests, tool_call,
+    };
     use crate::watcher::Change;
 
     fn input<'a>(root: &'a std::path::Path, dmp: &'a str, changes: &'a [Change]) -> Input<'a> {
@@ -384,7 +434,7 @@ mod tests {
         assert!(head.starts_with("POST /v1/chat/completions "), "{head}");
         assert!(head.contains("authorization: Bearer sk-test"), "{head}");
         assert_eq!(body["reasoning_effort"], "low");
-        assert_eq!(body["allowed_openai_params"], json!(["reasoning_effort"]));
+        assert_eq!(body["allowed_openai_params"], Value::Null);
         let first = body.to_string();
         assert!(first.contains("created: data/patients.csv"), "{first}");
         let messages = requests[1].1["messages"].as_array().unwrap();
@@ -411,6 +461,7 @@ mod tests {
                 Trace::Sent(text) => format!("sent {text}"),
                 Trace::Request { turn } => format!("request {turn}"),
                 Trace::RateLimited { turn, .. } => format!("request {turn} rate limited"),
+                Trace::EffortNotAllowed { turn, .. } => format!("request {turn} effort refused"),
                 Trace::Reply { turn, calls, .. } => format!("reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output, .. } => format!("{name}: {output}"),
                 Trace::Failed(e) => format!("failed: {e}"),
@@ -460,11 +511,7 @@ mod tests {
             bodies,
             [
                 json!({ "model": "qwen3-max" }),
-                json!({
-                    "model": "qwen3-max",
-                    "reasoning_effort": "ultra",
-                    "allowed_openai_params": ["reasoning_effort"]
-                }),
+                json!({ "model": "qwen3-max", "reasoning_effort": "ultra" }),
             ]
         );
     }
@@ -605,6 +652,131 @@ mod tests {
                 },
                 Trace::Request { turn: 1 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_allowed_openai_params_to_a_model_once_the_api_asks_for_them() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_model(vec![
+            bad_request(EFFORT_NOT_ALLOWED),
+            verdict().into(),
+            verdict().into(),
+            verdict().into(),
+            verdict().into(),
+        ]);
+        let reviewer = reviewer(endpoint);
+        let changes = [Change::Created("log.txt".into())];
+
+        let traces = Mutex::new(Vec::new());
+        let verdict = reviewer
+            .review(&input(root.path(), "{}", &changes), &|trace| {
+                traces.lock().unwrap().push(trace)
+            })
+            .await
+            .unwrap();
+        reviewer
+            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .await
+            .unwrap();
+        reviewer.set_choice(ModelChoice {
+            model: "other".to_string(),
+            effort: "low".parse().unwrap(),
+        });
+        reviewer
+            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .await
+            .unwrap();
+        reviewer.set_choice(ModelChoice {
+            model: "test".to_string(),
+            effort: Effort::default(),
+        });
+        reviewer
+            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(verdict.explanation, "A log file.");
+        let requests = server.join().unwrap();
+        let sent: Vec<(&Value, &Value, &Value)> = requests
+            .iter()
+            .map(|(_, body)| {
+                (
+                    &body["model"],
+                    &body["reasoning_effort"],
+                    &body["allowed_openai_params"],
+                )
+            })
+            .collect();
+        let (test, other, low) = (json!("test"), json!("other"), json!("low"));
+        let allowed = json!(["reasoning_effort"]);
+        assert_eq!(
+            sent,
+            [
+                (&test, &low, &Value::Null),
+                (&test, &low, &allowed),
+                (&test, &low, &allowed),
+                (&other, &low, &Value::Null),
+                (&test, &Value::Null, &Value::Null),
+            ]
+        );
+        let traces: Vec<Trace> = traces
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .filter(|trace| {
+                matches!(
+                    trace,
+                    Trace::Request { .. } | Trace::EffortNotAllowed { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            traces,
+            [
+                Trace::Request { turn: 1 },
+                Trace::EffortNotAllowed {
+                    turn: 1,
+                    body: json!({
+                        "error": {
+                            "message": EFFORT_NOT_ALLOWED,
+                            "type": "invalid_request_error"
+                        }
+                    })
+                    .to_string(),
+                },
+                Trace::Request { turn: 1 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fails_when_the_api_asks_again_for_allowed_openai_params() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, _server) = fake_model(vec![
+            bad_request(EFFORT_NOT_ALLOWED),
+            bad_request(EFFORT_NOT_ALLOWED),
+            verdict().into(),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        let e = reviewer(endpoint)
+            .review(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(e.to_string(), "the model test failed");
+        let traces = traces.into_inner().unwrap();
+        let refused = traces
+            .iter()
+            .filter(|trace| matches!(trace, Trace::EffortNotAllowed { .. }))
+            .count();
+        assert_eq!(refused, 1);
+        assert!(
+            matches!(traces.last(), Some(Trace::Failed(e)) if e.contains("allowed_openai_params")),
+            "{traces:?}"
         );
     }
 

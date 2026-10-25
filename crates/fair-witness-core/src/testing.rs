@@ -60,6 +60,23 @@ pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
     }
 }
 
+/// What Aqueduct answered on 2026-10-25, with 400 Bad Request, to a request with an effort but
+/// without `allowed_openai_params`.
+pub const EFFORT_NOT_ALLOWED: &str = "aqueduct.UnsupportedParamsError: openai does not support \
+    parameters: ['reasoning_effort'], for model=llm-d-qwen38/Qwen/Qwen3.8-27B-FP8. To drop these, \
+    set `aqueduct.drop_params=True` or for proxy:\n\n`aqueduct_settings:\n drop_params: true`\n. \n \
+    If you want to use these params dynamically send allowed_openai_params=['reasoning_effort'] in \
+    your request.. Received Model Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
+
+/// A refusal with 400 Bad Request and `message` in the body, as Aqueduct sends it.
+pub fn bad_request(message: &str) -> Reply {
+    Reply {
+        status: "400 Bad Request",
+        headers: String::new(),
+        body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
+    }
+}
+
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
 /// requests it got once all replies are sent.
 pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle<Vec<Request>>) {

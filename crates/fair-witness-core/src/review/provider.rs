@@ -99,6 +99,35 @@ pub fn too_many_requests(error: &genai::Error) -> Option<TooManyRequests> {
     })
 }
 
+/// What the API answered when it refused a request with 400 Bad Request and asked to name
+/// `reasoning_effort` in `allowed_openai_params`, as LiteLLM, which Aqueduct is built on, does
+/// for a model it does not know to take an effort.
+pub fn asks_to_allow_effort(error: &genai::Error) -> Option<String> {
+    let genai::Error::WebModelCall {
+        webc_error: webc::Error::ResponseFailedStatus { status, body, .. },
+        ..
+    } = error
+    else {
+        return None;
+    };
+    (*status == StatusCode::BAD_REQUEST && asks_for_effort(body)).then(|| body.clone())
+}
+
+/// Whether `body` asks to send `allowed_openai_params` with `reasoning_effort` alone, the one
+/// parameter the request goes again with. A request refused for others too, such as
+/// `tool_choice`, would only be refused again. Gateways rename LiteLLM in their messages, as
+/// Aqueduct's `aqueduct.UnsupportedParamsError` does, so only what the message asks for counts.
+fn asks_for_effort(body: &str) -> bool {
+    body.split_once("allowed_openai_params=[")
+        .and_then(|(_, asked)| asked.split_once(']'))
+        .is_some_and(|(asked, _)| {
+            asked
+                .split(',')
+                .map(|name| name.trim().trim_matches('\''))
+                .eq(["reasoning_effort"])
+        })
+}
+
 /// The forms of a date in HTTP, always in GMT: the one in use, then two obsolete ones that
 /// recipients must still accept.
 const HTTP_DATES: [&str; 3] = [
@@ -151,7 +180,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::testing::fake_model;
+    use crate::testing::{EFFORT_NOT_ALLOWED, fake_model};
 
     #[tokio::test]
     async fn lists_the_models_a_server_offers() {
@@ -201,6 +230,34 @@ mod tests {
                 "{date}: {wait:?}"
             );
         }
+    }
+
+    #[test]
+    fn sees_when_the_api_asks_to_allow_the_effort() {
+        let body = |message: &str| {
+            json!({ "error": { "message": message, "type": "invalid_request_error" } }).to_string()
+        };
+        let litellm = "litellm.UnsupportedParamsError: openai does not support parameters: \
+                       ['tool_choice', 'reasoning_effort'], for model=qwen3. To drop these, set \
+                       `litellm.drop_params=True` or for proxy:\n\n`litellm_settings:\n \
+                       drop_params: true`\n. \n If you want to use these params dynamically \
+                       send allowed_openai_params=['tool_choice', 'reasoning_effort'] in your \
+                       request.";
+        assert!(asks_for_effort(&body(EFFORT_NOT_ALLOWED)));
+        assert!(asks_for_effort(&body(&litellm.replace(
+            "'tool_choice', 'reasoning_effort'",
+            "'reasoning_effort'"
+        ))));
+        assert!(!asks_for_effort(&body(litellm)));
+        assert!(!asks_for_effort(&body(
+            &litellm.replace("'tool_choice', 'reasoning_effort'", "'tool_choice'")
+        )));
+        assert!(!asks_for_effort(&body(
+            "Unrecognized request argument supplied: allowed_openai_params"
+        )));
+        assert!(!asks_for_effort(&body(
+            "openai does not support parameters: ['reasoning_effort']"
+        )));
     }
 
     #[test]
