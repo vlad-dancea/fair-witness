@@ -33,9 +33,37 @@ pub fn tool_call(name: &str, arguments: Value) -> Value {
     })
 }
 
+/// What the fake model answers to one request.
+pub struct Reply {
+    status: &'static str,
+    headers: String,
+    body: Value,
+}
+
+impl From<Value> for Reply {
+    fn from(body: Value) -> Self {
+        Self {
+            status: "200 OK",
+            headers: String::new(),
+            body,
+        }
+    }
+}
+
+/// A refusal with 429 Too Many Requests and `message` in the body, as Aqueduct sends it, with a
+/// `Retry-After` header if given.
+pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
+    Reply {
+        status: "429 Too Many Requests",
+        headers: retry_after.map_or(String::new(), |wait| format!("Retry-After: {wait}\r\n")),
+        body: json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+    }
+}
+
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
 /// requests it got once all replies are sent.
-pub fn fake_model(replies: Vec<Value>) -> (String, thread::JoinHandle<Vec<Request>>) {
+pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle<Vec<Request>>) {
+    let replies: Vec<Reply> = replies.into_iter().map(Into::into).collect();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -67,11 +95,13 @@ pub fn fake_model(replies: Vec<Value>) -> (String, thread::JoinHandle<Vec<Reques
             };
             requests.push((head, body));
 
-            let body = reply.to_string();
+            let body = reply.body.to_string();
             write!(
                 reader.get_mut(),
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                reply.status,
+                reply.headers,
                 body.len()
             )
             .unwrap();

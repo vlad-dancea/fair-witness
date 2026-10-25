@@ -32,6 +32,13 @@ enum Entry {
     /// A message from fair-witness to the AI.
     Prompt(String),
     Turn(Turn),
+    /// The API refused a request with 429 Too Many Requests, and it goes again after a wait.
+    RateLimited {
+        turn: usize,
+        retry: usize,
+        wait_ms: u64,
+        body: String,
+    },
     Failed(String),
 }
 
@@ -168,6 +175,29 @@ impl DebugLog {
                 choice: self.model.clone(),
                 reply: None,
             })),
+            Trace::RateLimited {
+                turn,
+                retry,
+                wait_ms,
+                body,
+            } => {
+                // The request goes again, so it no longer waits for a reply.
+                if let Some(Entry::Turn(Turn {
+                    number,
+                    reply: None,
+                    ..
+                })) = self.entries.last()
+                    && *number == turn
+                {
+                    self.entries.pop();
+                }
+                self.push(Entry::RateLimited {
+                    turn,
+                    retry,
+                    wait_ms,
+                    body,
+                });
+            }
             Trace::Reply {
                 turn,
                 reasoning,
@@ -292,6 +322,20 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
             push_body(lines, &indent, &prompt_lines(text, collapsed), width);
         }
         Entry::Turn(turn) => render_turn(turn, width, collapsed, lines),
+        Entry::RateLimited {
+            turn,
+            retry,
+            wait_ms,
+            body,
+        } => {
+            let details = format!(
+                "turn {turn} · retry {retry} in {:.1} s",
+                *wait_ms as f64 / 1000.0
+            );
+            lines.push(badge("RATE LIMIT", Color::Yellow, &details));
+            let body = text_lines(body, Style::new().add_modifier(Modifier::DIM));
+            push_body(lines, &indent, &body, width);
+        }
         Entry::Failed(e) => {
             lines.push(badge("ERROR", Color::Red, "the request failed"));
             let body = text_lines(e, Style::new().fg(Color::Red));
@@ -792,6 +836,29 @@ mod tests {
                 "  │ Ages are personal.                 │",
                 "  ╰────────────────────────────────────╯",
             ],
+        );
+    }
+
+    #[test]
+    fn shows_a_request_that_waits_for_the_rate_limit_once() {
+        let mut log = DebugLog::default();
+        log.add_trace(Trace::Request { turn: 1 });
+        log.add_trace(Trace::RateLimited {
+            turn: 1,
+            retry: 1,
+            wait_ms: 4000,
+            body: "Retry after 4s.".to_string(),
+        });
+        log.add_trace(Trace::Request { turn: 1 });
+        assert_eq!(
+            texts(&mut log, 80),
+            [
+                " RATE LIMIT   turn 1 · retry 1 in 4.0 s",
+                "  Retry after 4s.",
+                "",
+                " AI   turn 1",
+                "  waiting for the reply…",
+            ]
         );
     }
 

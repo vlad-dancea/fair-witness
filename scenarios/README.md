@@ -20,14 +20,14 @@ As many scenarios run at once as there are CPUs, but at most 8, since each holds
 
 ```sh
 read -rs FAIR_WITNESS_API_KEY && export FAIR_WITNESS_API_KEY   # paste the key, kept out of the history
-mise run scenarios -- --model <model> --effort low --effort high --jobs 1
+mise run scenarios -- --model <model> --effort low --effort high --jobs 4
 ```
 
 `--model` reviews with a model of an OpenAI-compatible API instead of the fake one, by default TU Wien's Aqueduct (`--ai-url` changes it). Each `--model` runs at each `--effort`: `default`, which sends no effort, `none`, `low`, `medium` or `high`, by default only `default`. A model's verdicts vary, so each scenario runs 5 times with each model and effort, and `--repeats` changes that. Such a run costs tokens and takes minutes, so it happens only when asked, never in `mise run check` or CI.
 
 The API key comes from `FAIR_WITNESS_API_KEY`, as for fair-witness itself. With a key, `--ai-url` takes plain `http://` only for this machine, such as for a stub API, so that the key never crosses the network unencrypted. The runner hands it to fair-witness in its environment, never on a command line or to the script, and replaces it with `[API key]` in everything it keeps from fair-witness, such as an error the API sends back, however JSON escapes it. When escaped escapes leave unclear where the key is, the whole message is replaced. The runner takes only a key of printable ASCII characters without a backslash, which it can find behind every escape JSON has for them.
 
-An API limits how many requests each model gets a minute, and a review that goes over fails with `429 Too Many Requests`. A review usually takes 2 or 3 requests. The runs take turns between the models, but as many run at once as with the fake model, which is too many for Aqueduct, where some models allow 12.5 requests a minute. Pass `--jobs 1` there, which runs 30 reviews per model and effort in about 6 minutes.
+An API limits how many requests each model gets a minute, and a review usually takes 2 or 3. When the API answers `429 Too Many Requests`, fair-witness waits as long as it asks and sends the request again, up to 10 times. The seconds a review took then include its waits, and its events hold a `rate_limited` trace for each. The runs take turns between the models, but as many run at once as with the fake model. On Aqueduct, where some models allow 12.5 requests a minute, pass `--jobs 4`. With it, 30 reviews of `glm-5.3-744b-experimental` took under 4 minutes, and the 12 requests Aqueduct refused all went through on their first retry.
 
 While the runs go on, the runner says on stderr how each one ended. Then it prints how often each model and effort gave the expected verdict, with the tokens and seconds a review took on average, how often each change set got it right, and why reviews failed, such as a wrong key or too many requests. The events of each run are in `<model>-<effort>/<scenario>-<run>.jsonl`, and `results.json` also holds the `accuracy` of each model and effort.
 
