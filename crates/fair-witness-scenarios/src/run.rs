@@ -25,7 +25,9 @@ const FAKE_REVIEW: Duration = Duration::from_secs(20);
 /// Generous, since a real model's review can take up to 12 replies at a high effort from a busy
 /// API, while a review that hangs still fails.
 const REAL_REVIEW: Duration = Duration::from_secs(10 * 60);
-const SCRIPT_STEP: Duration = Duration::from_secs(60);
+/// Generous, since a realistic task such as a long copy or a script written over a few minutes
+/// runs at a researcher's pace, while a script that hangs still fails.
+const SCRIPT_STEP: Duration = Duration::from_secs(5 * 60);
 const STOP: Duration = Duration::from_secs(10);
 
 /// fair-witness reads the API key from here, so that it is not on a command line.
@@ -295,12 +297,14 @@ fn script_command(scenario: &Scenario, folder: &Path) -> Command {
     command
 }
 
-/// Defines `wait_for_verdict` and runs the script given as `$0` in a subshell. bash then says how
-/// the script ended and waits to be killed with the process group it leads, since a group whose
-/// leader is reaped first can lose its id to another one.
+/// Defines `wait_for_verdict`, which waits for as many verdicts as it is given, one without a
+/// number, and runs the script given as `$0` in a subshell. bash then says how the script ended
+/// and waits to be killed with the process group it leads, since a group whose leader is reaped
+/// first can lose its id to another one.
 fn prelude() -> String {
     format!(
-        "wait_for_verdict() {{\n    echo '{WAIT}'\n    read -r _\n}}\n\
+        "wait_for_verdict() {{\n    for _ in $(seq \"${{1:-1}}\"); do\n        echo '{WAIT}'\n        \
+         read -r _\n    done\n}}\n\
          (\n    set -euo pipefail\n    . \"$0\"\n)\n\
          echo \"{ENDED}$?\"\n\
          read -r _\n"
@@ -585,6 +589,31 @@ mod tests {
             description: String::new(),
             sets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn waits_for_as_many_verdicts_as_the_script_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SCRIPT),
+            "wait_for_verdict 2\necho between\nwait_for_verdict\n",
+        )
+        .unwrap();
+        let mut scenario = scenario();
+        scenario.dir = dir.path().to_path_buf();
+        let mut bash = script_command(&scenario, dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // One answer for each verdict, and one more that lets bash end after the script.
+        bash.stdin.take().unwrap().write_all(b"\n\n\n\n").unwrap();
+
+        let output = bash.wait_with_output().unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{WAIT}\n{WAIT}\nbetween\n{WAIT}\n{ENDED}0\n")
+        );
     }
 
     /// What `command` does with the API key: `None` when it inherits it, `Some(None)` when it
