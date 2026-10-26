@@ -954,7 +954,10 @@ mod tests {
         let log = project.run_log().unwrap().events;
         let mut records = Session::new(project)
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(Reviewer::new(&ai, None))])
+            .reviewing(
+                "{}".to_string(),
+                vec![Arc::new(Reviewer::new(&ai, None).unwrap())],
+            )
             .logging_to(log.clone())
             .start()
             .unwrap();

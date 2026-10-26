@@ -164,15 +164,21 @@ pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
     let mut found = Vec::new();
     for kind in Kind::ALL {
         let folder = root.join(kind.folder());
-        if !folder.is_dir() {
-            continue;
+        // A link, here or for a scenario below, could make edge cases count as realistic and
+        // send them to a real model.
+        match fs::symlink_metadata(&folder) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("could not read {}", folder.display()));
+            }
         }
         let entries = fs::read_dir(&folder)
             .with_context(|| format!("could not read {}", folder.display()))?;
         let mut dirs = Vec::new();
         for entry in entries {
             let entry = entry?;
-            // A link could make an edge case count as realistic and reach a real model.
             if !entry.file_type()?.is_dir() {
                 continue;
             }
@@ -302,8 +308,8 @@ mod tests {
                     "report_verdict",
                     json!({
                         "contradicts": true,
-                        "dmp_field": "dataset[0].personal_data",
-                        "explanation": "The DMP says there is no personal data."
+                        "explanation": "The DMP says there is no personal data.",
+                        "dmp_field": "dataset[0].personal_data"
                     })
                 ),
             ]
