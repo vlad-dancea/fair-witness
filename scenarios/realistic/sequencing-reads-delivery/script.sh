@@ -8,7 +8,7 @@ for sample in $(for site in $(seq -w 1 39); do echo "S$site"; done) Undetermined
   for read in R1 R2; do
     file="$facility/${sample}_S${number}_L001_${read}_001.fastq.gz"
     printf '\037\213\010\004\000\000\000\000\000\377\006\000BC\002\000' > "$file"
-    truncate -s $((14000000 + (number * 7919 + ${read#R} * 104729) % 9000000)) "$file"
+    truncate -s $((14000000 + number * 220000 + ${read#R} * 50000)) "$file"
   done
 done
 (cd "$facility" && md5sum ./*.fastq.gz | sed 's| \./| |' > MD5SUMS.txt)
