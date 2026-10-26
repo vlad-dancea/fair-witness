@@ -79,7 +79,7 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             effort: ai.effort.clone(),
         };
         let described = describe(&choice);
-        match Reviewer::new(&ai, api_key.clone()).check(&choice).await {
+        match Reviewer::new(&ai, api_key.clone())?.check(&choice).await {
             Checked::Accepted => break (ai, line),
             Checked::Unknown(why) => {
                 println!(

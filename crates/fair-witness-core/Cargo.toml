@@ -7,7 +7,7 @@ repository = "https://github.com/vlad-dancea/fair-witness"
 
 [dependencies]
 anyhow = "1.0.104"
-genai = "0.6.5"
+genai = "0.7.0"
 ignore = "0.4.33"
 jiff = { version = "0.2.37", features = ["serde"] }
 notify = "8.2.0"

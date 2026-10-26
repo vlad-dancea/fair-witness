@@ -86,14 +86,14 @@ fn for_api(builder: ClientBuilder, url: &str) -> ClientBuilder {
     }
 }
 
-pub fn openai_compatible(url: &str, api_key: Option<String>) -> Client {
-    // genai's own client, but for this API. genai panics as well when it cannot build one.
+pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
+    // The client genai builds by default, but for this API.
     let http = for_api(
         WebConfig::default().apply_to_builder(HttpClient::builder()),
         url,
     )
     .build()
-    .expect("could not build the HTTP client");
+    .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
     let endpoint = Endpoint::from_owned(base_url(url));
     let auth = AuthData::from_single(api_key.unwrap_or_default());
     Client::builder()
@@ -106,6 +106,7 @@ pub fn openai_compatible(url: &str, api_key: Option<String>) -> Client {
             })
         })
         .build()
+        .with_context(|| format!("could not set up a client for the AI API at {url}"))
 }
 
 /// A request the API refused with 429 Too Many Requests.
