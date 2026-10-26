@@ -1,0 +1,17 @@
+description = "Programs replace a file by renaming another over it: an editor that saves through a temporary file, sed -i, and a file manager moving a file in from elsewhere over the old one. Each shows up as the old file changed."
+
+[[set]]
+changes = [{ changed = "notes/field-notes.md" }]
+contradicts = false
+explanation = "Field notes are not research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [{ changed = "data/campaign-2026-04.csv" }]
+contradicts = false
+explanation = "A corrected measurement in a CSV file of soil measurements is what the DMP plans."
+
+[[set]]
+changes = [{ changed = "data/campaign-2026-04.csv" }]
+contradicts = false
+explanation = "Another sample in a CSV file of soil measurements is what the DMP plans."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/campaign-2026-04.csv" } }]
