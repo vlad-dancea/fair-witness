@@ -109,7 +109,7 @@ Some files in a project are not research data, and checking them would only cost
 - downloads that are not finished yet, from browsers (`*.part`, `*.crdownload`) and from the ownCloud and Nextcloud clients (`.*.~*`), so a download shows up only under its final name
 - the journal and logs of the ownCloud and Nextcloud clients (`.sync_*.db*`, `._sync_*.db*`, `.csync_journal.db*`, `.owncloudsync.log*`, `.nextcloudsync.log*`, `.nextcloudpermissions.log*`)
 
-A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, so anyone the folder is shared with gets your DAMAP session and API key from `credentials.toml`. To keep the file on your computer, add `credentials.toml` to the client's ignored files.
+A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy and replace the API key with a new one. The DAMAP session in the copy stays valid until it expires.
 
 To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. `.fair-witness/` itself is always skipped:
 
