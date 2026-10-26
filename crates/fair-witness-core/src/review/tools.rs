@@ -214,13 +214,23 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn reads_a_file_by_the_name_list_dir_shows() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
         let (dir, tools) = project();
         fs::write(dir.path().join("data/two\nlines.csv"), "id\n2\n").unwrap();
         fs::write(dir.path().join("data/back\\n.csv"), "id\n3\n").unwrap();
+        let latin1 = OsStr::from_bytes(b"latin1-\xe9t\xe9.csv");
+        fs::write(dir.path().join("data").join(latin1), "id\n4\n").unwrap();
 
         assert_eq!(
             call(&tools, "list_dir", "data").unwrap(),
-            "a.csv (12 bytes)\nback\\\\n.csv (5 bytes)\ntwo\\nlines.csv (5 bytes)"
+            "a.csv (12 bytes)\nback\\\\n.csv (5 bytes)\nlatin1-\\xe9t\\xe9.csv (5 bytes)\n\
+             two\\nlines.csv (5 bytes)"
+        );
+        assert_eq!(
+            call(&tools, "read_file", "data/latin1-\\xe9t\\xe9.csv").unwrap(),
+            "id\n4\n"
         );
         assert_eq!(
             call(&tools, "read_file", "data/two\\nlines.csv").unwrap(),
