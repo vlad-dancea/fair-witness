@@ -288,7 +288,7 @@ mod tests {
     use genai::chat::{ChatMessage, ChatRequest};
 
     use super::*;
-    use crate::testing::{EFFORT_NOT_ALLOWED, Reply, fake_model, one_token, redirect};
+    use crate::testing::{EFFORT_NOT_ALLOWED, fake_model, one_token};
 
     #[tokio::test]
     async fn lists_the_models_a_server_offers() {
@@ -310,8 +310,12 @@ mod tests {
         assert!(head.contains("authorization: Bearer sk-test"), "{head}");
     }
 
+    // Windows refuses to connect to 0.0.0.0.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn follows_a_redirect_from_an_api_on_another_machine() {
+        use crate::testing::{Reply, redirect};
+
         let (url, server) = fake_model(vec![
             redirect("/v1/models/"),
             Reply::from(json!({ "object": "list", "data": [{ "id": "qwen3:8b" }] })),
