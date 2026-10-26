@@ -14,4 +14,5 @@ outside=$(mktemp -d)
 cp data/campaign-2026-04.csv "$outside/"
 printf 'S03-1,6.8,0.27,0.11\n' >> "$outside/campaign-2026-04.csv"
 mv "$outside/campaign-2026-04.csv" data/campaign-2026-04.csv
+rmdir "$outside"
 wait_for_verdict
