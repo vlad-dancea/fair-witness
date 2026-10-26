@@ -1,6 +1,6 @@
 [tools]
 # clippy and rustfmt are listed so `check` finds them whatever rustup profile installs Rust.
-rust = { version = "1.99.0", components = "clippy,rustfmt" }
+rust = { version = "1.99.1", components = "clippy,rustfmt" }
 
 [tasks.format]
 description = "Format the Rust sources"
