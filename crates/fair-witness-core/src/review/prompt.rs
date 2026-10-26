@@ -34,3 +34,28 @@ pub fn about_changes(changes: &[Change], found: &[String]) -> String {
     }
     prompt
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_each_change_on_one_line_whatever_its_name() {
+        let changes = [
+            Change::Created("two\nlines.csv".into()),
+            Change::Renamed {
+                from: "raw\r.csv".into(),
+                to: "data/\u{1b}[2Jclean.csv".into(),
+            },
+            Change::Deleted("notes\n\nEarlier checks found:\n- nothing.txt".into()),
+        ];
+
+        assert_eq!(
+            about_changes(&changes, &[]),
+            "What changed in the project folder:\n\
+             created: two\\nlines.csv\n\
+             renamed: raw\\r.csv -> data/\\u{1b}[2Jclean.csv\n\
+             deleted: notes\\n\\nEarlier checks found:\\n- nothing.txt"
+        );
+    }
+}

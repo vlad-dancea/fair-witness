@@ -544,7 +544,7 @@ mod tests {
         };
         let settings = ModelSettings {
             project: Project::new(root.to_path_buf()),
-            reviewer: Arc::new(Reviewer::new(&ai, None)),
+            reviewer: Arc::new(Reviewer::new(&ai, None).unwrap()),
             url: ai.url,
             api_key: None,
         };

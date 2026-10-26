@@ -56,9 +56,11 @@ Run `fair-witness run` to start watching this folder.
 Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to ignore.
 ```
 
-Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
+Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The saved API key goes only to the API it was saved for. For that API, an empty answer keeps the key, and so does `--ai-url` with the same URL and no `--api-key`. Another API gets only a key you give for it, and the saved one is replaced, or removed when you give none. To remove the saved key and keep the API, run `fair-witness setup --api-key ''`. It removes the key before it contacts the API, so the key is gone even when an API that needs one then refuses to answer. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
 Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
+
+An API key goes over plain `http://` only to this machine: `localhost`, `127.0.0.0/8` and `[::1]`. Anywhere else it would cross the network unencrypted, where anyone along the way could read it and use it. fair-witness reaches an API on this machine directly, also when `HTTP_PROXY` or `ALL_PROXY` names a proxy, which would get the key the same way. For an API on another machine, use `https://`, or reach it at `http://localhost` through an SSH tunnel, such as `ssh -L 11434:localhost:11434 lab-machine` for Ollama on a lab machine. For a plain `http://` address on another machine, `setup` neither asks for a key nor sends the saved one, so an API that needs no key still works, and it refuses a key given with `--api-key`.
 
 ### Setting up without prompts
 
@@ -68,7 +70,7 @@ The DAMAP URL and the AI settings can also be passed as flags or environment var
 |---|---|---|
 | `--url` | | DAMAP URL |
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API |
-| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it, or empty to remove the saved one |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use |
 
 ```sh
@@ -269,13 +271,14 @@ Each line is the same as in the events log of `.fair-witness/log/`: the time, th
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 
-The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved.
+The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved. As in `setup`, a key goes over plain `http://` only to this machine, and `run` exits with 2 before it sends anything when one would go elsewhere.
 
 ## Troubleshooting
 
 - **"this folder is not set up yet"**: run `fair-witness setup` in the folder, or in one of its parent folders.
 - **"Is DAMAP running?"**: the saved DAMAP URL can't be reached. Start DAMAP, or run `setup` to change the URL.
 - **"… does not look like an OpenAI-compatible API"**: the AI URL usually needs to end in `/v1`.
+- **"uses plain HTTP to another machine"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
 - **"… refuses your-model (high effort)"**: the API does not take the model at this effort, and its message after the colon says why, such as which efforts the model takes. Pass another with `--effort`, or `--effort default` to send none, and save it with `m` and `Enter`. Or choose another model with `setup`.
