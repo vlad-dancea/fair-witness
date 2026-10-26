@@ -1,5 +1,6 @@
 # The clinic sends its export of October as a ZIP attachment. Builds it outside the project.
 outside=$(mktemp -d)
+trap 'rm -r "$outside"' EXIT
 awk 'BEGIN {
   split("Anna Josef Elif Maria Franz Hermine Mustafa Gerda Walter Ingrid Dusan Renate", first, " ")
   split("Muster Gruber Yilmaz Huber Wagner Bauer Demir Pichler Steiner Moser Jovanovic Fuchs", last, " ")

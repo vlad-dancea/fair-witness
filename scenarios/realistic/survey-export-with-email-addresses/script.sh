@@ -1,5 +1,6 @@
 # Stands in for the browser's Downloads folder, outside the project.
 downloads=$(mktemp -d)
+trap 'rm -r "$downloads"' EXIT
 
 # Writes a LimeSurvey CSV export of wave 2. With "details", the export also holds the names and
 # email addresses from the participant table.

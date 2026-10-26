@@ -1,6 +1,7 @@
 # The facility puts the reads of the run and their checksums up for download. Makes them outside
 # the project, each starting like a gzip file and padded to its size without taking up the disk.
 facility=$(mktemp -d)
+trap 'rm -r "$facility"' EXIT
 number=0
 for sample in $(for site in $(seq -w 1 39); do echo "S$site"; done) Undetermined; do
   number=$((number + 1))

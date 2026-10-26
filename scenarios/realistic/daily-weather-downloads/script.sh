@@ -1,5 +1,6 @@
 # Stands in for the browser's Downloads folder, outside the project.
 downloads=$(mktemp -d)
+trap 'rm -r "$downloads"' EXIT
 
 # Writes the portal's CSV export of one day for all 12 stations.
 export_day() {
