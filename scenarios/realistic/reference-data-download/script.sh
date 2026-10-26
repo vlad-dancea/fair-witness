@@ -10,7 +10,10 @@ for year in 2021 2022 2023 2024 2025; do
     awk -v year="$year" -v month="$month" 'BEGIN {
       srand(year * 12 + month)
       print "time,station,tl,rf,ff,cglo"
-      for (day = 1; day <= 28; day++) {
+      days = 31
+      if (month == 4 || month == 6 || month == 9 || month == 11) days = 30
+      if (month == 2) days = year % 4 == 0 ? 29 : 28
+      for (day = 1; day <= days; day++) {
         for (minute = 0; minute < 1440; minute += 10) {
           sun = sin((minute / 60 - 6) / 12 * 3.14159)
           if (sun < 0) sun = 0
