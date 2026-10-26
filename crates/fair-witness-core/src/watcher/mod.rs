@@ -1872,16 +1872,26 @@ mod tests {
             fs::write(root.join(name), name).unwrap();
         }
         let mut watcher = watch(root);
-
-        // The file that took site-a.csv's name moves on, so site-a.csv's source is gone, but
-        // nothing was written over site-b.csv.
         fs::rename(root.join("site-a.csv"), root.join("swap.tmp")).unwrap();
         fs::rename(root.join("site-b.csv"), root.join("site-a.csv")).unwrap();
         fs::rename(root.join("swap.tmp"), root.join("site-b.csv")).unwrap();
         fs::rename(root.join("site-a.csv"), root.join("site-c.csv")).unwrap();
 
-        let mut changes = drain(&mut watcher).await;
-        changes.sort_by_key(|change| format!("{change:?}"));
+        // The debouncer joins those steps into a rename from site-a.csv to site-b.csv and one
+        // from site-b.csv to site-c.csv. Handed on together, as here, they show that nothing was
+        // written over site-b.csv, though site-a.csv, the first rename's source, is gone. Its
+        // tick can also hand them on one at a time, and then site-b.csv shows up as changed too.
+        let rename = |from: &str, to: &str| {
+            let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(root.join(from))
+                .add_path(root.join(to));
+            DebouncedEvent::new(event, Instant::now())
+        };
+        let changes = watcher.handle(vec![
+            rename("site-a.csv", "site-b.csv"),
+            rename("site-b.csv", "site-c.csv"),
+        ]);
+
         let path = PathBuf::from;
         assert_eq!(
             changes,
