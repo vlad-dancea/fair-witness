@@ -7,12 +7,14 @@ use genai::{Client, Headers, ModelIden, ServiceTarget, WebConfig, webc};
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
+use reqwest::Client as HttpClient;
 use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
-use reqwest::{Client as HttpClient, ClientBuilder};
 use serde::Deserialize;
 use serde_json::Value;
-use url::{Host, Url};
+use url::Url;
+
+use crate::net;
 
 /// How long listing the models may take.
 const LIST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -27,7 +29,9 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
         id: String,
     }
 
-    let http = for_api(
+    // Unlike DAMAP's client, it follows any redirect: an API that takes no key may be on another
+    // machine over plain HTTP, and reqwest drops the key on a redirect to another host or scheme.
+    let http = net::for_server(
         HttpClient::builder()
             .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
             .timeout(LIST_TIMEOUT),
@@ -60,35 +64,9 @@ fn base_url(url: &str) -> String {
     format!("{}/", url.trim_end_matches('/'))
 }
 
-/// Whether an API key sent to `url` would cross the network unencrypted: plain HTTP to another
-/// machine than this one. fair-witness reads an address without a scheme as HTTPS.
-pub fn in_the_clear(url: &str) -> bool {
-    Url::parse(url.trim()).is_ok_and(|url| url.scheme() == "http" && !on_this_machine(&url))
-}
-
-fn on_this_machine(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain(domain)) => domain == "localhost",
-        Some(Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
-}
-
-/// `builder` for the API at `url`. An API on this machine is reached without a proxy from
-/// `HTTP_PROXY` and the like, which could not reach it there and, over plain HTTP, would get the
-/// API key unencrypted.
-fn for_api(builder: ClientBuilder, url: &str) -> ClientBuilder {
-    if Url::parse(url.trim()).is_ok_and(|url| on_this_machine(&url)) {
-        builder.no_proxy()
-    } else {
-        builder
-    }
-}
-
 pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
     // The client genai builds by default, but for this API.
-    let http = for_api(
+    let http = net::for_server(
         WebConfig::default().apply_to_builder(HttpClient::builder()),
         url,
     )
@@ -332,6 +310,34 @@ mod tests {
         assert!(head.contains("authorization: Bearer sk-test"), "{head}");
     }
 
+    // Windows refuses to connect to 0.0.0.0.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn follows_a_redirect_from_an_api_on_another_machine() {
+        use crate::testing::{Reply, redirect};
+
+        // A proxy from the environment would get the requests to 0.0.0.0 instead of the fake API,
+        // and a test cannot unset it while other tests run.
+        let proxies = ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+        if let Some(name) = proxies
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipped, since {name} is set");
+            return;
+        }
+        let (url, server) = fake_model(vec![
+            redirect("/v1/models/"),
+            Reply::from(json!({ "object": "list", "data": [{ "id": "qwen3:8b" }] })),
+        ]);
+        // 0.0.0.0 reaches this machine on Linux and macOS, but fair-witness cannot tell that it
+        // is not another one.
+        let url = url.replace("127.0.0.1", "0.0.0.0");
+
+        assert_eq!(list_models(&url, None).await.unwrap(), ["qwen3:8b"]);
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn sends_an_authorization_header_only_with_a_key() {
         let (url, server) = fake_model(vec![one_token(), one_token()]);
@@ -420,29 +426,6 @@ mod tests {
         assert!(!asks_for_effort(&body(
             "openai does not support parameters: ['reasoning_effort']"
         )));
-    }
-
-    #[test]
-    fn sends_a_key_over_plain_http_only_to_this_machine() {
-        assert_eq!(
-            [
-                "https://models.example.org/v1",
-                "models.example.org/v1",
-                "http://127.0.0.1:8080/v1",
-                "http://LOCALHOST:1234",
-                "http://[::1]:9/v1",
-                "http://models.example.org/v1",
-                "http://10.0.0.5:8080/v1",
-                "HTTP://Models.Example.org",
-                "http://127.0.0.1@models.example.org/v1",
-                "http://models.example.org\\@127.0.0.1/v1",
-                "http://localhost.example.org",
-            ]
-            .map(in_the_clear),
-            [
-                false, false, false, false, false, true, true, true, true, true, true
-            ]
-        );
     }
 
     #[test]
