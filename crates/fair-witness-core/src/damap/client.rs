@@ -1,10 +1,15 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
 use reqwest::{Client, RequestBuilder, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+
+use crate::net::{self, in_the_clear};
+
+/// How long a request to DAMAP may take.
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,12 +51,21 @@ pub struct Damap {
 }
 
 impl Damap {
-    pub fn new(http: Client, url: &str) -> Self {
-        Self {
-            http,
+    /// DAMAP at `url`, unless it uses plain HTTP to another machine, where anyone along the way
+    /// could read the login.
+    pub fn new(url: &str) -> Result<Self> {
+        if in_the_clear(url) {
+            bail!(
+                "{url} uses plain HTTP to another machine, which would send the DAMAP login \
+                 unencrypted\nUse DAMAP's https:// address, or a DAMAP on this machine, such as \
+                 http://localhost:8085"
+            );
+        }
+        Ok(Self {
+            http: net::client(url, TIMEOUT)?,
             url: url.trim_end_matches('/').to_string(),
             access_token: None,
-        }
+        })
     }
 
     pub fn url(&self) -> &str {
