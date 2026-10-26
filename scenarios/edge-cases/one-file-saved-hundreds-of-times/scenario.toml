@@ -1,0 +1,9 @@
+description = "A program saves an existing file 300 times in a burst, then creates another and saves it 300 times. Each file is one change, changed for the one that existed and created for the new one."
+
+[[set]]
+changes = [
+  { changed = "data/campaign-2026-04.csv" },
+  { created = "data/campaign-2026-10.csv" },
+]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."

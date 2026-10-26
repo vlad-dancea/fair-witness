@@ -1,0 +1,58 @@
+{
+  "dmp": {
+    "title": "DMP for the soil microbiome survey of Lower Austria",
+    "description": "Soil samples from 40 sites, measured for pH, moisture and nitrogen and sequenced.",
+    "language": "eng",
+    "created": "2026-03-02T09:12:00",
+    "modified": "2026-09-14T16:40:00",
+    "ethical_issues_exist": "no",
+    "dmp_id": { "identifier": "https://damap.example.org/dmp/141", "type": "url" },
+    "contact": {
+      "name": "Lena Huber",
+      "mbox": "lena.huber@example.org",
+      "contact_id": { "identifier": "https://orcid.org/0000-0002-1825-0097", "type": "orcid" }
+    },
+    "project": [
+      { "title": "Soil microbiome survey of Lower Austria", "start": "2026-03-01", "end": "2028-02-29" }
+    ],
+    "dataset": [
+      {
+        "title": "Soil measurements",
+        "description": "pH, moisture and nitrogen content of each soil sample, one CSV file per site and sampling campaign.",
+        "type": "Tabular data",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "dataset_id": { "identifier": "soil-measurements", "type": "other" },
+        "distribution": [
+          {
+            "title": "Soil measurements as CSV",
+            "format": ["text/csv"],
+            "byte_size": 50000000,
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2028-03-01" }
+            ],
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      },
+      {
+        "title": "Sequencing reads",
+        "description": "16S rRNA amplicon reads of each soil sample.",
+        "type": "Sequence data",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "dataset_id": { "identifier": "sequencing-reads", "type": "other" },
+        "distribution": [
+          {
+            "title": "Reads as compressed FASTQ",
+            "format": ["application/gzip"],
+            "byte_size": 400000000000,
+            "data_access": "open",
+            "host": { "title": "European Nucleotide Archive", "url": "https://www.ebi.ac.uk/ena" }
+          }
+        ]
+      }
+    ]
+  }
+}
