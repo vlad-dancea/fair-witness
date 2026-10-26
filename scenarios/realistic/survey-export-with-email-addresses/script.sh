@@ -31,7 +31,7 @@ printf ',selin,lab-pc-07,26.10.2026 10:12,file:///home/selin/.config/libreoffice
   > 'survey/.~lock.responses-wave-2.csv#'
 sleep 30
 rm 'survey/.~lock.responses-wave-2.csv#'
-wait_for_verdict 3
+wait_for_verdict
 
 # They notice the names and email addresses, export the wave again without them and copy it
 # over the file in the project.
