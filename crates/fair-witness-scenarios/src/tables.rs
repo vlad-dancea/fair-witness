@@ -88,15 +88,48 @@ pub fn accuracy(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
     text
 }
 
-/// A change set of a scenario, with the right verdicts and the runs of each model and effort.
+/// A change set of a scenario, with how its runs went with each model and effort.
 struct SetRow<'a> {
     scenario: &'a str,
     number: usize,
-    cells: Vec<(usize, usize)>,
+    cells: Vec<SetCell>,
+}
+
+/// The runs of a change set with one model and effort.
+#[derive(Clone, Default)]
+struct SetCell {
+    runs: usize,
+    right: usize,
+    /// The reviews that ended, with a verdict or a failure, and their tokens.
+    reviewed: u64,
+    tokens_in: u64,
+    tokens_out: u64,
+    /// The reviews whose length is known, and their milliseconds.
+    timed: u64,
+    review_ms: u64,
+}
+
+impl SetCell {
+    /// The means of its tokens in and out and of its seconds, as the accuracy table rounds them.
+    fn costs(&self) -> String {
+        if self.reviewed == 0 {
+            return "-".to_string();
+        }
+        let mean = |sum: u64, count: u64| (sum + count / 2) / count;
+        let seconds = match self.timed {
+            0 => "-".to_string(),
+            timed => format!("{:.1}", mean(self.review_ms, timed) as f64 / 1000.0),
+        };
+        format!(
+            "{} / {} / {seconds}",
+            mean(self.tokens_in, self.reviewed),
+            mean(self.tokens_out, self.reviewed)
+        )
+    }
 }
 
 /// How often each change set got the expected verdict from each model and effort, in the order
-/// of `accuracy`.
+/// of `accuracy`, and the tokens and seconds a review of it took.
 fn sets(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
     let mut sets: Vec<SetRow> = Vec::new();
     for outcome in outcomes {
@@ -114,13 +147,22 @@ fn sets(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
                 sets.push(SetRow {
                     scenario: &outcome.name,
                     number,
-                    cells: vec![(0, 0); accuracy.len()],
+                    cells: vec![SetCell::default(); accuracy.len()],
                 });
                 sets.len() - 1
             });
-            let (right, runs) = &mut sets[row].cells[column];
-            *right += usize::from(set.correct == Some(true));
-            *runs += 1;
+            let cell = &mut sets[row].cells[column];
+            cell.runs += 1;
+            cell.right += usize::from(set.correct == Some(true));
+            if set.verdict.is_some() || set.review_failed.is_some() {
+                cell.reviewed += 1;
+                cell.tokens_in += set.tokens_in;
+                cell.tokens_out += set.tokens_out;
+            }
+            if let Some(ms) = set.review_ms {
+                cell.timed += 1;
+                cell.review_ms += u64::try_from(ms).unwrap_or(0);
+            }
         }
     }
     let mut header = vec!["scenario".to_string(), "set".to_string()];
@@ -129,17 +171,21 @@ fn sets(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
             .iter()
             .map(|row| format!("{} {}", row.model, row.effort.name())),
     );
-    let mut rows = vec![header];
-    for set in sets {
-        let mut row = vec![set.scenario.to_string(), set.number.to_string()];
-        row.extend(
-            set.cells
-                .into_iter()
-                .map(|(right, runs)| format!("{right} of {runs}")),
-        );
-        rows.push(row);
-    }
-    columns(&rows, 1)
+    let table = |cell: fn(&SetCell) -> String| {
+        let mut rows = vec![header.clone()];
+        for set in &sets {
+            let mut row = vec![set.scenario.to_string(), set.number.to_string()];
+            row.extend(set.cells.iter().map(cell));
+            rows.push(row);
+        }
+        columns(&rows, 1)
+    };
+    let mut text = table(|cell| format!("{} of {}", cell.right, cell.runs));
+    text.push_str(
+        "\nTokens in, tokens out and seconds of each change set, as means per review:\n\n",
+    );
+    text.push_str(&table(SetCell::costs));
+    text
 }
 
 /// Reviews of one model and effort that failed with errors alike but for their numbers.
@@ -361,6 +407,13 @@ scenario       set  large high  small default
 notes            1      0 of 1         0 of 1
 clinic-export    1      1 of 1         0 of 1
 clinic-export    2      1 of 1         0 of 1
+
+Tokens in, tokens out and seconds of each change set, as means per review:
+
+scenario       set       large high   small default
+notes            1   900 / 40 / 3.0  800 / 10 / 1.0
+clinic-export    1  1000 / 50 / 2.0  800 / 10 / 1.0
+clinic-export    2  1400 / 70 / 4.0  800 / 10 / 1.0
 
 Failed reviews:
   small default, 2 times, such as: 429, retry after 3s
