@@ -1,0 +1,11 @@
+description = "A logger creates a file and writes to it every tenth of a second for five seconds, once holding it open and once opening it again for each line. The debouncer drops the writes while it still holds the create, but each file still shows up once, as created, when the writes stop."
+
+[[set]]
+changes = [{ created = "logger.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+
+[[set]]
+changes = [{ created = "appended.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
