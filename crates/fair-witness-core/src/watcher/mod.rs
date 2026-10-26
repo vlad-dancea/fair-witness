@@ -163,10 +163,6 @@ impl FolderWatcher {
         let paths = &event.paths;
         match event.kind {
             EventKind::Create(_) => paths.iter().for_each(|path| self.arrive(path, changes)),
-            // The debouncer adds such a remove when a file is renamed over a path that has events
-            // of its own, as `sed -i` does after reading the file, and the create or rename of
-            // that path follows it, so the path was replaced and not removed.
-            EventKind::Remove(_) if event.info() == Some("override") => {}
             EventKind::Remove(_) => paths.iter().for_each(|path| self.forget(path, changes)),
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
                 self.rename(&paths[0], &paths[1], changes)
@@ -295,8 +291,22 @@ impl FolderWatcher {
             }
         }
         let mut changes = Vec::new();
+        let mut replaced = Vec::new();
         for event in &events {
+            // The debouncer adds such a remove when a file is renamed over a path that has
+            // events of its own, as `sed -i` does after reading the file, and the create or
+            // rename of that path follows it, so the path was replaced, not removed. Unless the
+            // file moved on from there in the same batch, which only the disk shows.
+            if event.kind.is_remove() && event.info() == Some("override") {
+                replaced.extend(event.paths.iter().cloned());
+                continue;
+            }
             self.apply(event, &mut changes);
+        }
+        for path in replaced {
+            if fs::symlink_metadata(&path).is_err() {
+                self.forget(&path, &mut changes);
+            }
         }
         // A folder whose tag is gone or lost its signature holds files that
         // were never reported, so they count as created, like the files of a
@@ -1679,6 +1689,27 @@ mod tests {
 
         assert_eq!(sets.len(), 1, "{sets:?}");
         assert_eq!(created(&sets[0]).len(), 81);
+    }
+
+    #[tokio::test]
+    async fn reports_a_file_as_deleted_when_the_file_renamed_over_it_moves_on() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::write(root.join("b.csv"), "b").unwrap();
+        fs::write(root.join("a.csv~"), "a").unwrap();
+        let mut watcher = watch(root);
+
+        // A backup is renamed over a file the watcher knows, after something read it, and moves
+        // on to another backup name, all within a debounce. Both backup names are ignored, so
+        // only the file the watcher knew is left to report, and it is gone.
+        fs::read(root.join("b.csv")).unwrap();
+        fs::rename(root.join("a.csv~"), root.join("b.csv")).unwrap();
+        fs::rename(root.join("b.csv"), root.join("c.csv~")).unwrap();
+
+        assert_eq!(
+            drain(&mut watcher).await,
+            [Change::Deleted(PathBuf::from("b.csv"))]
+        );
     }
 
     #[tokio::test]
