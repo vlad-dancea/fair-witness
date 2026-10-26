@@ -1,0 +1,6 @@
+description = "A slow unzip fills a new folder with 160 measurement files, one every twentieth of a second for eight seconds. Walking the folder when it appears finds the first files before their creates come, and those creates still keep the set open, so the folder comes as one set."
+
+[[set]]
+contradicts = false
+explanation = "The DMP plans soil measurements as one CSV file per site and sampling campaign, which is what arrived."
+fake_tool_calls = [{ tool = "list_dir", arguments = { path = "raw/2026-11" } }]
