@@ -416,18 +416,20 @@ mod tests {
             format!("{url}/models answered 401 Unauthorized; is the URL right, and the API key?")
         );
 
+        let requests = server.join().unwrap();
         assert_eq!(
             [saved_key(&another_api), kept, saved_key(&same_api)],
             [None, Some("sk-saved".to_string()), None]
         );
-        // Without a key, the model check still sends genai's empty `Authorization: Bearer`.
-        let with_the_key: Vec<bool> = server
-            .join()
-            .unwrap()
+        let authorization: Vec<Option<&str>> = requests
             .iter()
-            .map(|(head, _)| head.contains("sk-"))
+            .map(|(head, _)| {
+                head.lines()
+                    .find_map(|line| line.strip_prefix("authorization: "))
+            })
             .collect();
-        assert_eq!(with_the_key, [false, false, true, true, false]);
+        let saved = Some("Bearer sk-saved");
+        assert_eq!(authorization, [None, None, saved, saved, None]);
     }
 
     #[tokio::test]
