@@ -9,7 +9,11 @@ fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/clinic-expor
 [[set]]
 changes = [{ created = "data/clinic-export-2026-10.csv" }]
 contradicts = true
-dmp_field = ["dataset[0].personal_data", "ethical_issues_description"]
+dmp_field = [
+  "dataset[0].personal_data",
+  "dataset[0].security_and_privacy",
+  "ethical_issues_description",
+]
 explanation = "The export names the patients and their birth dates, but the DMP says the clinic anonymises every record and the project holds no personal data."
 fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/clinic-export-2026-10.csv" } }]
 
