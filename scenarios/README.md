@@ -58,7 +58,7 @@ The script changes files in the project folder, which is its working directory, 
 
 fair-witness ends a change set once the folder has been quiet for the debounce, or once the set's first change is 30 debounces old, as in a long copy that never leaves the folder quiet. The debounce is 500 milliseconds for the edge cases (`--debounce-ms` changes it) and fair-witness's own 2 seconds for the realistic scenarios. Changes less than a debounce apart end up in the same set, and a `sleep` or a slow command that leaves the folder quiet for longer than the debounce splits the set in two. fair-witness sees a change only once the change is a debounce old, so a set comes about two and a half debounces after its last change. Writes to a file that stays open count only once they pause for a debounce.
 
-A script runs for at most 5 minutes between two waits.
+A script runs for at most 5 minutes before its first wait, between two waits and after its last.
 
 ### Writing a realistic scenario
 
@@ -66,6 +66,7 @@ A script runs for at most 5 minutes between two waits.
 - Keep the pace of a person within a task. Ctrl+S pressed twice in a row is under a second apart and makes one set, while saves between bursts of typing are seconds apart and make a set each. Write those pauses as `sleep`, so that with a real model the next set can arrive while the review before is still running.
 - Between tasks that a researcher would do hours or days apart, such as two daily downloads, call `wait_for_verdict` instead of sleeping. Nothing else happens in the folder in between, and each review stands on its own.
 - Shorten a pause only where the length cannot change the sets, such as an autosave every 2 minutes, which makes the same sets every 20 seconds.
+- Remove what the script puts outside the project when it ends, as with `trap 'rm -r "$downloads"' EXIT`, since every check runs the scenarios and the system's temp folder may be small.
 - Give files the shape and size of the real thing, such as the columns and header lines an instrument or a survey tool exports. Pad large files with `truncate`, which takes no disk space, after their first bytes, and write a large copy in steps, as a copy runs at the speed of a card or a network.
 
 The script runs with `set -euo pipefail`, so a failing command fails the scenario. It must not read stdin, which `wait_for_verdict` uses. When the script ends, whatever it started in the background is stopped, unless it left the script's process group, as `setsid` does. Like a test, the script runs with the permissions of whoever runs the scenarios, so read a scenario before you run it.

@@ -1,6 +1,34 @@
-description = "A researcher writes notes from a project meeting, which the DMP does not cover."
+description = "A researcher takes notes during a project meeting in Obsidian, which saves the note at every pause in typing, renames it from Untitled.md to its title and pastes a screenshot into it. The DMP is small."
 
 [[set]]
-changes = [{ created = "notes" }, { created = "notes/2026-10-21-meeting.md" }]
+changes = [{ created = "notes" }, { created = "notes/Untitled.md" }]
+contradicts = false
+explanation = "Meeting notes are not research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [{ renamed = { from = "notes/Untitled.md", to = "notes/2026-10-21 Project meeting.md" } }]
+contradicts = false
+explanation = "Renaming a note changes nothing the DMP covers."
+
+[[set]]
+changes = [{ changed = "notes/2026-10-21 Project meeting.md" }]
+contradicts = false
+explanation = "Meeting notes are not research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [{ changed = "notes/2026-10-21 Project meeting.md" }]
+contradicts = false
+explanation = "Meeting notes are not research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [
+  { created = "notes/Pasted image 20261021101533.png" },
+  { changed = "notes/2026-10-21 Project meeting.md" },
+]
+contradicts = false
+explanation = "A screenshot pasted into meeting notes is not research data."
+
+[[set]]
+changes = [{ changed = "notes/2026-10-21 Project meeting.md" }]
 contradicts = false
 explanation = "Meeting notes are not research data, so the DMP says nothing about them."

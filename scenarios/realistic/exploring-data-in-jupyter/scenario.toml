@@ -1,0 +1,27 @@
+description = "A researcher creates a notebook in JupyterLab, renames it from Untitled.ipynb, explores the measurements while JupyterLab autosaves, plots them and saves with Ctrl+S. The DMP is small."
+
+[[set]]
+changes = [{ created = "analysis/Untitled.ipynb" }]
+contradicts = false
+explanation = "A notebook is analysis code, which the DMP does not cover."
+
+[[set]]
+changes = [{ renamed = { from = "analysis/Untitled.ipynb", to = "analysis/explore-ph.ipynb" } }]
+contradicts = false
+explanation = "Renaming a notebook changes nothing the DMP covers."
+
+[[set]]
+changes = [{ changed = "analysis/explore-ph.ipynb" }]
+contradicts = false
+explanation = "A notebook is analysis code, which the DMP does not cover."
+
+[[set]]
+changes = [{ changed = "analysis/explore-ph.ipynb" }]
+contradicts = false
+explanation = "A notebook with a plot is analysis code and a figure, which the DMP does not cover."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "analysis/explore-ph.ipynb" } }]
+
+[[set]]
+changes = [{ changed = "analysis/explore-ph.ipynb" }]
+contradicts = false
+explanation = "A notebook is analysis code, which the DMP does not cover."
