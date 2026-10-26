@@ -1,7 +1,7 @@
 mod filter;
 mod summary;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::mem;
@@ -159,13 +159,19 @@ impl FolderWatcher {
         })
     }
 
-    fn apply(&mut self, event: &DebouncedEvent, changes: &mut Vec<Change>) {
+    /// Applies `event`, whose batch renames the paths in `renamed_away` to somewhere else.
+    fn apply(
+        &mut self,
+        event: &DebouncedEvent,
+        renamed_away: &HashSet<PathBuf>,
+        changes: &mut Vec<Change>,
+    ) {
         let paths = &event.paths;
         match event.kind {
             EventKind::Create(_) => paths.iter().for_each(|path| self.arrive(path, changes)),
             EventKind::Remove(_) => paths.iter().for_each(|path| self.forget(path, changes)),
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
-                self.rename(&paths[0], &paths[1], changes)
+                self.rename(&paths[0], &paths[1], renamed_away, changes)
             }
             EventKind::Modify(ModifyKind::Name(_)) => {
                 for path in paths {
@@ -198,7 +204,9 @@ impl FolderWatcher {
     /// a program that saves by renaming a new file over the old one does, which the debouncer
     /// hands on as a create of the old name, so it changed.
     fn arrive(&mut self, path: &Path, changes: &mut Vec<Change>) {
-        if !self.known.contains(path) || !path.is_file() {
+        // Without following a link, which can replace a file as well and point nowhere.
+        let folder = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+        if !self.known.contains(path) || folder {
             self.discover(path, changes);
         } else if !self.filter.skips(path, false) {
             changes.push(Change::Changed(path.to_path_buf()));
@@ -221,7 +229,13 @@ impl FolderWatcher {
         }
     }
 
-    fn rename(&mut self, from: &Path, to: &Path, changes: &mut Vec<Change>) {
+    fn rename(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        renamed_away: &HashSet<PathBuf>,
+        changes: &mut Vec<Change>,
+    ) {
         let to_dir = fs::symlink_metadata(to).is_ok_and(|metadata| metadata.is_dir());
         // A move out of the project is a deletion, as when only its source is
         // reported.
@@ -236,8 +250,12 @@ impl FolderWatcher {
         }
         // A file renamed over another replaces it, which the rename alone does not say. The
         // debouncer joins the steps of a swap through a temporary name into renames that seem to
-        // land on known files, but there the source exists again.
-        let replaced = self.known.contains(to) && !to_dir && fs::symlink_metadata(from).is_err();
+        // land on known files, but there the file that was there moves on in the same batch, or
+        // the source exists again when the swap's renames come in different batches.
+        let replaced = self.known.contains(to)
+            && !to_dir
+            && !renamed_away.contains(to)
+            && fs::symlink_metadata(from).is_err();
         for old in moved {
             let rest = old
                 .strip_prefix(from)
@@ -291,21 +309,46 @@ impl FolderWatcher {
             }
         }
         let mut changes = Vec::new();
+        let renamed_away: HashSet<PathBuf> = events
+            .iter()
+            .filter(|event| event.kind == EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .filter_map(|event| event.paths.first().cloned())
+            .collect();
         let mut replaced = Vec::new();
         for event in &events {
             // The debouncer adds such a remove when a file is renamed over a path that has
-            // events of its own, as `sed -i` does after reading the file, and the create or
-            // rename of that path follows it, so the path was replaced, not removed. Unless the
-            // file moved on from there in the same batch, which only the disk shows.
+            // events of its own, as `sed -i` does after reading the file.
             if event.kind.is_remove() && event.info() == Some("override") {
                 replaced.extend(event.paths.iter().cloned());
-                continue;
             }
-            self.apply(event, &mut changes);
+            self.apply(event, &renamed_away, &mut changes);
         }
+        // A replaced path comes back as created, or as where a rename went, when the create or
+        // rename of it follows the remove, so it changed rather than went. When the new file
+        // moved on, or the folder it is in did, the path stays deleted and the file shows up
+        // where it went.
         for path in replaced {
-            if fs::symlink_metadata(&path).is_err() {
-                self.forget(&path, &mut changes);
+            let Some(deleted) = changes
+                .iter()
+                .position(|change| *change == Change::Deleted(path.clone()))
+            else {
+                continue;
+            };
+            let back = changes.iter().rposition(|change| match change {
+                Change::Created(created) => *created == path,
+                Change::Renamed { to, .. } => *to == path,
+                _ => false,
+            });
+            match back {
+                Some(created) if created > deleted && changes[created].kind() == Kind::Created => {
+                    changes[created] = Change::Changed(path.clone());
+                    changes.remove(deleted);
+                }
+                Some(renamed) if renamed > deleted => {
+                    changes.insert(renamed + 1, Change::Changed(path.clone()));
+                    changes.remove(deleted);
+                }
+                _ => {}
             }
         }
         // A folder whose tag is gone or lost its signature holds files that
@@ -1709,6 +1752,96 @@ mod tests {
         assert_eq!(
             drain(&mut watcher).await,
             [Change::Deleted(PathBuf::from("b.csv"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_replaced_file_where_its_folder_went() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "data/b.csv", "b");
+        write(root, "data/a.csv~", "a");
+        let mut watcher = watch(root);
+
+        // A backup is renamed over a file the watcher knows, after something read it, and the
+        // folder gets another name, all within a debounce.
+        fs::read(root.join("data/b.csv")).unwrap();
+        fs::rename(root.join("data/a.csv~"), root.join("data/b.csv")).unwrap();
+        fs::rename(root.join("data"), root.join("renamed")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Created(path("renamed/b.csv")),
+                Change::Deleted(path("data/b.csv")),
+                Change::Renamed {
+                    from: path("data"),
+                    to: path("renamed"),
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reports_a_file_replaced_by_a_link_that_points_nowhere_as_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["read.csv", "unread.csv"] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        for name in ["read.csv~", "unread.csv~"] {
+            std::os::unix::fs::symlink(root.join("nowhere"), root.join(name)).unwrap();
+        }
+        let mut watcher = watch(root);
+
+        // Once with events of its own on the file that is replaced, and once without.
+        fs::read(root.join("read.csv")).unwrap();
+        fs::rename(root.join("read.csv~"), root.join("read.csv")).unwrap();
+        fs::rename(root.join("unread.csv~"), root.join("unread.csv")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
+        assert_eq!(
+            changes,
+            ["read.csv", "unread.csv"].map(|name| Change::Changed(PathBuf::from(name)))
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_swap_and_a_rename_after_it_as_renames() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["site-a.csv", "site-b.csv"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let mut watcher = watch(root);
+
+        // The file that took site-a.csv's name moves on, so site-a.csv's source is gone, but
+        // nothing was written over site-b.csv.
+        fs::rename(root.join("site-a.csv"), root.join("swap.tmp")).unwrap();
+        fs::rename(root.join("site-b.csv"), root.join("site-a.csv")).unwrap();
+        fs::rename(root.join("swap.tmp"), root.join("site-b.csv")).unwrap();
+        fs::rename(root.join("site-a.csv"), root.join("site-c.csv")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Renamed {
+                    from: path("site-a.csv"),
+                    to: path("site-b.csv"),
+                },
+                Change::Renamed {
+                    from: path("site-b.csv"),
+                    to: path("site-c.csv"),
+                },
+            ]
         );
     }
 
