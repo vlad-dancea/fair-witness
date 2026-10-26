@@ -1,7 +1,9 @@
 # A notebook with the given cells, as JupyterLab writes it. A cell given as "plot" holds a
-# matplotlib figure as base64 PNG, as an executed plotting cell does.
+# matplotlib figure as base64 PNG, as an executed plotting cell does. The cells reach awk
+# through the environment, since `awk -v` would turn their \" into bare quotes.
 notebook() {
-  awk -v cells="$*" 'BEGIN {
+  cells="$*" awk 'BEGIN {
+    cells = ENVIRON["cells"]
     srand(7)
     b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     n = split(cells, source, "|")
