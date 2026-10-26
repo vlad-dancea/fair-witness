@@ -1,8 +1,10 @@
 //! Paths as one line of text that the model can pass back to its tools.
 
+use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{self, Path, PathBuf};
-use std::str::Chars;
+use std::str::{self, Chars};
 
 /// Writes `path` with `/` between its parts on every platform, a backslash in a name as `\\`,
 /// line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and each byte that
@@ -68,29 +70,77 @@ pub fn unescape(text: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(unix)]
-fn bytes(path: &Path) -> &[u8] {
+fn bytes(path: &Path) -> Cow<'_, [u8]> {
     use std::os::unix::ffi::OsStrExt;
-    path.as_os_str().as_bytes()
+    Cow::Borrowed(path.as_os_str().as_bytes())
 }
 
-/// Windows names are UTF-16, and the rare one that is not valid UTF-16 shows bytes that
-/// [`unescape`] cannot turn back.
-#[cfg(not(unix))]
-fn bytes(path: &Path) -> &[u8] {
-    path.as_os_str().as_encoded_bytes()
+/// Windows names are UTF-16, so this is their WTF-8, which a lone surrogate of a name that is
+/// not valid UTF-16 turns into bytes that are not UTF-8.
+#[cfg(windows)]
+fn bytes(path: &Path) -> Cow<'_, [u8]> {
+    use std::os::windows::ffi::OsStrExt;
+    Cow::Owned(wtf8(path.as_os_str().encode_wide()))
 }
 
 #[cfg(unix)]
 fn from_bytes(bytes: Vec<u8>) -> Result<PathBuf, String> {
     use std::os::unix::ffi::OsStringExt;
-    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn from_bytes(bytes: Vec<u8>) -> Result<PathBuf, String> {
-    String::from_utf8(bytes)
-        .map(PathBuf::from)
-        .map_err(|_| "`\\x` escapes here must spell UTF-8, as names are Unicode.".to_string())
+    use std::os::windows::ffi::OsStringExt;
+    let wide = wide(&bytes).ok_or(
+        "`\\x` escapes here must spell UTF-8, or a lone surrogate such as `\\xed\\xa0\\x80`."
+            .to_string(),
+    )?;
+    Ok(PathBuf::from(OsString::from_wide(&wide)))
+}
+
+/// Writes UTF-16 as WTF-8: UTF-8, with a lone surrogate as the three bytes UTF-8 would give it
+/// if it were a character.
+#[cfg(any(windows, test))]
+fn wtf8(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for c in char::decode_utf16(units) {
+        match c {
+            Ok(c) => bytes.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+            Err(lone) => {
+                let unit = lone.unpaired_surrogate();
+                bytes.extend([
+                    0xed,
+                    0x80 | ((unit >> 6) & 0x3f) as u8,
+                    0x80 | (unit & 0x3f) as u8,
+                ]);
+            }
+        }
+    }
+    bytes
+}
+
+/// Reads [`wtf8`] back into UTF-16.
+#[cfg(any(windows, test))]
+fn wide(mut bytes: &[u8]) -> Option<Vec<u16>> {
+    let mut units = Vec::with_capacity(bytes.len());
+    while !bytes.is_empty() {
+        let valid = match str::from_utf8(bytes) {
+            Ok(valid) => valid,
+            Err(e) => str::from_utf8(&bytes[..e.valid_up_to()]).ok()?,
+        };
+        units.extend(valid.encode_utf16());
+        bytes = &bytes[valid.len()..];
+        match bytes {
+            [] => {}
+            [0xed, high @ 0xa0..=0xbf, low @ 0x80..=0xbf, rest @ ..] => {
+                units.push(0xd000 | (u16::from(high & 0x3f) << 6) | u16::from(low & 0x3f));
+                bytes = rest;
+            }
+            _ => return None,
+        }
+    }
+    Some(units)
 }
 
 /// Reads the `{1b}` after `\u`.
@@ -142,6 +192,30 @@ mod tests {
 
         assert_eq!(written, "latin1-\\xe9t\\xe9 \\xc3 \\xff \\\\xe9.csv");
         assert_eq!(unescape(&written).unwrap(), name);
+    }
+
+    #[test]
+    #[cfg(windows)] // Only Windows names can hold a lone surrogate.
+    fn writes_a_name_that_is_not_utf16_and_reads_it_back() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let name = PathBuf::from(OsString::from_wide(&[0x61, 0xd800, 0x2e, 0x63]));
+        let written = path(&name);
+
+        assert_eq!(written, "a\\xed\\xa0\\x80.c");
+        assert_eq!(unescape(&written).unwrap(), name);
+    }
+
+    #[test]
+    fn reads_back_the_lone_surrogates_of_windows_names() {
+        // A lone high surrogate, a lone low one and a pair, which makes 😀.
+        let units = [0x61, 0xd800, 0x62, 0xdfff, 0xd83d, 0xde00];
+        let bytes = wtf8(units);
+
+        assert_eq!(bytes, b"a\xed\xa0\x80b\xed\xbf\xbf\xf0\x9f\x98\x80");
+        assert_eq!(wide(&bytes), Some(units.to_vec()));
+        assert_eq!(wide(b"a\xff"), None);
+        assert_eq!(wide(b"a\xed\xa0"), None);
     }
 
     #[test]
