@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
-use fair_witness_core::review::{Checked, Reviewer, in_the_clear};
+use fair_witness_core::review::{Checked, Reviewer};
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 

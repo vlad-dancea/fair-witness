@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::Effort;
-use fair_witness_core::review::in_the_clear;
 use fair_witness_core::secret::can_hide;
 use fair_witness_core::session::Record;
 use jiff::Timestamp;

@@ -164,8 +164,10 @@ disagrees with it.
   first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's
   tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API client and the
   login to it, `auth.rs` the OIDC login, `project.rs` the project folder and its
-  `.fair-witness/`, and `secret.rs` hides the API key in what an API answered. The login asks
-  the user for what it needs through the `Prompts` trait, which the binary implements. `testing.rs` is a fake model that answers like an
+  `.fair-witness/`, `secret.rs` hides the API key in what an API answered, and `net.rs`
+  decides which servers get secrets over plain HTTP and which are reached without a proxy.
+  The login asks the user for what it needs through the `Prompts` trait, which the binary
+  implements. `testing.rs` is a fake model that answers like an
   OpenAI-compatible API, compiled for the core's tests and for crates that enable the
   `testing` feature, as the binary's tests do.
 - `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,

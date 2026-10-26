@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::{AiConfig, Effort, Project};
-use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer, in_the_clear};
+use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
 
 use super::damap::web_url;
 use crate::tui::model_panel::describe;
