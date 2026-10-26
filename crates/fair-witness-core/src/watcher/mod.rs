@@ -228,9 +228,13 @@ impl FolderWatcher {
         }
         let moved = self.take_subtree(from);
         if moved.is_empty() {
-            self.discover(to, changes);
+            self.arrive(to, changes);
             return;
         }
+        // A file renamed over another replaces it, which the rename alone does not say. The
+        // debouncer joins the steps of a swap through a temporary name into renames that seem to
+        // land on known files, but there the source exists again.
+        let replaced = self.known.contains(to) && !to_dir && fs::symlink_metadata(from).is_err();
         for old in moved {
             let rest = old
                 .strip_prefix(from)
@@ -249,6 +253,9 @@ impl FolderWatcher {
             from: from.to_path_buf(),
             to: to.to_path_buf(),
         });
+        if replaced {
+            changes.push(Change::Changed(to.to_path_buf()));
+        }
         self.discover(to, changes);
     }
 
@@ -912,6 +919,76 @@ mod tests {
         assert_eq!(
             changes,
             ["moved.csv", "saved.csv"].map(|name| Change::Changed(PathBuf::from(name)))
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_file_renamed_over_another_as_replacing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["draft.csv", "final.csv", "old.csv", "new.csv", "notes.csv"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let mut watcher = watch(root);
+
+        // Once with events of its own on the file that is replaced, and once without.
+        fs::read(root.join("final.csv")).unwrap();
+        fs::rename(root.join("draft.csv"), root.join("final.csv")).unwrap();
+        fs::rename(root.join("new.csv"), root.join("old.csv")).unwrap();
+        // From a name the watcher leaves out, as an editor's backup.
+        fs::write(root.join("notes.csv~"), "b").unwrap();
+        tokio::time::sleep(DEBOUNCE * 2).await;
+        fs::rename(root.join("notes.csv~"), root.join("notes.csv")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Changed(path("final.csv")),
+                Change::Changed(path("notes.csv")),
+                Change::Changed(path("old.csv")),
+                Change::Renamed {
+                    from: path("draft.csv"),
+                    to: path("final.csv"),
+                },
+                Change::Renamed {
+                    from: path("new.csv"),
+                    to: path("old.csv"),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_swap_through_a_temporary_name_as_two_renames() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["site-a.csv", "site-b.csv"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let mut watcher = watch(root);
+
+        fs::rename(root.join("site-a.csv"), root.join("swap.tmp")).unwrap();
+        fs::rename(root.join("site-b.csv"), root.join("site-a.csv")).unwrap();
+        fs::rename(root.join("swap.tmp"), root.join("site-b.csv")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Renamed {
+                    from: path("site-a.csv"),
+                    to: path("site-b.csv"),
+                },
+                Change::Renamed {
+                    from: path("site-b.csv"),
+                    to: path("site-a.csv"),
+                },
+            ]
         );
     }
 
