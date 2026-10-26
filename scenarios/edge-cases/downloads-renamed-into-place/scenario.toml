@@ -1,4 +1,4 @@
-description = "Browsers download into a temporary file and rename it to its final name. The temporary file is left out, so a download shows up only as the file it becomes, also when its .part file stays for longer than a debounce."
+description = "Browsers download into a temporary file and rename it to its final name. The temporary file is left out, so a download shows up only as the file it becomes, also when its .part file stays for longer than a debounce. A slow Firefox download comes first as the empty file that holds its name, then as changed once the .part file replaces it."
 
 [[set]]
 changes = [{ created = "campaign-2026-11.csv" }]
@@ -13,5 +13,15 @@ explanation = "Soil measurements as CSV files are what the DMP plans."
 
 [[set]]
 changes = [{ created = "campaign-2027-01.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+
+[[set]]
+changes = [{ created = "campaign-2027-02.csv" }]
+contradicts = false
+explanation = "An empty CSV file holds nothing the DMP rules out."
+
+[[set]]
+changes = [{ changed = "campaign-2027-02.csv" }]
 contradicts = false
 explanation = "Soil measurements as CSV files are what the DMP plans."
