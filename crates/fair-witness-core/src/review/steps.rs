@@ -86,7 +86,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        Arc::new(Reviewer::new(&config, None))
+        Arc::new(Reviewer::new(&config, None).unwrap())
     }
 
     fn verdict() -> Verdict {
