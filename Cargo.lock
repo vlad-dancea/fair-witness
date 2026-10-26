@@ -1036,6 +1036,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1052,7 +1053,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "url",
 ]
 
 [[package]]
