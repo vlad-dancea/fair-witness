@@ -962,6 +962,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_a_new_folder_in_one_set_while_it_fills() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(100);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        // As a slow unzip or a download into a new folder. Walking the folder when it appears
+        // finds the first files before their creates come, and those creates still show that
+        // the folder is busy.
+        let writer = std::thread::spawn({
+            let folder = root.join("stream");
+            move || {
+                fs::create_dir(&folder).unwrap();
+                for i in 0..80 {
+                    fs::write(folder.join(format!("f-{i:02}.csv")), "x").unwrap();
+                    std::thread::sleep(debounce / 8);
+                }
+            }
+        });
+        let mut sets = Vec::new();
+        // Long enough for the set to come after ten debounces of writes, and a second one.
+        while let Ok(Some(set)) = tokio::time::timeout(debounce * 20, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+
+        assert_eq!(sets.len(), 1, "{sets:?}");
+        assert_eq!(created(&sets[0]).len(), 81);
+    }
+
+    #[tokio::test]
     async fn reports_a_swap_through_a_temporary_name_as_two_renames() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
