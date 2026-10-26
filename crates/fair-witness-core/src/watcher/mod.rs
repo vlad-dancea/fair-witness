@@ -662,6 +662,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_a_download_only_once_it_is_renamed_into_place() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::create_dir(root.join("downloads")).unwrap();
+        let mut watcher = watch(root);
+        let part = root.join("downloads/era5-2026-10.nc.part");
+        let done = root.join("downloads/era5-2026-10.nc");
+
+        fs::write(&part, "x").unwrap();
+        let started = watcher.handle(vec![DebouncedEvent::new(
+            notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(part.clone()),
+            Instant::now(),
+        )]);
+        fs::rename(&part, &done).unwrap();
+        let finished = watcher.handle(vec![DebouncedEvent::new(
+            notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(part)
+                .add_path(done),
+            Instant::now(),
+        )]);
+
+        assert_eq!(
+            (started, finished),
+            (
+                vec![],
+                vec![Change::Created(PathBuf::from("downloads/era5-2026-10.nc"))]
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn reports_a_file_moved_out_of_the_project_as_deleted() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
