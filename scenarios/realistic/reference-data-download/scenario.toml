@@ -1,0 +1,25 @@
+description = "A researcher downloads five years of 10-minute readings of GeoSphere Austria's reference station as a ZIP archive, moves it into the project, extracts its 61 files a few seconds later and deletes the archive. The DMP is large, with eight datasets."
+
+[[set]]
+changes = [
+  { created = "reference" },
+  { created = "reference/klima-v2-10min_5925_wien-hohe-warte_2021-2025.zip" },
+]
+contradicts = false
+explanation = "The DMP plans to keep GeoSphere Austria's readings of Wien Hohe Warte as the reference for calibrating the stations."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = "reference/klima-v2-10min_5925_wien-hohe-warte_2021-2025.zip" } },
+]
+
+[[set]]
+contradicts = false
+explanation = "The extracted CSV files are the reference readings the DMP plans, with their license."
+fake_tool_calls = [
+  { tool = "list_dir", arguments = { path = "reference/klima-v2-10min_5925_wien-hohe-warte_2021-2025" } },
+  { tool = "read_file", arguments = { path = "reference/klima-v2-10min_5925_wien-hohe-warte_2021-2025/klima-v2-10min_5925_wien-hohe-warte_2021-2025-2021-01.csv" } },
+]
+
+[[set]]
+changes = [{ deleted = "reference/klima-v2-10min_5925_wien-hohe-warte_2021-2025.zip" }]
+contradicts = false
+explanation = "Deleting the archive after extracting it removes nothing the DMP plans."

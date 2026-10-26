@@ -1,0 +1,327 @@
+{
+  "dmp": {
+    "title": "DMP for green roofs against urban heat in Vienna",
+    "description": "The project measures how four green roofs in Vienna change the temperature on and around them, asks residents how they experience summer heat, and simulates the effect of greening more roofs. It collects weather station and substrate sensor readings, a resident survey, interviews, thermal drone imagery, camera trap photos of pollinators and microclimate simulations, and writes code to analyse them.",
+    "language": "eng",
+    "created": "2026-01-20T10:30:00",
+    "modified": "2026-09-30T15:05:00",
+    "ethical_issues_exist": "yes",
+    "ethical_issues_description": "The resident survey and the interviews collect personal data. TU Wien's Research Ethics Committee approved both (EK 044/2026). Participants give informed consent before taking part and can withdraw at any time. Survey responses are pseudonymised when they are exported, and interview recordings are deleted once they are transcribed and the transcripts pseudonymised. The camera traps point down at flower beds and are placed so that they do not capture people.",
+    "ethical_issues_report": "https://damap.example.org/dmp/318/ethics-approval.pdf",
+    "dmp_id": { "identifier": "https://damap.example.org/dmp/318", "type": "url" },
+    "contact": {
+      "name": "Katharina Wimmer",
+      "mbox": "katharina.wimmer@example.org",
+      "contact_id": { "identifier": "https://orcid.org/0000-0003-4417-2290", "type": "orcid" }
+    },
+    "contributor": [
+      {
+        "name": "Katharina Wimmer",
+        "mbox": "katharina.wimmer@example.org",
+        "contributor_id": { "identifier": "https://orcid.org/0000-0003-4417-2290", "type": "orcid" },
+        "role": ["Project Leader", "Data Manager"]
+      },
+      {
+        "name": "Tobias Leitner",
+        "mbox": "tobias.leitner@example.org",
+        "contributor_id": { "identifier": "https://orcid.org/0000-0002-7781-0346", "type": "orcid" },
+        "role": ["Data Collector"]
+      },
+      {
+        "name": "Selin Arslan",
+        "mbox": "selin.arslan@example.org",
+        "contributor_id": { "identifier": "https://orcid.org/0000-0001-9032-5518", "type": "orcid" },
+        "role": ["Researcher", "Data Collector"]
+      },
+      {
+        "name": "Markus Hofer",
+        "mbox": "markus.hofer@example.org",
+        "contributor_id": { "identifier": "https://orcid.org/0000-0002-3360-8874", "type": "orcid" },
+        "role": ["Researcher"]
+      },
+      {
+        "name": "Anna Berger",
+        "mbox": "anna.berger@example.org",
+        "role": ["Data Steward"]
+      }
+    ],
+    "cost": [
+      {
+        "title": "Storage of the drone imagery and simulations",
+        "description": "Project storage at TU Wien for about 15 TB during the project.",
+        "value": 4500,
+        "currency_code": "EUR"
+      },
+      {
+        "title": "Transcription of the interviews",
+        "description": "A transcription service bound by a data processing agreement transcribes about 40 interviews.",
+        "value": 3200,
+        "currency_code": "EUR"
+      },
+      {
+        "title": "Data curation before publication",
+        "description": "Two months of a data steward preparing the datasets and their metadata for TU Wien Research Data.",
+        "value": 9800,
+        "currency_code": "EUR"
+      }
+    ],
+    "project": [
+      {
+        "title": "Green roofs against urban heat in Vienna",
+        "description": "Measures and simulates how green roofs cool the city, with four roofs in the 10th, 15th, 16th and 20th districts.",
+        "start": "2026-02-01",
+        "end": "2029-01-31",
+        "funding": [
+          {
+            "funder_id": { "identifier": "https://ror.org/013tf3c58", "type": "ror" },
+            "funding_status": "granted",
+            "grant_id": { "identifier": "https://doi.org/10.55776/PAT4471025", "type": "doi" }
+          }
+        ]
+      }
+    ],
+    "dataset": [
+      {
+        "title": "Weather station readings",
+        "description": "Twelve weather stations, three on each green roof, record a reading every 10 minutes and upload it to the vendor's portal. Each day, the readings of the day before are downloaded from the portal as one CSV export for all stations and kept as delivered, with the columns station_id, timestamp (ISO 8601 with UTC offset), air_temperature_c, relative_humidity_pct, wind_speed_ms and global_radiation_wm2. For publication they are rearranged into one CSV file per station and month.",
+        "type": "Tabular data",
+        "issued": "2029-03-01",
+        "keyword": ["urban heat", "green roofs", "microclimate", "weather stations"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "data_quality_assurance": [
+          "Stations are calibrated against the reference station of GeoSphere Austria before and after each summer.",
+          "Readings outside the sensors' range are flagged in a separate quality column added during analysis, not removed.",
+          "The 10-minute readings of GeoSphere Austria's station Wien Hohe Warte, open data under CC BY 4.0, are downloaded as the reference for the calibration and kept next to the station readings."
+        ],
+        "preservation_statement": "Kept for at least 10 years in TU Wien Research Data.",
+        "dataset_id": { "identifier": "weather-station-readings", "type": "other" },
+        "metadata": [
+          {
+            "description": "Station positions, sensor models and calibration dates in a README and a JSON sidecar file.",
+            "language": "eng",
+            "metadata_standard_id": { "identifier": "https://schema.datacite.org/meta/kernel-4.5/", "type": "url" }
+          }
+        ],
+        "technical_resource": [
+          { "name": "Weather stations", "description": "Twelve compact stations with a data logger that uploads over the mobile network." }
+        ],
+        "distribution": [
+          {
+            "title": "Weather station readings as CSV",
+            "description": "One CSV file per station and month.",
+            "format": ["text/csv"],
+            "byte_size": 250000000,
+            "data_access": "open",
+            "available_until": "2039-03-01",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2029-03-01" }
+            ],
+            "host": {
+              "title": "TU Wien Research Data",
+              "url": "https://researchdata.tuwien.ac.at",
+              "pid_system": ["doi"],
+              "certified_with": "coretrustseal",
+              "support_versioning": "yes"
+            }
+          }
+        ]
+      },
+      {
+        "title": "Substrate sensor readings",
+        "description": "Soil moisture and temperature sensors at three depths in the substrate of each green roof, read every hour. One CSV file per roof and month.",
+        "type": "Tabular data",
+        "issued": "2029-03-01",
+        "keyword": ["green roofs", "substrate moisture"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "data_quality_assurance": ["Sensors are checked against gravimetric samples twice a year."],
+        "preservation_statement": "Kept for at least 10 years in TU Wien Research Data.",
+        "dataset_id": { "identifier": "substrate-sensor-readings", "type": "other" },
+        "distribution": [
+          {
+            "title": "Substrate sensor readings as CSV",
+            "format": ["text/csv"],
+            "byte_size": 20000000,
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2029-03-01" }
+            ],
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      },
+      {
+        "title": "Resident survey responses",
+        "description": "An online survey asks about 600 residents of the buildings with the green roofs and of their neighbouring buildings how they experience summer heat at home. The survey runs in LimeSurvey on TU Wien's servers. Names and email addresses of the participants stay in LimeSurvey's participant table, which only the survey team can open. The responses are exported as CSV with a pseudonymous respondent code in place of any contact detail, and only these pseudonymised exports are stored in the project.",
+        "type": "Survey data",
+        "issued": "2029-06-01",
+        "keyword": ["urban heat", "thermal comfort", "survey"],
+        "language": "deu",
+        "personal_data": "yes",
+        "sensitive_data": "no",
+        "data_quality_assurance": ["The questionnaire was tested with 12 residents before the first wave."],
+        "preservation_statement": "The pseudonymised responses are kept for 10 years. The participant table in LimeSurvey is deleted when the last survey wave ends.",
+        "dataset_id": { "identifier": "resident-survey-responses", "type": "other" },
+        "security_and_privacy": [
+          {
+            "title": "Pseudonymisation",
+            "description": "Exports from LimeSurvey hold only the respondent code. The table that links codes to names and email addresses never leaves LimeSurvey."
+          },
+          {
+            "title": "Access",
+            "description": "Only the survey team can open the project folder with the responses."
+          }
+        ],
+        "distribution": [
+          {
+            "title": "Pseudonymised survey responses",
+            "description": "Shared on request with researchers who sign a data use agreement.",
+            "format": ["text/csv"],
+            "byte_size": 3000000,
+            "data_access": "shared",
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      },
+      {
+        "title": "Interviews with residents and building managers",
+        "description": "About 40 semi-structured interviews, recorded as audio only, never as video, and transcribed by a service under a data processing agreement. Names and addresses are replaced in the transcripts. The recordings are deleted once their transcript is checked.",
+        "type": "Interview data",
+        "issued": "2029-06-01",
+        "keyword": ["interviews", "building management", "thermal comfort"],
+        "language": "deu",
+        "personal_data": "yes",
+        "sensitive_data": "no",
+        "preservation_statement": "Pseudonymised transcripts are kept for 10 years. Recordings are kept only until their transcript is checked.",
+        "dataset_id": { "identifier": "interviews", "type": "other" },
+        "security_and_privacy": [
+          {
+            "title": "Recordings",
+            "description": "Recordings are stored only on the project's encrypted storage and deleted after transcription."
+          }
+        ],
+        "distribution": [
+          {
+            "title": "Pseudonymised transcripts",
+            "format": ["application/vnd.oasis.opendocument.text"],
+            "byte_size": 8000000,
+            "data_access": "closed",
+            "host": { "title": "TU Wien project storage", "storage_type": "encrypted network storage", "backup_type": "snapshots", "backup_frequency": "daily" }
+          }
+        ]
+      },
+      {
+        "title": "Thermal drone imagery",
+        "description": "A drone with a thermal camera flies over each roof and its street about twice a month in summer. Each flight yields 10 to 15 GeoTIFF tiles of 150 to 250 MB in the EPSG:31256 projection and a CSV flight log, kept together in one folder per flight.",
+        "type": "Image data",
+        "issued": "2029-03-01",
+        "keyword": ["thermal imagery", "drone", "surface temperature"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "data_quality_assurance": ["The camera is calibrated against a black body before each season."],
+        "preservation_statement": "Kept for at least 10 years in TU Wien Research Data.",
+        "dataset_id": { "identifier": "thermal-drone-imagery", "type": "other" },
+        "technical_resource": [
+          { "name": "Thermal drone", "description": "Quadcopter with a radiometric thermal camera, 640 by 512 pixels." }
+        ],
+        "distribution": [
+          {
+            "title": "Thermal tiles as GeoTIFF",
+            "format": ["image/tiff"],
+            "byte_size": 9000000000000,
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2029-03-01" }
+            ],
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      },
+      {
+        "title": "Camera trap photos of pollinators",
+        "description": "Six camera traps, pointed down at the flower beds of the green roofs, take a JPEG photo whenever they detect motion, about 15 a day each. The photos are kept in one folder per camera and day and later labelled with the insects they show.",
+        "type": "Image data",
+        "issued": "2029-03-01",
+        "keyword": ["pollinators", "biodiversity", "camera traps"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "preservation_statement": "Kept for at least 10 years in TU Wien Research Data.",
+        "dataset_id": { "identifier": "pollinator-photos", "type": "other" },
+        "distribution": [
+          {
+            "title": "Photos as JPEG",
+            "format": ["image/jpeg"],
+            "byte_size": 400000000000,
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2029-03-01" }
+            ],
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      },
+      {
+        "title": "Microclimate simulations",
+        "description": "PALM-4U simulations of the four districts with today's roofs and with more green roofs, run on the Vienna Scientific Cluster. Outputs are NetCDF files of about 50 GB per run.",
+        "type": "Model data",
+        "issued": "2029-01-31",
+        "keyword": ["PALM-4U", "urban climate simulation"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "preservation_statement": "The configuration and input files are published. Raw outputs are kept for 5 years on project storage, since they can be recomputed.",
+        "dataset_id": { "identifier": "microclimate-simulations", "type": "other" },
+        "technical_resource": [
+          { "name": "Vienna Scientific Cluster", "description": "About 2 million core hours." }
+        ],
+        "distribution": [
+          {
+            "title": "Simulation configuration and inputs",
+            "format": ["application/x-netcdf", "text/plain"],
+            "byte_size": 40000000000,
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://creativecommons.org/licenses/by/4.0/", "start_date": "2029-01-31" }
+            ],
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          },
+          {
+            "title": "Raw simulation outputs",
+            "format": ["application/x-netcdf"],
+            "byte_size": 6000000000000,
+            "data_access": "closed",
+            "host": { "title": "TU Wien project storage", "storage_type": "network storage", "backup_type": "none" }
+          }
+        ]
+      },
+      {
+        "title": "Analysis code",
+        "description": "Python code that cleans the readings, joins them with the imagery and survey, and makes the figures of the publications.",
+        "type": "Software",
+        "issued": "2029-01-31",
+        "keyword": ["python", "analysis"],
+        "language": "eng",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "preservation_statement": "Archived with each publication through Zenodo's GitHub integration.",
+        "dataset_id": { "identifier": "analysis-code", "type": "other" },
+        "distribution": [
+          {
+            "title": "Source code",
+            "format": ["text/x-python"],
+            "data_access": "open",
+            "license": [
+              { "license_ref": "https://opensource.org/licenses/MIT", "start_date": "2026-02-01" }
+            ],
+            "host": { "title": "GitHub", "url": "https://github.com" }
+          }
+        ]
+      }
+    ]
+  }
+}

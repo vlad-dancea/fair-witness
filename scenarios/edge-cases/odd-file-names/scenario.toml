@@ -1,0 +1,42 @@
+description = "A researcher creates files whose names have spaces, umlauts, Chinese characters, a leading dash, a line break or 254 characters, an empty file and an empty folder, then links to outside the project and to nothing, then a file whose name is not valid UTF-8 beside one whose name spells its escape. The model reads both by the escaped names the events give them."
+
+[[set]]
+changes = [
+  { created = "field notes" },
+  { created = "field notes/site 1 (copy).csv" },
+  { created = "Bodenproben Größe µm – Übersicht.csv" },
+  { created = "土壤样本.csv" },
+  { created = "-n.csv" },
+  { created = "two\nlines.csv" },
+  { created = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL.csv" },
+  { created = "empty.csv" },
+  { created = "empty-folder" },
+]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans, whatever their names."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = "-n.csv" } },
+  { tool = "read_file", arguments = { path = "two\nlines.csv" } },
+  { tool = "list_dir", arguments = { path = "field notes" } },
+]
+
+[[set]]
+changes = [
+  { created = "outside-link" },
+  { created = "outside-folder-link" },
+  { created = "dangling-link" },
+]
+contradicts = false
+explanation = "Links hold no research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [
+  { created = 'latin1-\xe9t\xe9.csv' },
+  { created = 'latin1-\\xe9t\\xe9.csv' },
+]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans, whatever their names."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = 'latin1-\xe9t\xe9.csv' } },
+  { tool = "read_file", arguments = { path = 'latin1-\\xe9t\\xe9.csv' } },
+]

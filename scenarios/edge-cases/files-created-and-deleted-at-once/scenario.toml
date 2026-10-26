@@ -1,0 +1,11 @@
+description = "A program creates and deletes a temporary file faster than a debounce, once next to a file that stays and once on its own. Only the files that stay show up, and the file that came and went alone makes no set."
+
+[[set]]
+changes = [{ created = "site-01.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+
+[[set]]
+changes = [{ created = "site-02.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."

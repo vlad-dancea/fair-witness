@@ -1,0 +1,36 @@
+description = "A researcher writes a plotting script over about a minute, pressing Ctrl+S whenever they pause and sometimes twice in a row, runs it so that it writes a figure, then fixes the title and runs it again. The DMP is small."
+
+[[set]]
+changes = [{ created = "analysis" }, { created = "analysis/plot_ph.py" }]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP."
+
+[[set]]
+changes = [{ changed = "analysis/plot_ph.py" }]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP."
+
+[[set]]
+changes = [{ changed = "analysis/plot_ph.py" }]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP."
+
+[[set]]
+changes = [{ changed = "analysis/plot_ph.py" }]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP."
+
+[[set]]
+changes = [{ created = "figures" }, { created = "figures/ph-by-site.png" }]
+contradicts = false
+explanation = "Figures are not research data, so the DMP says nothing about them."
+
+[[set]]
+changes = [{ changed = "analysis/plot_ph.py" }]
+contradicts = false
+explanation = "Analysis code is not covered by the DMP."
+
+[[set]]
+changes = [{ changed = "figures/ph-by-site.png" }]
+contradicts = false
+explanation = "Figures are not research data, so the DMP says nothing about them."
