@@ -1,0 +1,24 @@
+description = "Three mornings in a row, a researcher downloads the weather station readings of the day before from the vendor's portal and moves them from Downloads into the project. On the third morning the export is an Excel file. The DMP is large, with eight datasets."
+
+[[set]]
+changes = [
+  { created = "stations" },
+  { created = "stations/raw" },
+  { created = "stations/raw/2026-10-20.csv" },
+]
+contradicts = false
+explanation = "The DMP keeps each day's CSV export of all stations as delivered, with these columns."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "stations/raw/2026-10-20.csv" } }]
+
+[[set]]
+changes = [{ created = "stations/raw/2026-10-21.csv" }]
+contradicts = false
+explanation = "The DMP keeps each day's CSV export of all stations as delivered, with these columns."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "stations/raw/2026-10-21.csv" } }]
+
+[[set]]
+changes = [{ created = "stations/raw/2026-10-22.xlsx" }]
+contradicts = true
+dmp_field = ["dataset[0].description", "dataset[0].distribution[0].format"]
+explanation = "The DMP keeps the daily exports as CSV, and this one is an Excel file."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "stations/raw/2026-10-22.xlsx" } }]

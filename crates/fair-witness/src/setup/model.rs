@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::{AiConfig, Effort, Project};
-use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer, in_the_clear};
+use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
 
 use super::damap::web_url;
 use crate::tui::model_panel::describe;
@@ -21,7 +22,8 @@ pub struct ModelArgs {
         long,
         env = "FAIR_WITNESS_API_KEY",
         hide_env_values = true,
-        help = "API key for it, if it needs one; asked for along with the URL"
+        help = "API key for it, if it needs one, or empty to remove the saved one; asked for \
+                along with the URL"
     )]
     pub api_key: Option<String>,
     #[arg(
@@ -35,11 +37,22 @@ pub struct ModelArgs {
 pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     let mut config = project.config()?.context("this folder is not set up yet")?;
     let mut previous = config.ai.take();
-    let saved_key = project.credentials()?.api_key;
+    let mut credentials = project.credentials()?;
+    // An empty --api-key removes the saved key before the API is asked anything, since an API
+    // that needs a key refuses to answer without one and `setup` would stop with the key saved.
+    if args.api_key.as_deref() == Some("") && credentials.api_key.take().is_some() {
+        project.save_credentials(&credentials)?;
+        println!("Removed the saved API key.");
+    }
+    let saved_key = SavedKey {
+        url: previous.as_ref().map(|ai| ai.url.clone()),
+        key: credentials.api_key,
+    };
     let (url, api_key, models) = match args.ai_url {
         Some(url) => {
             let url = web_url(&url)?;
             let api_key = match args.api_key {
+                Some(key) if key.is_empty() => None,
                 Some(_) if in_the_clear(&url) => {
                     bail!(
                         "{}, or leave out --api-key if it needs none",
@@ -51,7 +64,7 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
                     println!("{}", no_key_sent(&url));
                     None
                 }
-                None => saved_key,
+                None => saved_key.for_api(&url),
             };
             let models = review::list_models(&url, api_key.as_deref()).await?;
             (url, api_key, models)
@@ -114,6 +127,22 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     project.save_config(&config)
 }
 
+/// The API key in `credentials.toml` and the API in `config.toml` it was saved for.
+struct SavedKey {
+    url: Option<String>,
+    key: Option<String>,
+}
+
+impl SavedKey {
+    /// The saved key, if it was saved for `url`, since another API would get a key that is not
+    /// its own.
+    fn for_api(&self, url: &str) -> Option<String> {
+        self.key
+            .clone()
+            .filter(|_| self.url.as_deref() == Some(url))
+    }
+}
+
 /// The settings to save for `model` and the line that names it. The saved effort stays only
 /// with the API and model it was chosen for, since an effort one model takes can fail every
 /// review on another.
@@ -150,7 +179,7 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
 async fn ask_for_api(
     previous: Option<String>,
     given_key: Option<String>,
-    saved_key: Option<String>,
+    saved_key: SavedKey,
 ) -> Result<(String, Option<String>, Vec<String>)> {
     let mut default = previous.unwrap_or_else(|| DEFAULT_URL.to_string());
     loop {
@@ -166,6 +195,7 @@ async fn ask_for_api(
             }
         };
         let api_key = match &given_key {
+            Some(key) if key.is_empty() => None,
             Some(_) if in_the_clear(&url) => {
                 println!(
                     "{}, or leave out --api-key if it needs none. Try again, or press Ctrl+C to \
@@ -181,6 +211,7 @@ async fn ask_for_api(
                 None
             }
             None => {
+                let saved_key = saved_key.for_api(&url);
                 let prompt = match saved_key {
                     Some(_) => "API key (empty keeps the saved one)",
                     None => "API key (empty for none)",
@@ -189,9 +220,7 @@ async fn ask_for_api(
                     .with_prompt(prompt)
                     .allow_empty_password(true)
                     .interact()?;
-                Some(key)
-                    .filter(|key| !key.is_empty())
-                    .or_else(|| saved_key.clone())
+                Some(key).filter(|key| !key.is_empty()).or(saved_key)
             }
         };
         match review::list_models(&url, api_key.as_deref()).await {
@@ -247,11 +276,37 @@ fn choose_model(
 mod tests {
     use fair_witness_core::project::{Config, Credentials, DamapConfig};
     use fair_witness_core::testing::{
-        EFFORT_REFUSED, Reply, Request, bad_request, fake_model, one_token,
+        EFFORT_REFUSED, Reply, Request, bad_request, failure, fake_model, one_token,
     };
     use serde_json::{Value, json};
 
     use super::*;
+
+    /// A folder set up with DAMAP, with `ai` and `api_key` saved.
+    fn folder(ai: Option<AiConfig>, api_key: Option<&str>) -> (tempfile::TempDir, Project) {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project
+            .save_config(&Config {
+                damap: DamapConfig {
+                    frontend_url: "https://damap.example.org".to_string(),
+                    dmp_id: Some(3),
+                },
+                ai,
+            })
+            .unwrap();
+        project
+            .save_credentials(&Credentials {
+                api_key: api_key.map(str::to_string),
+                ..Credentials::default()
+            })
+            .unwrap();
+        (root, project)
+    }
+
+    fn models() -> Reply {
+        json!({ "object": "list", "data": [{ "id": "small", "object": "model" }] }).into()
+    }
 
     /// Sets up the model of a folder whose config holds `saved`, with `model` given and an API
     /// that lists `small` and then answers with `checks`. Gives back the AI settings it saved,
@@ -261,25 +316,15 @@ mod tests {
         model: &str,
         checks: Vec<Reply>,
     ) -> (Result<Option<AiConfig>, String>, String, Vec<Request>) {
-        let root = tempfile::tempdir().unwrap();
-        let project = Project::new(root.path().to_path_buf());
-        let mut replies: Vec<Reply> = vec![
-            json!({ "object": "list", "data": [{ "id": "small", "object": "model" }] }).into(),
-        ];
+        let mut replies = vec![models()];
         replies.extend(checks);
         let (url, server) = fake_model(replies);
-        let config = Config {
-            damap: DamapConfig {
-                frontend_url: "https://damap.example.org".to_string(),
-                dmp_id: Some(3),
-            },
-            ai: saved.map(|(model, effort)| AiConfig {
-                url: url.clone(),
-                model: model.to_string(),
-                effort: effort.parse().unwrap(),
-            }),
-        };
-        project.save_config(&config).unwrap();
+        let ai = saved.map(|(model, effort)| AiConfig {
+            url: url.clone(),
+            model: model.to_string(),
+            effort: effort.parse().unwrap(),
+        });
+        let (_root, project) = folder(ai, None);
 
         let args = ModelArgs {
             ai_url: Some(url.clone()),
@@ -335,28 +380,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_no_api_key_over_plain_http_to_another_machine() {
-        let root = tempfile::tempdir().unwrap();
-        let project = Project::new(root.path().to_path_buf());
-        project
-            .save_config(&Config {
-                damap: DamapConfig {
-                    frontend_url: "https://damap.example.org".to_string(),
-                    dmp_id: Some(3),
-                },
-                ai: None,
-            })
-            .unwrap();
-        project
-            .save_credentials(&Credentials {
-                api_key: Some("sk-saved".to_string()),
-                ..Credentials::default()
-            })
-            .unwrap();
+    async fn sends_the_saved_api_key_only_to_its_api() {
         let (url, server) = fake_model(vec![
-            json!({ "object": "list", "data": [{ "id": "small", "object": "model" }] }).into(),
-            Reply::from(one_token()),
+            models(),
+            one_token().into(),
+            models(),
+            one_token().into(),
+            failure("401 Unauthorized", "No API key given."),
         ]);
+        let args = |api_key: Option<&str>| ModelArgs {
+            ai_url: Some(url.clone()),
+            api_key: api_key.map(str::to_string),
+            model: Some("small".to_string()),
+        };
+        let key_saved_for = |url: &str| {
+            let ai = AiConfig {
+                url: url.to_string(),
+                model: "small".to_string(),
+                effort: Effort::default(),
+            };
+            folder(Some(ai), Some("sk-saved"))
+        };
+        let saved_key = |project: &Project| project.credentials().unwrap().api_key;
+        let (_other, another_api) = key_saved_for("https://other.example.org/v1");
+        let (_same, same_api) = key_saved_for(&url);
+
+        setup(&another_api, args(None)).await.unwrap();
+        setup(&same_api, args(None)).await.unwrap();
+        let kept = saved_key(&same_api);
+        // An empty --api-key removes the saved key, also when the API then wants one.
+        assert_eq!(
+            setup(&same_api, args(Some("")))
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!("{url}/models answered 401 Unauthorized; is the URL right, and the API key?")
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            [saved_key(&another_api), kept, saved_key(&same_api)],
+            [None, Some("sk-saved".to_string()), None]
+        );
+        let authorization: Vec<Option<&str>> = requests
+            .iter()
+            .map(|(head, _)| {
+                head.lines()
+                    .find_map(|line| line.strip_prefix("authorization: "))
+            })
+            .collect();
+        let saved = Some("Bearer sk-saved");
+        assert_eq!(authorization, [None, None, saved, saved, None]);
+    }
+
+    #[tokio::test]
+    async fn sends_no_api_key_over_plain_http_to_another_machine() {
+        let (_root, project) = folder(None, Some("sk-saved"));
+        let (url, server) = fake_model(vec![models(), one_token().into()]);
         // 0.0.0.0 reaches this machine on Linux and macOS, but fair-witness cannot tell that it
         // is not another one.
         let url = url.replace("127.0.0.1", "0.0.0.0");

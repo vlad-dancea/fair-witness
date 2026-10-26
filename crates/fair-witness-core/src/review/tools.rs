@@ -8,6 +8,8 @@ use genai::chat::Tool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::escape;
+
 const MAX_ENTRIES: usize = 200;
 const MAX_READ: u64 = 16 * 1024;
 
@@ -30,6 +32,10 @@ impl Tools {
 
     pub fn definitions() -> Vec<Tool> {
         let path_schema = |description: &str| {
+            let description = format!(
+                "{description} Write names as the list of changes and list_dir show them, \
+                 escapes included."
+            );
             json!({
                 "type": "object",
                 "properties": {
@@ -67,9 +73,10 @@ impl Tools {
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, String> {
+        let unescaped = escape::unescape(path).map_err(|e| format!("{path}: {e}"))?;
         let resolved = self
             .root
-            .join(path)
+            .join(unescaped)
             .canonicalize()
             .map_err(|e| format!("{path}: {e}"))?;
         let Ok(relative) = resolved.strip_prefix(&self.root) else {
@@ -87,7 +94,7 @@ fn list_dir(path: &Path) -> Result<String, String> {
     let mut lines: Vec<String> = entries
         .flatten()
         .map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = escape::path(Path::new(&entry.file_name()));
             match entry.metadata() {
                 Ok(m) if m.is_dir() => format!("{name}/"),
                 Ok(m) => format!("{name} ({} bytes)", m.len()),
@@ -177,6 +184,7 @@ mod tests {
             "data/../../",
             outside.path().join("secret.txt").to_str().unwrap(),
             "link/secret.txt",
+            "\\u{2e}\\u{2e}/",
         ] {
             let error = call(&tools, "read_file", path).unwrap_err();
             assert!(error.contains("outside the project"), "{path}: {error}");
@@ -194,6 +202,47 @@ mod tests {
                 "data/../.fair-witness/credentials.toml"
             )
             .is_err()
+        );
+        assert_eq!(
+            call(&tools, "read_file", ".fair-witnes\\u{73}/credentials.toml"),
+            Err(
+                ".fair-witnes\\u{73}/credentials.toml is not part of the research data".to_string()
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reads_a_file_by_the_name_list_dir_shows() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let (dir, tools) = project();
+        fs::write(dir.path().join("data/two\nlines.csv"), "id\n2\n").unwrap();
+        fs::write(dir.path().join("data/back\\n.csv"), "id\n3\n").unwrap();
+        let latin1 = OsStr::from_bytes(b"latin1-\xe9t\xe9.csv");
+        fs::write(dir.path().join("data").join(latin1), "id\n4\n").unwrap();
+
+        assert_eq!(
+            call(&tools, "list_dir", "data").unwrap(),
+            "a.csv (12 bytes)\nback\\\\n.csv (5 bytes)\nlatin1-\\xe9t\\xe9.csv (5 bytes)\n\
+             two\\nlines.csv (5 bytes)"
+        );
+        assert_eq!(
+            call(&tools, "read_file", "data/latin1-\\xe9t\\xe9.csv").unwrap(),
+            "id\n4\n"
+        );
+        assert_eq!(
+            call(&tools, "read_file", "data/two\\nlines.csv").unwrap(),
+            "id\n2\n"
+        );
+        assert_eq!(
+            call(&tools, "read_file", "data/two\nlines.csv").unwrap(),
+            "id\n2\n"
+        );
+        assert_eq!(
+            call(&tools, "read_file", "data/back\\\\n.csv").unwrap(),
+            "id\n3\n"
         );
     }
 

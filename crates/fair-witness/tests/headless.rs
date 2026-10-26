@@ -495,6 +495,35 @@ fn stops_while_it_waits_for_damap() {
     assert_eq!(run.stop(), Some(0));
 }
 
+#[test]
+fn refuses_a_saved_damap_on_another_machine_over_plain_http() {
+    let root = tempfile::tempdir().unwrap();
+    // As saved before `setup` refused such a URL.
+    let config = Config {
+        damap: DamapConfig {
+            frontend_url: "http://damap.example.org".to_string(),
+            dmp_id: Some(3),
+        },
+        ai: None,
+    };
+    Project::new(root.path().to_path_buf())
+        .save_config(&config)
+        .unwrap();
+
+    let mut run = Run::start(
+        root.path(),
+        &["--ai-url", "http://127.0.0.1:9/v1", "--model", "test"],
+    );
+
+    assert_eq!(run.exit_code(), Some(2));
+    assert_eq!(
+        run.stderr_until("To use").join("\n"),
+        "error: http://damap.example.org uses plain HTTP to another machine, which would send \
+         the DAMAP login unencrypted\nUse DAMAP's https:// address, or a DAMAP on this machine, \
+         such as http://localhost:8085\nTo use a different URL, run `fair-witness setup`."
+    );
+}
+
 /// Starts watching `project` against a DMP larger than a pipe holds, which the first trace
 /// event of a review carries. Nothing reads stdout.
 fn start_with_a_large_dmp(project: &Path) -> Run {

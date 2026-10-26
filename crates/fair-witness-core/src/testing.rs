@@ -7,7 +7,8 @@ use std::thread;
 
 use serde_json::{Value, json};
 
-/// The head and the JSON body of a request the fake model received.
+/// The head and the body of a request the fake model received, as JSON or else as a string,
+/// such as for a form.
 pub type Request = (String, Value);
 
 /// A reply in which the model calls the tool `name` with `arguments`.
@@ -90,6 +91,15 @@ pub const EFFORT_REFUSED: &str = "aqueduct.BadRequestError: OpenAIException - Er
     medium, and low.', 'type': 'BadRequestError', 'param': None, 'code': 400}}. Received Model \
     Group=qwen-3.8-27b\nAvailable Model Group Fallbacks=None";
 
+/// A 307 Temporary Redirect to `location`, which asks for the same request there, body and all.
+pub fn redirect(location: &str) -> Reply {
+    Reply {
+        status: "307 Temporary Redirect",
+        headers: format!("Location: {location}\r\n"),
+        body: Value::Null,
+    }
+}
+
 /// A refusal with 400 Bad Request and `message` in the body, as Aqueduct sends it.
 pub fn bad_request(message: &str) -> Reply {
     failure("400 Bad Request", message)
@@ -135,7 +145,8 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             let body = if body.is_empty() {
                 Value::Null
             } else {
-                serde_json::from_slice(&body).unwrap()
+                serde_json::from_slice(&body)
+                    .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()))
             };
             requests.push((head, body));
 

@@ -1,3 +1,4 @@
+use fair_witness_core::escape;
 use fair_witness_core::project::Effort;
 use fair_witness_core::review::{Trace, Verdict};
 use fair_witness_core::session::{Event, Record};
@@ -348,8 +349,10 @@ fn describe_changes(changes: &[Change]) -> String {
 fn describe_change(change: &Change) -> String {
     let verb = change.kind().verb();
     match change {
-        Change::Renamed { from, to } => format!("{verb} {} to {}", from.display(), to.display()),
-        _ => format!("{verb} {}", change.path().display()),
+        Change::Renamed { from, to } => {
+            format!("{verb} {} to {}", escape::path(from), escape::path(to))
+        }
+        _ => format!("{verb} {}", escape::path(change.path())),
     }
 }
 

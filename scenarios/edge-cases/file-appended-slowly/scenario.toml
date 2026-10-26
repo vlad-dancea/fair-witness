@@ -1,0 +1,11 @@
+description = "A logger appends to a file every tenth of a second for five seconds, first opening it for each line and then holding it open. The writes never leave the folder quiet for a debounce, so each run of them is one set with one change."
+
+[[set]]
+changes = [{ changed = "logger.csv" }]
+contradicts = false
+explanation = "More pH readings in a CSV file are what the DMP plans."
+
+[[set]]
+changes = [{ changed = "logger.csv" }]
+contradicts = false
+explanation = "More pH readings in a CSV file are what the DMP plans."

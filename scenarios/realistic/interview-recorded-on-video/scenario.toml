@@ -1,0 +1,20 @@
+description = "A researcher records an interview with a camera instead of the audio recorder and copies the 2 GB video from its SD card into the project, which takes about 25 seconds. Later they extract the audio with ffmpeg and delete the video. The DMP is large, with eight datasets."
+
+[[set]]
+changes = [{ created = "interviews/recordings/interview-07-2026-10-20.mp4" }]
+contradicts = true
+dmp_field = ["dataset[3]", "ethical_issues_description"]
+explanation = "The DMP says interviews are recorded as audio only, never as video, and this is a video of an interview."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = "interviews/recordings/interview-07-2026-10-20.mp4" } },
+]
+
+[[set]]
+changes = [{ created = "interviews/recordings/interview-07-2026-10-20.m4a" }]
+contradicts = false
+explanation = "An audio recording of an interview is what the DMP plans."
+
+[[set]]
+changes = [{ deleted = "interviews/recordings/interview-07-2026-10-20.mp4" }]
+contradicts = false
+explanation = "Deleting the video removes data the DMP does not plan."

@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::Effort;
-use fair_witness_core::review::in_the_clear;
 use fair_witness_core::secret::can_hide;
 use fair_witness_core::session::Record;
 use jiff::Timestamp;
@@ -31,7 +31,7 @@ use serde::Serialize;
 
 use report::{Accuracy, Outcome, Refused};
 use run::{API_KEY, Model, Settings};
-use scenario::Scenario;
+use scenario::{Kind, Scenario};
 
 /// Each run holds an inotify instance, and Linux allows a user 128 by default, which editors and
 /// other tools use too.
@@ -45,11 +45,12 @@ const AQUEDUCT: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 #[command(
     about = "Run the researcher scenarios against headless fair-witness, with a fake model or \
              real ones",
-    after_help = "With --model, the scenarios run against real models, each at every --effort, \
-                  and the runner reports how often each gave the expected verdict. It first asks \
-                  the API once about each model and effort, and one the API refuses does not \
-                  run. The API key comes from FAIR_WITNESS_API_KEY, which only these checks and \
-                  fair-witness get."
+    after_help = "The scenarios are in two folders: edge-cases/, which run only with the fake \
+                  model, and realistic/. With --model, the realistic scenarios run against real \
+                  models, each at every --effort, and the runner reports how often each gave the \
+                  expected verdict. It first asks the API once about each model and effort, and \
+                  one the API refuses does not run. The API key comes from \
+                  FAIR_WITNESS_API_KEY, which only these checks and fair-witness get."
 )]
 struct Args {
     #[arg(help = "Run only the scenarios whose names contain one of these")]
@@ -77,8 +78,9 @@ struct Args {
         long,
         value_name = "MS",
         default_value_t = 500,
-        help = "How long the folder must be quiet before its changes count as one set, as \
-                FAIR_WITNESS_DEBOUNCE_MS"
+        help = "How long the folder must be quiet before its changes count as one set in the \
+                edge cases, as FAIR_WITNESS_DEBOUNCE_MS. Realistic scenarios run at \
+                fair-witness's own"
     )]
     debounce_ms: u64,
     #[arg(
@@ -91,7 +93,8 @@ struct Args {
     #[arg(
         long = "model",
         value_name = "ID",
-        help = "Review with this model of the API instead of the fake one; repeat for more"
+        help = "Review the realistic scenarios with this model of the API instead of the fake one; \
+                repeat for more"
     )]
     models: Vec<String>,
     #[arg(
@@ -137,13 +140,21 @@ struct Results<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     ai_url: Option<&'a str>,
     repeats: usize,
-    debounce_ms: u64,
+    debounce_ms: Debounces,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     accuracy: &'a [Accuracy],
     /// The models and efforts the API refused, which did not run.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     refused: &'a [Refused],
     runs: &'a [Outcome],
+}
+
+/// How long fair-witness waited for the folder to be quiet in each kind of scenario.
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct Debounces {
+    edge_cases: u64,
+    realistic: u64,
 }
 
 fn main() -> ExitCode {
@@ -166,9 +177,9 @@ fn run() -> Result<bool> {
         Some(binary) => binary.clone(),
         None => built_binary()?,
     };
-    let scenarios = load(&args.scenarios, &args.names)?;
     let mut models = models(&args)?;
     let fake = models == [Model::Fake];
+    let scenarios = load(&args.scenarios, &args.names, fake)?;
     let repeats = args
         .repeats
         .map_or(if fake { 1 } else { REPEATS }, usize::from);
@@ -244,7 +255,11 @@ fn run() -> Result<bool> {
         started,
         ai_url: (!fake).then_some(args.ai_url.as_str()),
         repeats,
-        debounce_ms: args.debounce_ms,
+        debounce_ms: Debounces {
+            edge_cases: args.debounce_ms,
+            realistic: u64::try_from(fair_witness_core::watcher::DEBOUNCE.as_millis())
+                .unwrap_or(u64::MAX),
+        },
         accuracy: &accuracy,
         refused: &refused,
         runs: &outcomes,
@@ -308,28 +323,59 @@ fn built_binary() -> Result<PathBuf> {
     Ok(binary)
 }
 
-/// The scenarios in `root` whose names contain one of `names`, or all of them without names.
-/// One that cannot be read stops the runner before anything runs.
-fn load(root: &Path, names: &[String]) -> Result<Vec<Scenario>> {
-    let dirs: Vec<PathBuf> = scenario::find(root)?
+/// The scenarios in `root` whose names contain one of `names`, or all of them without names,
+/// and only the realistic ones unless the model is the `fake` one, since the edge cases measure
+/// nothing. One that cannot be read stops the runner before anything runs.
+fn load(root: &Path, names: &[String], fake: bool) -> Result<Vec<Scenario>> {
+    let found = scenario::find(root)?;
+    let mut seen = HashSet::new();
+    for (_, dir) in &found {
+        let name = dir.file_name().unwrap_or_default();
+        if !seen.insert(name) {
+            bail!(
+                "two scenarios in {} are called {}; rename one",
+                root.display(),
+                name.to_string_lossy()
+            );
+        }
+    }
+    let named: Vec<(Kind, PathBuf)> = found
         .into_iter()
-        .filter(|dir| {
+        .filter(|(_, dir)| {
             let name = dir.file_name().unwrap_or_default().to_string_lossy();
             names.is_empty() || names.iter().any(|part| name.contains(part.as_str()))
         })
         .collect();
-    if dirs.is_empty() {
-        let only = if names.is_empty() {
-            String::new()
-        } else {
-            format!(" whose names contain {}", names.join(" or "))
-        };
-        bail!("found no scenarios in {}{only}", root.display());
+    let only = if names.is_empty() {
+        String::new()
+    } else {
+        format!(" whose names contain {}", names.join(" or "))
+    };
+    if named.is_empty() {
+        bail!(
+            "found no scenarios in {}/{} or {}/{}{only}",
+            root.display(),
+            Kind::EdgeCase.folder(),
+            root.display(),
+            Kind::Realistic.folder()
+        );
+    }
+    let chosen: Vec<(Kind, PathBuf)> = named
+        .into_iter()
+        .filter(|(kind, _)| fake || *kind == Kind::Realistic)
+        .collect();
+    if chosen.is_empty() {
+        bail!(
+            "found only edge cases{only}, which run only with the fake model; real models run \
+             the scenarios in {}/{}",
+            root.display(),
+            Kind::Realistic.folder()
+        );
     }
     let mut scenarios = Vec::new();
     let mut errors = Vec::new();
-    for dir in dirs {
-        match Scenario::load(&dir) {
+    for (kind, dir) in chosen {
+        match Scenario::load(kind, &dir) {
             Ok(scenario) => scenarios.push(scenario),
             Err(e) => errors.push(format!("{e:#}")),
         }
@@ -497,6 +543,97 @@ fn with_scheme(ai_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder of scenarios with an edge case and a realistic scenario of each name.
+    fn scenarios(kinds: &[(Kind, &str)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for (kind, name) in kinds {
+            let dir = root.path().join(kind.folder()).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("scenario.toml"),
+                "description = \"\"\n[[set]]\ncontradicts = false\nexplanation = \"\"\n",
+            )
+            .unwrap();
+            fs::write(dir.join("dmp.json"), "{}").unwrap();
+            fs::write(dir.join("script.sh"), "").unwrap();
+        }
+        root
+    }
+
+    fn names(scenarios: &[Scenario]) -> Vec<(Kind, &str)> {
+        scenarios
+            .iter()
+            .map(|scenario| (scenario.kind, scenario.name.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn runs_the_edge_cases_only_with_the_fake_model() {
+        let root = scenarios(&[
+            (Kind::Realistic, "notes"),
+            (Kind::EdgeCase, "odd-names"),
+            (Kind::EdgeCase, "many-files"),
+        ]);
+
+        let fake = load(root.path(), &[], true).unwrap();
+        assert_eq!(
+            names(&fake),
+            [
+                (Kind::EdgeCase, "many-files"),
+                (Kind::EdgeCase, "odd-names"),
+                (Kind::Realistic, "notes"),
+            ]
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            root.path().join("edge-cases/odd-names"),
+            root.path().join("realistic/linked"),
+        )
+        .unwrap();
+        let real = load(root.path(), &[], false).unwrap();
+        assert_eq!(names(&real), [(Kind::Realistic, "notes")]);
+        // Nor through a linked folder of realistic scenarios.
+        #[cfg(unix)]
+        {
+            let linked = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("edge-cases"),
+                linked.path().join("realistic"),
+            )
+            .unwrap();
+            let error = load(linked.path(), &[], false).map(|_| ()).unwrap_err();
+            assert!(
+                error.to_string().starts_with("found no scenarios"),
+                "{error}"
+            );
+        }
+        let error = load(root.path(), &["names".to_string()], false)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found only edge cases whose names contain names, which run only with the fake \
+                 model; real models run the scenarios in {}/realistic",
+                root.path().display()
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_two_scenarios_of_one_name() {
+        let root = scenarios(&[(Kind::EdgeCase, "notes"), (Kind::Realistic, "notes")]);
+
+        let error = load(root.path(), &[], true).map(|_| ()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "two scenarios in {} are called notes; rename one",
+                root.path().display()
+            )
+        );
+    }
 
     #[test]
     fn takes_turns_between_the_models_before_the_efforts() {

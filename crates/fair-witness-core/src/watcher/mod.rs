@@ -1,13 +1,13 @@
 mod filter;
 mod summary;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::mem;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
@@ -27,6 +27,8 @@ pub const DEBOUNCE: Duration = Duration::from_secs(2);
 /// A folder that never stays quiet for the debounce, such as during a long copy, still gets a
 /// change set once its first change is this many debounces old.
 const LONGEST_SET: u32 = 30;
+/// How often per debounce the watcher looks at the files of a held set.
+const LOOKS: u32 = 4;
 /// The debouncer checks for quiet every quarter of the wait, so a wait of zero would have it
 /// spin.
 const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
@@ -35,30 +37,34 @@ const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Change {
-    Created(#[serde(with = "lossy")] PathBuf),
-    Changed(#[serde(with = "lossy")] PathBuf),
+    Created(#[serde(with = "escaped")] PathBuf),
+    Changed(#[serde(with = "escaped")] PathBuf),
     Renamed {
-        #[serde(with = "lossy")]
+        #[serde(with = "escaped")]
         from: PathBuf,
-        #[serde(with = "lossy")]
+        #[serde(with = "escaped")]
         to: PathBuf,
     },
-    Deleted(#[serde(with = "lossy")] PathBuf),
+    Deleted(#[serde(with = "escaped")] PathBuf),
 }
 
-/// Writes a path that is not valid UTF-8 with replacement characters, as the screen shows it,
-/// so that every change can be serialized.
-mod lossy {
+/// Writes a path as the screen and the model show it, so that every change can be serialized,
+/// also one whose name is not valid UTF-8, and read back unchanged.
+mod escaped {
     use std::path::{Path, PathBuf};
 
+    use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
+    use crate::escape;
+
     pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&path.to_string_lossy())
+        serializer.serialize_str(&escape::path(path))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-        PathBuf::deserialize(deserializer)
+        let text = String::deserialize(deserializer)?;
+        escape::unescape(&text).map_err(|e| D::Error::custom(format!("{text}: {e}")))
     }
 }
 
@@ -118,7 +124,8 @@ impl Change {
 
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
-    events: UnboundedReceiver<DebounceEventResult>,
+    /// The debouncer's batches, each with when it handed the batch on.
+    events: UnboundedReceiver<(Instant, DebounceEventResult)>,
     debounce: Duration,
     held: Option<Held>,
     root: PathBuf,
@@ -134,7 +141,7 @@ impl FolderWatcher {
         let (tx, events) = mpsc::unbounded_channel();
         let debounce = debounce.max(SHORTEST_DEBOUNCE);
         let mut debouncer = new_debouncer(debounce, None, move |result| {
-            let _ = tx.send(result);
+            let _ = tx.send((Instant::now(), result));
         })?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
@@ -290,37 +297,81 @@ impl FolderWatcher {
         set
     }
 
-    fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
-        let subtree: Vec<PathBuf> = self
-            .known
+    /// Looks at the files of the held set if it is time to.
+    fn look_if_due(&mut self) {
+        let Some(held) = &mut self.held else {
+            return;
+        };
+        if Instant::now() < held.next_look {
+            return;
+        }
+        held.note_writes(&self.root, &self.known, self.debounce);
+        held.next_look = Instant::now() + self.debounce / LOOKS;
+    }
+
+    /// When the file that a create or a rename put at `path`, or a file the watcher knows in
+    /// the folder it put there, was last written while the debouncer still held that event,
+    /// which it handed on at `sent`. The debouncer drops the writes to a new file until it hands
+    /// the create on, and holds a rename back for a debounce, so without this a file still being
+    /// copied would seem quiet for that long and the rest of the copy would start a set of its
+    /// own. Only files the watcher reports count, so an ignored file being written keeps no set
+    /// open.
+    fn written_while_held(&self, path: &Path, sent: Instant) -> Option<Instant> {
+        let prompt = Instant::now().saturating_duration_since(sent) <= self.debounce / LOOKS;
+        self.known
             .range::<Path, _>((Bound::Included(path), Bound::Unbounded))
             .take_while(|known| known.starts_with(path))
-            .cloned()
-            .collect();
-        for known in &subtree {
-            self.known.remove(known);
-        }
-        subtree
+            .filter_map(|file| written_at(file))
+            .filter_map(|written| {
+                if written <= sent {
+                    Some(written)
+                } else {
+                    // A write after `sent` came as an event of its own and hides when the file
+                    // was written before. Right after `sent`, it shows that the copy was still
+                    // running when the event was handed on. Later, it could also follow a
+                    // pause, which its own event shows.
+                    prompt.then_some(sent)
+                }
+            })
+            .max()
+    }
+
+    fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
+        take_under(&mut self.known, path)
     }
 
     /// The next change set, once the folder has been quiet for the debounce or the set's first
     /// change is 30 debounces old.
     pub async fn next(&mut self) -> Option<Result<Vec<Change>, Vec<notify::Error>>> {
         loop {
-            let received = match &self.held {
+            // By the clock, since batches of other files can keep coming while a file is copied.
+            self.look_if_due();
+            let held = self.held.as_ref();
+            let received = match held.map(|held| (held.complete(self.debounce), held.next_look)) {
                 // `timeout_at` polls the channel first, so batches that waited there while the
                 // session was busy still go into sets by when their events happened.
-                Some(held) => {
-                    let complete = held.complete(self.debounce).into();
-                    tokio::time::timeout_at(complete, self.events.recv())
-                        .await
-                        .unwrap_or(None)
+                Some((complete, next_look)) => {
+                    let until = complete.min(next_look).into();
+                    match tokio::time::timeout_at(until, self.events.recv()).await {
+                        Ok(received) => received,
+                        // A look is due, or the set is complete unless the look finds a write.
+                        Err(_) => {
+                            self.look_if_due();
+                            let held = self.held.as_ref();
+                            if held
+                                .is_some_and(|held| Instant::now() < held.complete(self.debounce))
+                            {
+                                continue;
+                            }
+                            None
+                        }
+                    }
                 }
                 None => self.events.recv().await,
             };
-            let events = match received {
-                Some(Ok(events)) => events,
-                Some(Err(errors)) => return Some(Err(errors)),
+            let (sent, events) = match received {
+                Some((sent, Ok(events))) => (sent, events),
+                Some((_, Err(errors))) => return Some(Err(errors)),
                 // The set is complete, or the debouncer stopped.
                 None => return self.held.take().map(|held| Ok(held.changes)),
             };
@@ -334,15 +385,16 @@ impl FolderWatcher {
             let (Some(first), Some(last)) = (times.clone().min(), times.max()) else {
                 continue;
             };
+            let arrived: Vec<PathBuf> = events.iter().filter_map(arrived_at).collect();
             let changes = self.handle(events);
             if changes.is_empty() {
                 continue;
             }
-            let batch = Held {
-                changes,
-                first,
-                last,
-            };
+            let last = arrived
+                .iter()
+                .filter_map(|path| self.written_while_held(path, sent))
+                .fold(last, Instant::max);
+            let batch = Held::new(changes, first, last, Instant::now() + self.debounce / LOOKS);
             match &mut self.held {
                 Some(held) if held.takes(first, self.debounce) => held.add(batch),
                 held => {
@@ -361,9 +413,31 @@ struct Held {
     changes: Vec<Change>,
     first: Instant,
     last: Instant,
+    /// When the watcher looks at the set's files next.
+    next_look: Instant,
+    /// The paths the set created, changed or renamed something to, under the names its later
+    /// renames gave them, without what it deleted.
+    paths: BTreeSet<PathBuf>,
+    /// Each file as the watcher last looked at it.
+    seen: HashMap<PathBuf, Seen>,
 }
 
 impl Held {
+    fn new(changes: Vec<Change>, first: Instant, last: Instant, next_look: Instant) -> Self {
+        let mut paths = BTreeSet::new();
+        for change in &changes {
+            follow(&mut paths, change);
+        }
+        Self {
+            changes,
+            first,
+            last,
+            next_look,
+            paths,
+            seen: HashMap::new(),
+        }
+    }
+
     /// Whether changes from events that began at `first` join the set, which they do unless the
     /// folder was quiet for `debounce` before them or the set has grown for its longest.
     fn takes(&self, first: Instant, debounce: Duration) -> bool {
@@ -373,8 +447,47 @@ impl Held {
     fn add(&mut self, batch: Held) {
         // The debouncer drops a write after a create only while it still holds the create, so
         // a file written again comes in a later batch.
+        for change in &batch.changes {
+            follow(&mut self.paths, change);
+        }
         extend_set(&mut self.changes, batch.changes);
         self.last = self.last.max(batch.last);
+    }
+
+    /// Moves the set's last event to the latest write to a file the set holds, under the name
+    /// it has now and also in a folder it holds, when that write came within a debounce of it.
+    /// The debouncer holds back writes of one kind to a file until they pause, as a program
+    /// that keeps the file open writes them, so a copy that is still running sends no events
+    /// and would otherwise seem quiet. The watcher looks only every `LOOKS`th of a debounce, and
+    /// a write that bridged the pause can be hidden behind a later one by then, so that much
+    /// later still counts. Only files the watcher still knows count, so not those in a folder
+    /// tagged as a cache since, and only when `Seen::written_since` says they were written.
+    fn note_writes(&mut self, root: &Path, known: &BTreeSet<PathBuf>, debounce: Duration) {
+        let mut files: BTreeSet<&PathBuf> = BTreeSet::new();
+        for path in &self.paths {
+            let path = root.join(path);
+            files.extend(
+                known
+                    .range::<Path, _>((Bound::Included(path.as_path()), Bound::Unbounded))
+                    .take_while(|known| known.starts_with(&path)),
+            );
+        }
+        let mut written = Vec::new();
+        for file in files {
+            let Some((at, now)) = file_written(file) else {
+                continue;
+            };
+            let before = self.seen.insert(file.clone(), now);
+            if before.is_some_and(|before| now.written_since(&before)) {
+                written.push(at);
+            }
+        }
+        written.sort();
+        for written in written {
+            if written > self.last && written <= self.last + debounce + debounce / LOOKS {
+                self.last = written;
+            }
+        }
     }
 
     /// When the debouncer has handed on every event that could still join the set.
@@ -389,7 +502,7 @@ impl Held {
 /// Adds `new` to the changes of a set, leaving out a `changed` for a file the set already has as
 /// created or changed, because the model would read it as one more change.
 fn extend_set(set: &mut Vec<Change>, new: impl IntoIterator<Item = Change>) {
-    let mut written = HashSet::new();
+    let mut written = BTreeSet::new();
     // Going through the set again keeps all of it, because a `changed` left out never changes
     // `written`.
     for change in mem::take(set).into_iter().chain(new) {
@@ -400,10 +513,104 @@ fn extend_set(set: &mut Vec<Change>, new: impl IntoIterator<Item = Change>) {
             }
             // A path deleted or moved away comes back only as created or as where a rename
             // went, and a rename brings another file there than the set has written.
-            Change::Renamed { to, .. } => written.retain(|path| !path.starts_with(to)),
+            Change::Renamed { to, .. } => {
+                take_under(&mut written, to);
+            }
             Change::Deleted(_) => {}
         }
         set.push(change);
+    }
+}
+
+/// Follows `change` in `paths`, the names the set's files and folders have now. A rename moves
+/// only the paths under it, so that a set of thousands of renamed files stays quick to follow.
+fn follow(paths: &mut BTreeSet<PathBuf>, change: &Change) {
+    match change {
+        Change::Created(path) | Change::Changed(path) => {
+            paths.insert(path.clone());
+        }
+        Change::Renamed { from, to } => {
+            for path in take_under(paths, from) {
+                let rest = path
+                    .strip_prefix(from)
+                    .expect("paths under it start with it");
+                paths.insert(if rest.as_os_str().is_empty() {
+                    to.clone()
+                } else {
+                    to.join(rest)
+                });
+            }
+            paths.insert(to.clone());
+        }
+        Change::Deleted(path) => {
+            take_under(paths, path);
+        }
+    }
+}
+
+/// Removes `root` and the paths under it from `paths` and gives them back, in a time that grows
+/// with how many there are, not with all of `paths`.
+fn take_under(paths: &mut BTreeSet<PathBuf>, root: &Path) -> Vec<PathBuf> {
+    let under: Vec<PathBuf> = paths
+        .range::<Path, _>((Bound::Included(root), Bound::Unbounded))
+        .take_while(|path| path.starts_with(root))
+        .cloned()
+        .collect();
+    for path in &under {
+        paths.remove(path);
+    }
+    under
+}
+
+/// Where a create or a rename put a file or a folder.
+fn arrived_at(event: &DebouncedEvent) -> Option<PathBuf> {
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            event.paths.first().cloned()
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => event.paths.get(1).cloned(),
+        _ => None,
+    }
+}
+
+/// When the file at `path` was last written, as an instant, or none for a folder, a path that is
+/// gone or a time ahead of the clock, which says nothing about when the file was written.
+fn written_at(path: &Path) -> Option<Instant> {
+    file_written(path).map(|(at, _)| at)
+}
+
+/// When the file at `path` was last written, as `written_at` gives it, and how it looked then.
+fn file_written(path: &Path) -> Option<(Instant, Seen)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    let seen = Seen {
+        size: metadata.len(),
+        modified,
+        accessed: metadata.accessed().ok(),
+    };
+    Some((Instant::now().checked_sub(age)?, seen))
+}
+
+/// A file's size and times as the watcher saw them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seen {
+    size: u64,
+    modified: SystemTime,
+    accessed: Option<SystemTime>,
+}
+
+impl Seen {
+    /// Whether the file was written since it looked like `before`: its modification time moved
+    /// on and its size changed, or its access time is not the new modification time. `touch`
+    /// sets both times to the same instant and writes nothing, while a program that sized the
+    /// file in advance, as some downloads do, writes without changing its size.
+    fn written_since(&self, before: &Seen) -> bool {
+        self.modified > before.modified
+            && (self.size != before.size || self.accessed != Some(self.modified))
     }
 }
 
@@ -778,19 +985,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn serializes_a_path_that_is_not_utf8() {
+    fn serializes_a_path_that_is_not_utf8_and_reads_it_back() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let change = Change::Renamed {
-            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa.csv")),
+            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa\n.csv")),
             to: PathBuf::from("data/a.csv"),
         };
 
+        let json = serde_json::to_value(&change).unwrap();
         assert_eq!(
-            serde_json::to_value(&change).unwrap(),
-            serde_json::json!({ "renamed": { "from": "data/\u{fffd}a.csv", "to": "data/a.csv" } })
+            json,
+            serde_json::json!({ "renamed": { "from": "data/\\xffa\\n.csv", "to": "data/a.csv" } })
         );
+        assert_eq!(serde_json::from_value::<Change>(json).unwrap(), change);
     }
 
     #[tokio::test]
@@ -875,6 +1084,455 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_a_new_file_in_one_set_while_it_is_written() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        // Long enough that a busy machine does not pause the writes for that long.
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        // As a copy writes a large file, for five debounces, opening it for each write while the
+        // session waits for the set. The debouncer drops the writes while it still holds the
+        // file's create.
+        let writer = std::thread::spawn({
+            let video = root.join("interview.mp4");
+            move || {
+                let started = Instant::now();
+                while started.elapsed() < debounce * 5 {
+                    let mut file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&video)
+                        .unwrap();
+                    file.write_all(&[0; 4096]).unwrap();
+                    drop(file);
+                    std::thread::sleep(debounce / 10);
+                }
+            }
+        });
+        // Long enough for the set to come a few debounces after the writes, and a second one.
+        let mut sets = Vec::new();
+        while let Ok(Some(set)) = tokio::time::timeout(debounce * 10, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("interview.mp4"))]]);
+    }
+
+    #[tokio::test]
+    async fn keeps_a_new_file_held_open_in_one_set_while_it_is_written() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        // As `cp` writes, keeping the file open for five debounces. The debouncer then hands on
+        // none of the writes until they pause, while the session waits for the set.
+        let writer = std::thread::spawn({
+            let path = root.join("interview.mp4");
+            move || {
+                let mut video = fs::File::create(path).unwrap();
+                let started = Instant::now();
+                while started.elapsed() < debounce * 5 {
+                    video.write_all(&[0; 4096]).unwrap();
+                    std::thread::sleep(debounce / 10);
+                }
+            }
+        });
+        let mut sets = Vec::new();
+        // Long enough for the set to come a few debounces after the writes, and a second one.
+        while let Ok(Some(set)) = tokio::time::timeout(debounce * 10, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("interview.mp4"))]]);
+    }
+
+    #[tokio::test]
+    async fn counts_writes_to_a_new_file_only_until_its_create_is_handed_on() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        fs::write(root.join("results.csv"), "x").unwrap();
+
+        // The session handles both batches late, once the file holds the second write. That
+        // write came after a pause longer than the debounce, though less than a debounce after
+        // the debouncer handed the create on, so it starts a set of its own.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let event = |kind, time| {
+            DebouncedEvent::new(
+                notify::Event::new(kind).add_path(root.join("results.csv")),
+                time,
+            )
+        };
+        let create = event(EventKind::Create(notify::event::CreateKind::File), start);
+        let edit = event(EventKind::Modify(ModifyKind::Any), start + DEBOUNCE * 3 / 2);
+        batches.send((start + DEBOUNCE, Ok(vec![create]))).unwrap();
+        batches
+            .send((start + DEBOUNCE * 3, Ok(vec![edit])))
+            .unwrap();
+
+        let first = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        let second = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        assert_eq!(
+            [
+                first.unwrap().unwrap().unwrap(),
+                second.unwrap().unwrap().unwrap()
+            ],
+            [
+                [Change::Created(PathBuf::from("results.csv"))],
+                [Change::Changed(PathBuf::from("results.csv"))],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ends_a_set_with_a_file_dated_in_the_future_in_time() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+
+        // As an archive extracted with the dates it was made with, by a clock that ran ahead.
+        let file = fs::File::create(root.join("results.csv")).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        drop(file);
+        let started = Instant::now();
+        let set = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+
+        assert_eq!(
+            set.unwrap().unwrap().unwrap(),
+            [Change::Created(PathBuf::from("results.csv"))]
+        );
+        assert!(started.elapsed() < DEBOUNCE * 10, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn counts_a_write_that_a_later_one_hid_between_two_looks() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(400);
+        let start = Instant::now() - debounce * 10;
+        let names = ["bridged.csv", "paused.csv"];
+        let known: BTreeSet<PathBuf> = names.map(|name| root.join(name)).into();
+        let at = |after: Duration| SystemTime::now() - (Instant::now() - (start + after));
+        for name in names {
+            let file = fs::File::create(root.join(name)).unwrap();
+            std::io::Write::write_all(&mut &file, b"a").unwrap();
+            file.set_modified(at(Duration::ZERO)).unwrap();
+        }
+        let mut held = names.map(|name| {
+            let changes = vec![Change::Created(PathBuf::from(name))];
+            Held::new(changes, start, start, start)
+        });
+        // The first look only learns how the files look.
+        for held in &mut held {
+            held.note_writes(root, &known, debounce);
+        }
+
+        // A write 1.1 debounces after the last one can follow one in between that the watcher
+        // did not see before it, but one 1.5 debounces after it follows a pause.
+        let write = |name: &str, after: Duration| {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(root.join(name))
+                .unwrap();
+            std::io::Write::write_all(&mut file, b"b").unwrap();
+            file.set_modified(at(after)).unwrap();
+        };
+        write("bridged.csv", debounce * 11 / 10);
+        write("paused.csv", debounce * 3 / 2);
+        for held in &mut held {
+            held.note_writes(root, &known, debounce);
+        }
+
+        let [bridged, paused] = held;
+        assert!(
+            bridged.last > start + debounce,
+            "{:?}",
+            bridged.last - start
+        );
+        assert_eq!(paused.last, start);
+    }
+
+    #[test]
+    fn follows_thousands_of_renames_quickly() {
+        let start = Instant::now();
+        let path = |name: String| PathBuf::from(name);
+        let mut held = Held::new(Vec::new(), start, start, start);
+        // As a script that renames 10,000 photos, a batch at a time.
+        for batch in (0..10_000).collect::<Vec<_>>().chunks(100) {
+            let changes = batch
+                .iter()
+                .flat_map(|i| {
+                    [
+                        Change::Created(path(format!("photos/IMG_{i:05}.JPG"))),
+                        Change::Renamed {
+                            from: path(format!("photos/IMG_{i:05}.JPG")),
+                            to: path(format!("photos/site-1-{i:05}.jpg")),
+                        },
+                    ]
+                })
+                .collect();
+            held.add(Held::new(changes, start, start, start));
+        }
+        held.note_writes(Path::new("/nonexistent"), &BTreeSet::new(), DEBOUNCE);
+
+        assert_eq!(held.paths.len(), 10_000);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The sets `watcher` gives while `write` runs on a thread, until none comes for `wait`.
+    async fn sets_while(
+        watcher: &mut FolderWatcher,
+        wait: Duration,
+        write: impl FnOnce() + Send + 'static,
+    ) -> Vec<Vec<Change>> {
+        let writer = std::thread::spawn(write);
+        let mut sets = Vec::new();
+        while let Ok(Some(set)) = tokio::time::timeout(wait, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+        sets
+    }
+
+    #[tokio::test]
+    async fn keeps_a_copy_in_one_set_while_ignored_files_keep_coming() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // Batches of the ignored files keep coming, so the watcher must look at the copy by the
+        // clock, not when the batches pause.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            let mut copy = fs::File::create(root.join("video.mp4")).unwrap();
+            let started = Instant::now();
+            let mut swap = 0;
+            while started.elapsed() < debounce * 10 {
+                copy.write_all(&[0; 4096]).unwrap();
+                swap += 1;
+                fs::write(root.join(format!(".notes-{swap}.swp")), "x").unwrap();
+                std::thread::sleep(debounce / 20);
+            }
+        })
+        .await;
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("video.mp4"))]]);
+    }
+
+    #[tokio::test]
+    async fn ends_a_set_once_its_growing_file_is_in_a_cache() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // The log's folder is tagged as a cache while the log grows, so the log stops counting
+        // and the second file, after a pause longer than the debounce, starts a set of its own.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            fs::write(root.join("results.csv"), "x").unwrap();
+            fs::create_dir(root.join("data")).unwrap();
+            let mut log = fs::File::create(root.join("data/run.log")).unwrap();
+            let started = Instant::now();
+            let (mut tagged, mut second) = (false, false);
+            while started.elapsed() < debounce * 10 {
+                if !tagged && started.elapsed() > debounce * 5 / 2 {
+                    fs::write(root.join("data/CACHEDIR.TAG"), CARGO_TAG).unwrap();
+                    tagged = true;
+                }
+                if !second && started.elapsed() > debounce * 6 {
+                    fs::write(root.join("notes.txt"), "y").unwrap();
+                    second = true;
+                }
+                log.write_all(b"step\n").unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets.len(), 2, "{sets:?}");
+        assert_eq!(sets[1], [Change::Created(PathBuf::from("notes.txt"))]);
+    }
+
+    #[tokio::test]
+    async fn keeps_a_file_in_one_set_when_its_folder_is_renamed_while_it_is_written() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // The writes go on through the open file after its folder gets another name.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            fs::create_dir(root.join("data")).unwrap();
+            let mut log = fs::File::create(root.join("data/run.log")).unwrap();
+            let started = Instant::now();
+            let mut renamed = false;
+            while started.elapsed() < debounce * 10 {
+                if !renamed && started.elapsed() > debounce * 5 / 2 {
+                    fs::rename(root.join("data"), root.join("runs")).unwrap();
+                    renamed = true;
+                }
+                log.write_all(b"step\n").unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets.len(), 1, "{sets:?}");
+    }
+
+    #[tokio::test]
+    async fn keeps_a_file_in_one_set_when_its_existing_folder_is_renamed_while_it_grows() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        fs::create_dir(root.join("data")).unwrap();
+        fs::write(root.join("data/run.log"), "start\n").unwrap();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // The log grows through its open file before and after its folder gets another name.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            let mut log = fs::OpenOptions::new()
+                .append(true)
+                .open(root.join("data/run.log"))
+                .unwrap();
+            let started = Instant::now();
+            let mut renamed = false;
+            while started.elapsed() < debounce * 10 {
+                if !renamed && started.elapsed() > debounce * 5 / 2 {
+                    fs::rename(root.join("data"), root.join("runs")).unwrap();
+                    renamed = true;
+                }
+                log.write_all(b"step\n").unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets.len(), 1, "{sets:?}");
+    }
+
+    #[tokio::test]
+    async fn keeps_a_file_sized_in_advance_in_one_set_while_it_is_written() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // As a download that sets the file's size first and then fills it in, so the size never
+        // changes while it is written.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            let mut file = fs::File::create(root.join("reads.fastq.gz")).unwrap();
+            file.set_len(1 << 20).unwrap();
+            let started = Instant::now();
+            let mut offset = 0;
+            while started.elapsed() < debounce * 8 {
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                file.write_all(&[1; 4096]).unwrap();
+                offset = (offset + 4096) % (1 << 20);
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("reads.fastq.gz"))]]);
+    }
+
+    #[tokio::test]
+    async fn keeps_no_set_open_for_a_file_that_is_only_touched() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // A new time alone writes nothing, so the second file, after a pause longer than the
+        // debounce, starts a set of its own.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            fs::write(root.join("notes.txt"), "x").unwrap();
+            let started = Instant::now();
+            let mut second = false;
+            while started.elapsed() < debounce * 8 {
+                if !second && started.elapsed() > debounce * 6 {
+                    fs::write(root.join("results.csv"), "y").unwrap();
+                    second = true;
+                }
+                // Both times, as `touch` sets them, which the kernel reports as a change to
+                // the file's metadata, not as a write.
+                let now = SystemTime::now();
+                let times = fs::FileTimes::new().set_accessed(now).set_modified(now);
+                let notes = fs::File::open(root.join("notes.txt")).unwrap();
+                notes.set_times(times).unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(
+            sets,
+            [
+                [Change::Created(PathBuf::from("notes.txt"))],
+                [Change::Created(PathBuf::from("results.csv"))],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn starts_a_new_set_for_a_write_after_a_pause() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+
+        // The second write comes while the first set is still held, but after the folder was
+        // quiet for longer than a debounce, so looking at the file must not join them.
+        let writer = std::thread::spawn({
+            let path = root.join("notes.txt");
+            move || {
+                fs::write(&path, "a").unwrap();
+                std::thread::sleep(debounce * 3 / 2);
+                fs::write(&path, "b").unwrap();
+            }
+        });
+        let mut sets = Vec::new();
+        while let Ok(Some(set)) = tokio::time::timeout(debounce * 10, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+
+        assert_eq!(
+            sets,
+            [
+                [Change::Created(PathBuf::from("notes.txt"))],
+                [Change::Changed(PathBuf::from("notes.txt"))],
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn sorts_changes_into_sets_by_when_the_files_were_written() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
@@ -900,7 +1558,7 @@ mod tests {
             // though b.csv was read before a debounce had passed.
             vec![event(read, "b.csv", 5), event(edit, "c.csv", 8)],
         ] {
-            batches.send(Ok(batch)).unwrap();
+            batches.send((Instant::now(), Ok(batch))).unwrap();
         }
 
         assert_eq!(
@@ -995,7 +1653,7 @@ mod tests {
                 event(edit, "notes.txt", start + DEBOUNCE / 2),
             ],
         ] {
-            batches.send(Ok(batch)).unwrap();
+            batches.send((Instant::now(), Ok(batch))).unwrap();
         }
 
         assert_eq!(

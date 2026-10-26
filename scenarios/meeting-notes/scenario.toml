@@ -1,6 +1,0 @@
-description = "A researcher writes notes from a project meeting, which the DMP does not cover."
-
-[[set]]
-changes = [{ created = "notes" }, { created = "notes/2026-10-21-meeting.md" }]
-contradicts = false
-explanation = "Meeting notes are not research data, so the DMP says nothing about them."
