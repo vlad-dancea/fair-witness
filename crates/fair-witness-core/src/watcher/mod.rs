@@ -118,7 +118,8 @@ impl Change {
 
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
-    events: UnboundedReceiver<DebounceEventResult>,
+    /// The debouncer's batches, each with when it handed the batch on.
+    events: UnboundedReceiver<(Instant, DebounceEventResult)>,
     debounce: Duration,
     held: Option<Held>,
     root: PathBuf,
@@ -134,7 +135,7 @@ impl FolderWatcher {
         let (tx, events) = mpsc::unbounded_channel();
         let debounce = debounce.max(SHORTEST_DEBOUNCE);
         let mut debouncer = new_debouncer(debounce, None, move |result| {
-            let _ = tx.send(result);
+            let _ = tx.send((Instant::now(), result));
         })?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
@@ -327,9 +328,9 @@ impl FolderWatcher {
                 }
                 None => self.events.recv().await,
             };
-            let events = match received {
-                Some(Ok(events)) => events,
-                Some(Err(errors)) => return Some(Err(errors)),
+            let (sent, events) = match received {
+                Some((sent, Ok(events))) => (sent, events),
+                Some((_, Err(errors))) => return Some(Err(errors)),
                 // The set is complete, or the debouncer stopped.
                 None => return self.held.take().map(|held| Ok(held.changes)),
             };
@@ -345,7 +346,7 @@ impl FolderWatcher {
             };
             let last = events
                 .iter()
-                .filter_map(|event| written_while_held(event, self.debounce))
+                .filter_map(|event| written_while_held(event, sent))
                 .fold(last, Instant::max);
             let changes = self.handle(events);
             if changes.is_empty() {
@@ -442,11 +443,11 @@ fn extend_set(set: &mut Vec<Change>, new: impl IntoIterator<Item = Change>) {
 }
 
 /// When the file that `event` created was last written while the debouncer still held the
-/// create. The debouncer drops the writes to a new file until it hands the create on, a debounce
-/// and at most a quarter after it, so without this a file still being copied would seem quiet
-/// for that long and the rest of the copy would start a set of its own. Writes after that come
-/// as events of their own, so a later write does not count.
-fn written_while_held(event: &DebouncedEvent, debounce: Duration) -> Option<Instant> {
+/// create, which it handed on at `sent`. The debouncer drops the writes to a new file until it
+/// hands the create on, so without this a file still being copied would seem quiet for a
+/// debounce and the rest of the copy would start a set of its own. Writes after `sent` come as
+/// events of their own, so they do not count here.
+fn written_while_held(event: &DebouncedEvent, sent: Instant) -> Option<Instant> {
     let created = matches!(
         event.kind,
         EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To))
@@ -454,7 +455,7 @@ fn written_while_held(event: &DebouncedEvent, debounce: Duration) -> Option<Inst
     if !created {
         return None;
     }
-    Some(written_at(event.paths.first()?)?.min(event.time + debounce * 5 / 4))
+    Some(written_at(event.paths.first()?)?.min(sent))
 }
 
 /// When the file at `path` was last written, as an instant, or none for a folder or a path that
@@ -1003,6 +1004,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn counts_writes_to_a_new_file_only_until_its_create_is_handed_on() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        fs::write(root.join("results.csv"), "x").unwrap();
+
+        // The session handles both batches late, once the file holds the second write. That
+        // write came after the debouncer handed the create on and more than a debounce after
+        // it, so it starts a set of its own.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let event = |kind, time| {
+            DebouncedEvent::new(
+                notify::Event::new(kind).add_path(root.join("results.csv")),
+                time,
+            )
+        };
+        let create = event(EventKind::Create(notify::event::CreateKind::File), start);
+        let edit = event(
+            EventKind::Modify(ModifyKind::Any),
+            start + DEBOUNCE * 21 / 10,
+        );
+        batches.send((start + DEBOUNCE, Ok(vec![create]))).unwrap();
+        batches
+            .send((start + DEBOUNCE * 3, Ok(vec![edit])))
+            .unwrap();
+
+        let first = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        let second = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        assert_eq!(
+            [
+                first.unwrap().unwrap().unwrap(),
+                second.unwrap().unwrap().unwrap()
+            ],
+            [
+                [Change::Created(PathBuf::from("results.csv"))],
+                [Change::Changed(PathBuf::from("results.csv"))],
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn starts_a_new_set_for_a_write_after_a_pause() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
@@ -1060,7 +1104,7 @@ mod tests {
             // though b.csv was read before a debounce had passed.
             vec![event(read, "b.csv", 5), event(edit, "c.csv", 8)],
         ] {
-            batches.send(Ok(batch)).unwrap();
+            batches.send((Instant::now(), Ok(batch))).unwrap();
         }
 
         assert_eq!(
@@ -1155,7 +1199,7 @@ mod tests {
                 event(edit, "notes.txt", start + DEBOUNCE / 2),
             ],
         ] {
-            batches.send(Ok(batch)).unwrap();
+            batches.send((Instant::now(), Ok(batch))).unwrap();
         }
 
         assert_eq!(
