@@ -293,6 +293,45 @@ impl FolderWatcher {
         set
     }
 
+    /// Looks at the files of the held set if it is time to.
+    fn look_if_due(&mut self) {
+        let Some(held) = &mut self.held else {
+            return;
+        };
+        if Instant::now() < held.next_look {
+            return;
+        }
+        held.note_writes(&self.root, &self.known, self.debounce);
+        held.next_look = Instant::now() + self.debounce / LOOKS;
+    }
+
+    /// When the file that a create or a rename put at `path`, or a file the watcher knows in
+    /// the folder it put there, was last written while the debouncer still held that event,
+    /// which it handed on at `sent`. The debouncer drops the writes to a new file until it hands
+    /// the create on, and holds a rename back for a debounce, so without this a file still being
+    /// copied would seem quiet for that long and the rest of the copy would start a set of its
+    /// own. Only files the watcher reports count, so an ignored file being written keeps no set
+    /// open.
+    fn written_while_held(&self, path: &Path, sent: Instant) -> Option<Instant> {
+        let prompt = Instant::now().saturating_duration_since(sent) <= self.debounce / LOOKS;
+        self.known
+            .range::<Path, _>((Bound::Included(path), Bound::Unbounded))
+            .take_while(|known| known.starts_with(path))
+            .filter_map(|file| written_at(file))
+            .filter_map(|written| {
+                if written <= sent {
+                    Some(written)
+                } else {
+                    // A write after `sent` came as an event of its own and hides when the file
+                    // was written before. Right after `sent`, it shows that the copy was still
+                    // running when the event was handed on. Later, it could also follow a
+                    // pause, which its own event shows.
+                    prompt.then_some(sent)
+                }
+            })
+            .max()
+    }
+
     fn take_subtree(&mut self, path: &Path) -> Vec<PathBuf> {
         let subtree: Vec<PathBuf> = self
             .known
@@ -310,19 +349,24 @@ impl FolderWatcher {
     /// change is 30 debounces old.
     pub async fn next(&mut self) -> Option<Result<Vec<Change>, Vec<notify::Error>>> {
         loop {
-            let received = match self.held.as_ref().map(|held| held.complete(self.debounce)) {
+            // By the clock, since batches of other files can keep coming while a file is copied.
+            self.look_if_due();
+            let held = self.held.as_ref();
+            let received = match held.map(|held| (held.complete(self.debounce), held.next_look)) {
                 // `timeout_at` polls the channel first, so batches that waited there while the
                 // session was busy still go into sets by when their events happened.
-                Some(complete) => {
-                    let look = complete.min(Instant::now() + self.debounce / LOOKS);
-                    match tokio::time::timeout_at(look.into(), self.events.recv()).await {
+                Some((complete, next_look)) => {
+                    let until = complete.min(next_look).into();
+                    match tokio::time::timeout_at(until, self.events.recv()).await {
                         Ok(received) => received,
+                        // A look is due, or the set is complete unless the look finds a write.
                         Err(_) => {
-                            if let Some(held) = &mut self.held {
-                                held.note_writes(&self.root, self.debounce);
-                                if Instant::now() < held.complete(self.debounce) {
-                                    continue;
-                                }
+                            self.look_if_due();
+                            let held = self.held.as_ref();
+                            if held
+                                .is_some_and(|held| Instant::now() < held.complete(self.debounce))
+                            {
+                                continue;
                             }
                             None
                         }
@@ -346,18 +390,20 @@ impl FolderWatcher {
             let (Some(first), Some(last)) = (times.clone().min(), times.max()) else {
                 continue;
             };
-            let last = events
-                .iter()
-                .filter_map(|event| written_while_held(event, sent, self.debounce, &self.filter))
-                .fold(last, Instant::max);
+            let arrived: Vec<PathBuf> = events.iter().filter_map(arrived_at).collect();
             let changes = self.handle(events);
             if changes.is_empty() {
                 continue;
             }
+            let last = arrived
+                .iter()
+                .filter_map(|path| self.written_while_held(path, sent))
+                .fold(last, Instant::max);
             let batch = Held {
                 changes,
                 first,
                 last,
+                next_look: Instant::now() + self.debounce / LOOKS,
             };
             match &mut self.held {
                 Some(held) if held.takes(first, self.debounce) => held.add(batch),
@@ -377,6 +423,8 @@ struct Held {
     changes: Vec<Change>,
     first: Instant,
     last: Instant,
+    /// When the watcher looks at the set's files next.
+    next_look: Instant,
 }
 
 impl Held {
@@ -393,18 +441,20 @@ impl Held {
         self.last = self.last.max(batch.last);
     }
 
-    /// Moves the set's last event to the latest write to a file the set holds, also under the
-    /// name a rename gave it, when that write came within a debounce of it. The debouncer holds
-    /// back writes of one kind to a file until they pause, as a program that keeps the file open
-    /// writes them, so a copy that is still running sends no events and would otherwise seem
-    /// quiet. The watcher looks only every `LOOKS`th of a debounce, and a write that bridged the
-    /// pause can be hidden behind a later one by then, so that much later still counts.
-    fn note_writes(&mut self, root: &Path, debounce: Duration) {
+    /// Moves the set's last event to the latest write to a file the set holds, under the name
+    /// it has now, when that write came within a debounce of it. The debouncer holds back writes
+    /// of one kind to a file until they pause, as a program that keeps the file open writes
+    /// them, so a copy that is still running sends no events and would otherwise seem quiet.
+    /// The watcher looks only every `LOOKS`th of a debounce, and a write that bridged the pause
+    /// can be hidden behind a later one by then, so that much later still counts. Only files
+    /// the watcher still knows count, so not those in a folder tagged as a cache since.
+    fn note_writes(&mut self, root: &Path, known: &BTreeSet<PathBuf>, debounce: Duration) {
         let mut written: Vec<Instant> = self
-            .changes
-            .iter()
-            .filter(|change| !matches!(change, Change::Deleted(_)))
-            .filter_map(|change| written_at(&root.join(change.path())))
+            .written_paths()
+            .into_iter()
+            .map(|path| root.join(path))
+            .filter(|path| known.contains(path))
+            .filter_map(|path| written_at(&path))
             .collect();
         written.sort();
         for written in written {
@@ -412,6 +462,31 @@ impl Held {
                 self.last = written;
             }
         }
+    }
+
+    /// The paths the set created, changed or renamed something to, under the names its later
+    /// renames gave them, also those of a folder they are in, and without what it deleted.
+    fn written_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for change in &self.changes {
+            match change {
+                Change::Created(path) | Change::Changed(path) => paths.push(path.clone()),
+                Change::Renamed { from, to } => {
+                    for path in &mut paths {
+                        if let Ok(rest) = path.strip_prefix(from) {
+                            *path = if rest.as_os_str().is_empty() {
+                                to.clone()
+                            } else {
+                                to.join(rest)
+                            };
+                        }
+                    }
+                    paths.push(to.clone());
+                }
+                Change::Deleted(deleted) => paths.retain(|path| !path.starts_with(deleted)),
+            }
+        }
+        paths
     }
 
     /// When the debouncer has handed on every event that could still join the set.
@@ -444,36 +519,15 @@ fn extend_set(set: &mut Vec<Change>, new: impl IntoIterator<Item = Change>) {
     }
 }
 
-/// When the file that `event` created, or gave its name by a rename, was last written while the
-/// debouncer still held the event, which it handed on at `sent`. The debouncer drops the writes
-/// to a new file until it hands the create on, and holds a rename back for a debounce, so
-/// without this a file still being copied would seem quiet for that long and the rest of the
-/// copy would start a set of its own.
-fn written_while_held(
-    event: &DebouncedEvent,
-    sent: Instant,
-    debounce: Duration,
-    filter: &Filter,
-) -> Option<Instant> {
-    let path = match event.kind {
+/// Where a create or a rename put a file or a folder.
+fn arrived_at(event: &DebouncedEvent) -> Option<PathBuf> {
+    match event.kind {
         EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-            event.paths.first()?
+            event.paths.first().cloned()
         }
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => event.paths.get(1)?,
-        _ => return None,
-    };
-    // An ignored file being written must not keep the set open.
-    if filter.skips(path, false) {
-        return None;
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => event.paths.get(1).cloned(),
+        _ => None,
     }
-    let written = written_at(path)?;
-    if written <= sent {
-        return Some(written);
-    }
-    // A write after `sent` came as an event of its own and hides when the file was written
-    // before. Right after `sent`, it shows that the copy was still running when the event was
-    // handed on. Later, it could also follow a pause, which its own event shows.
-    (Instant::now().saturating_duration_since(sent) <= debounce / LOOKS).then_some(sent)
 }
 
 /// When the file at `path` was last written, as an instant, or none for a folder, a path that is
@@ -1103,15 +1157,19 @@ mod tests {
             changes: vec![Change::Created(PathBuf::from(name))],
             first: start,
             last: start,
+            next_look: start,
         };
+        let known: BTreeSet<PathBuf> = ["bridged.csv", "paused.csv"]
+            .map(|name| root.join(name))
+            .into();
         // A write 1.1 debounces after the last one can follow one in between that the watcher
         // did not see before it, but one 1.5 debounces after it follows a pause.
         written("bridged.csv", debounce * 11 / 10);
         written("paused.csv", debounce * 3 / 2);
         let (mut bridged, mut paused) = (held("bridged.csv"), held("paused.csv"));
 
-        bridged.note_writes(root, debounce);
-        paused.note_writes(root, debounce);
+        bridged.note_writes(root, &known, debounce);
+        paused.note_writes(root, &known, debounce);
 
         assert!(
             bridged.last > start + debounce,
@@ -1209,6 +1267,113 @@ mod tests {
                 [Change::Created(PathBuf::from("notes.txt"))],
             ]
         );
+    }
+
+    /// The sets `watcher` gives while `write` runs on a thread, until none comes for `wait`.
+    async fn sets_while(
+        watcher: &mut FolderWatcher,
+        wait: Duration,
+        write: impl FnOnce() + Send + 'static,
+    ) -> Vec<Vec<Change>> {
+        let writer = std::thread::spawn(write);
+        let mut sets = Vec::new();
+        while let Ok(Some(set)) = tokio::time::timeout(wait, watcher.next()).await {
+            sets.push(set.unwrap());
+        }
+        writer.join().unwrap();
+        sets
+    }
+
+    #[tokio::test]
+    async fn keeps_a_copy_in_one_set_while_ignored_files_keep_coming() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // Batches of the ignored files keep coming, so the watcher must look at the copy by the
+        // clock, not when the batches pause.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            let mut copy = fs::File::create(root.join("video.mp4")).unwrap();
+            let started = Instant::now();
+            let mut swap = 0;
+            while started.elapsed() < debounce * 10 {
+                copy.write_all(&[0; 4096]).unwrap();
+                swap += 1;
+                fs::write(root.join(format!(".notes-{swap}.swp")), "x").unwrap();
+                std::thread::sleep(debounce / 20);
+            }
+        })
+        .await;
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("video.mp4"))]]);
+    }
+
+    #[tokio::test]
+    async fn ends_a_set_once_its_growing_file_is_in_a_cache() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // The log's folder is tagged as a cache while the log grows, so the log stops counting
+        // and the second file, after a pause longer than the debounce, starts a set of its own.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            fs::write(root.join("results.csv"), "x").unwrap();
+            fs::create_dir(root.join("data")).unwrap();
+            let mut log = fs::File::create(root.join("data/run.log")).unwrap();
+            let started = Instant::now();
+            let (mut tagged, mut second) = (false, false);
+            while started.elapsed() < debounce * 10 {
+                if !tagged && started.elapsed() > debounce * 5 / 2 {
+                    fs::write(root.join("data/CACHEDIR.TAG"), CARGO_TAG).unwrap();
+                    tagged = true;
+                }
+                if !second && started.elapsed() > debounce * 6 {
+                    fs::write(root.join("notes.txt"), "y").unwrap();
+                    second = true;
+                }
+                log.write_all(b"step\n").unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets.len(), 2, "{sets:?}");
+        assert_eq!(sets[1], [Change::Created(PathBuf::from("notes.txt"))]);
+    }
+
+    #[tokio::test]
+    async fn keeps_a_file_in_one_set_when_its_folder_is_renamed_while_it_is_written() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // The writes go on through the open file after its folder gets another name.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            fs::create_dir(root.join("data")).unwrap();
+            let mut log = fs::File::create(root.join("data/run.log")).unwrap();
+            let started = Instant::now();
+            let mut renamed = false;
+            while started.elapsed() < debounce * 10 {
+                if !renamed && started.elapsed() > debounce * 5 / 2 {
+                    fs::rename(root.join("data"), root.join("runs")).unwrap();
+                    renamed = true;
+                }
+                log.write_all(b"step\n").unwrap();
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets.len(), 1, "{sets:?}");
     }
 
     #[tokio::test]
