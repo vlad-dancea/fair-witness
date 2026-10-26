@@ -1,17 +1,16 @@
 use anyhow::{Result, anyhow, bail};
-use reqwest::Client;
 
 use super::{Damap, InstanceConfig};
 use crate::auth::{Oidc, Prompts, Tokens};
 use crate::project::{Config, DamapConfig, NOT_SET_UP, Project};
 
 /// Logs in to the DAMAP `project` is set up with, with the saved session while it lasts.
-pub async fn resume(project: &Project, http: Client, prompts: &dyn Prompts) -> Result<Damap> {
+pub async fn resume(project: &Project, prompts: &dyn Prompts) -> Result<Damap> {
     let Some(config) = project.config()? else {
         bail!(NOT_SET_UP);
     };
-    let (damap, instance) = reach(&http, &config.damap.frontend_url).await?;
-    let oidc = discover(http, &damap, &instance, prompts).await?;
+    let (damap, instance) = reach(&config.damap.frontend_url).await?;
+    let oidc = discover(&damap, &instance, prompts).await?;
     let tokens = match project.credentials()?.refresh_token {
         Some(refresh_token) => match oidc.refresh(&refresh_token).await {
             Ok(tokens) => tokens,
@@ -28,8 +27,9 @@ pub async fn resume(project: &Project, http: Client, prompts: &dyn Prompts) -> R
     save_session(project, damap, tokens, prompts)
 }
 
-pub async fn reach(http: &Client, url: &str) -> Result<(Damap, InstanceConfig)> {
-    let damap = Damap::new(http.clone(), url);
+pub async fn reach(url: &str) -> Result<(Damap, InstanceConfig)> {
+    let damap = Damap::new(url)
+        .map_err(|e| anyhow!("{e:#}\nTo use a different URL, run `fair-witness setup`."))?;
     let instance = damap.instance_config().await.map_err(|e| {
         anyhow!("{e:#}\nIs DAMAP running? To use a different URL, run `fair-witness setup`.")
     })?;
@@ -38,14 +38,13 @@ pub async fn reach(http: &Client, url: &str) -> Result<(Damap, InstanceConfig)> 
 
 /// Finds the login server of the DAMAP `instance` belongs to.
 pub async fn discover(
-    http: Client,
     damap: &Damap,
     instance: &InstanceConfig,
     prompts: &dyn Prompts,
 ) -> Result<Oidc> {
     let title = instance.app_title.as_deref().unwrap_or("DAMAP");
     prompts.notice(&format!("Connected to {title} at {}", damap.url()));
-    Oidc::discover(http, &instance.issuer, &instance.client_id, &instance.scope).await
+    Oidc::discover(&instance.issuer, &instance.client_id, &instance.scope).await
 }
 
 /// Saves DAMAP's URL and the login in `project`, and logs `damap` in with `tokens`.

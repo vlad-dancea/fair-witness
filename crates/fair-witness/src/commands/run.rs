@@ -7,13 +7,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
+use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
-use fair_witness_core::review::{Checked, Reviewer, in_the_clear};
+use fair_witness_core::review::{Checked, Reviewer};
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::Failure;
-use crate::setup::damap::{TerminalPrompts, http_client, web_url};
+use crate::setup::damap::{TerminalPrompts, web_url};
 use crate::setup::model::unencrypted;
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::{self, ModelSettings};
@@ -302,7 +303,7 @@ async fn download_dmp(
         let damap = if headless {
             saved_session(project).await?
         } else {
-            damap::resume(project, http_client()?, &TerminalPrompts).await?
+            damap::resume(project, &TerminalPrompts).await?
         };
         let name = damap
             .list_dmps()
@@ -349,9 +350,8 @@ async fn download_dmp(
 /// Logs in to DAMAP with the saved session only, since nobody can log in during a headless run.
 async fn saved_session(project: &Project) -> Result<Damap> {
     let config = project.config()?.context(NOT_SET_UP)?;
-    let http = http_client()?;
-    let (damap, instance) = damap::reach(&http, &config.damap.frontend_url).await?;
-    let oidc = damap::discover(http, &damap, &instance, &ErrorOutput).await?;
+    let (damap, instance) = damap::reach(&config.damap.frontend_url).await?;
+    let oidc = damap::discover(&damap, &instance, &ErrorOutput).await?;
     let refresh_token = project
         .credentials()?
         .refresh_token
