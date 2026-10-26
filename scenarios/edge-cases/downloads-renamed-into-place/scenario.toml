@@ -1,0 +1,22 @@
+description = "Browsers download into a temporary file and rename it to a name that does not exist yet. A quick download shows up only as the file it becomes. A .part file that stays for longer than a debounce shows up as created and then as renamed."
+
+[[set]]
+changes = [{ created = "campaign-2026-11.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "campaign-2026-11.csv" } }]
+
+[[set]]
+changes = [{ created = "campaign-2026-12.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+
+[[set]]
+changes = [{ created = "campaign-2027-01.csv.part" }]
+contradicts = false
+explanation = "A download that has not finished yet holds soil measurements as CSV, which the DMP plans."
+
+[[set]]
+changes = [{ renamed = { from = "campaign-2027-01.csv.part", to = "campaign-2027-01.csv" } }]
+contradicts = false
+explanation = "The finished download is soil measurements as CSV, which the DMP plans."

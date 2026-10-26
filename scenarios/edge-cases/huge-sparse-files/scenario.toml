@@ -1,0 +1,26 @@
+description = "A researcher copies 12 files of 150 to 250 MB and a small log in one go. The large files are sparse, so they take up no disk, and read_file shows only the size and first bytes of such a binary file."
+
+[[set]]
+changes = [
+  { created = "drone" },
+  { created = "drone/2026-09-24-roof-16" },
+  { created = "drone/2026-09-24-roof-16/tile-01.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-02.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-03.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-04.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-05.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-06.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-07.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-08.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-09.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-10.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-11.tif" },
+  { created = "drone/2026-09-24-roof-16/tile-12.tif" },
+  { created = "drone/2026-09-24-roof-16/flight-log.csv" },
+]
+contradicts = false
+explanation = "The DMP keeps each flight in one folder, as 10 to 15 GeoTIFF tiles of 150 to 250 MB and a CSV flight log."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = "drone/2026-09-24-roof-16/tile-01.tif" } },
+  { tool = "read_file", arguments = { path = "drone/2026-09-24-roof-16/flight-log.csv" } },
+]

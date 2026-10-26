@@ -1,0 +1,22 @@
+description = "A researcher makes a folder for a sequencing run and downloads its 80 gzip-compressed FASTQ files of 14 to 23 MB and their checksums with wget, which takes about 25 seconds. Later they delete the reads the sequencer could not assign to a sample. The DMP is small."
+
+[[set]]
+changes = [{ created = "reads" }, { created = "reads/2026-10-run" }]
+contradicts = false
+explanation = "Empty folders hold no data the DMP covers."
+
+[[set]]
+contradicts = false
+explanation = "The DMP plans the 16S amplicon reads of each soil sample as compressed FASTQ."
+fake_tool_calls = [
+  { tool = "list_dir", arguments = { path = "reads/2026-10-run" } },
+  { tool = "read_file", arguments = { path = "reads/2026-10-run/S01_S1_L001_R1_001.fastq.gz" } },
+]
+
+[[set]]
+changes = [
+  { deleted = "reads/2026-10-run/Undetermined_S40_L001_R1_001.fastq.gz" },
+  { deleted = "reads/2026-10-run/Undetermined_S40_L001_R2_001.fastq.gz" },
+]
+contradicts = false
+explanation = "Deleting reads that belong to no sample removes nothing the DMP plans."

@@ -1,0 +1,14 @@
+description = "A researcher swaps two files through a temporary name, then renames a file twice in a row. Within a set, the renames come out as where each file started and where it ended up."
+
+[[set]]
+changes = [
+  { renamed = { from = "site-a.csv", to = "site-b.csv" } },
+  { renamed = { from = "site-b.csv", to = "site-a.csv" } },
+]
+contradicts = false
+explanation = "Renaming measurement files changes nothing the DMP covers."
+
+[[set]]
+changes = [{ renamed = { from = "site-c.csv", to = "site-e.csv" } }]
+contradicts = false
+explanation = "Renaming a measurement file changes nothing the DMP covers."
