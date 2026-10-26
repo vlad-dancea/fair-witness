@@ -1,0 +1,19 @@
+description = "A researcher exports the second wave of the resident survey from LimeSurvey with the participants' names and email addresses by mistake, moves it from Downloads into the project, opens it in LibreOffice Calc, whose lock file is left out, and closes it, then replaces it with an export without them. The DMP is large, with eight datasets."
+
+[[set]]
+changes = [{ created = "survey/responses-wave-2.csv" }]
+contradicts = true
+dmp_field = [
+  "dataset[2].security_and_privacy",
+  "dataset[2].description",
+  "dataset[2].preservation_statement",
+  "ethical_issues_description",
+]
+explanation = "The DMP says names and email addresses never leave LimeSurvey and the project stores only exports with a pseudonymous respondent code, but this export holds both."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "survey/responses-wave-2.csv" } }]
+
+[[set]]
+changes = [{ changed = "survey/responses-wave-2.csv" }]
+contradicts = false
+explanation = "The new export holds only the pseudonymous respondent codes, as the DMP plans."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "survey/responses-wave-2.csv" } }]

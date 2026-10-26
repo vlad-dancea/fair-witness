@@ -1,0 +1,17 @@
+description = "Browsers download into a temporary file and rename it to its final name. The temporary file is left out, so a download shows up only as the file it becomes, also when its .part file stays for longer than a debounce."
+
+[[set]]
+changes = [{ created = "campaign-2026-11.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "campaign-2026-11.csv" } }]
+
+[[set]]
+changes = [{ created = "campaign-2026-12.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+
+[[set]]
+changes = [{ created = "campaign-2027-01.csv" }]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."

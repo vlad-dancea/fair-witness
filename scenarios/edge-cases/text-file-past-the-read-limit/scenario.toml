@@ -1,0 +1,13 @@
+description = "A researcher saves a CSV file of about 180 KB, far more than the 16 KiB read_file returns, so the model sees only its start and a note that the rest was cut."
+
+[[set]]
+changes = [
+  { created = "stations" },
+  { created = "stations/roof-15-north" },
+  { created = "stations/roof-15-north/station-2-2026-09.csv" },
+]
+contradicts = false
+explanation = "The DMP keeps the weather station readings as one CSV file per station and month with exactly these columns."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = "stations/roof-15-north/station-2-2026-09.csv" } },
+]
