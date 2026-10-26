@@ -600,6 +600,12 @@ mod tests {
                 (Kind::Realistic, "notes"),
             ]
         );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            root.path().join("edge-cases/odd-names"),
+            root.path().join("realistic/linked"),
+        )
+        .unwrap();
         let real = load(root.path(), &[], false).unwrap();
         assert_eq!(names(&real), [(Kind::Realistic, "notes")]);
         let error = load(root.path(), &["names".to_string()], false)

@@ -171,7 +171,12 @@ pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
             .with_context(|| format!("could not read {}", folder.display()))?;
         let mut dirs = Vec::new();
         for entry in entries {
-            let path = entry?.path();
+            let entry = entry?;
+            // A link could make an edge case count as realistic and reach a real model.
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path();
             if path.join(FILE).is_file() {
                 dirs.push(path);
             }
