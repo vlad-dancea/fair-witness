@@ -364,7 +364,8 @@ mod tests {
                 effort: Effort::default(),
             },
             None,
-        );
+        )
+        .unwrap();
         let project = Project::new(root.path().to_path_buf());
         let log = project.run_log().unwrap().events;
         let mut events = Session::new(project)
