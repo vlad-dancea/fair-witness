@@ -166,8 +166,13 @@ pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
         let folder = root.join(kind.folder());
         // A link, here or for a scenario below, could make edge cases count as realistic and
         // send them to a real model.
-        if !fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir()) {
-            continue;
+        match fs::symlink_metadata(&folder) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("could not read {}", folder.display()));
+            }
         }
         let entries = fs::read_dir(&folder)
             .with_context(|| format!("could not read {}", folder.display()))?;
