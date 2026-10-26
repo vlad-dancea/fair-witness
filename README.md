@@ -56,7 +56,7 @@ Run `fair-witness run` to start watching this folder.
 Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to ignore.
 ```
 
-Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
+Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The saved API key goes only to the API it was saved for. For that API, an empty answer keeps the key, and so does `--ai-url` with the same URL and no `--api-key`. Another API gets only a key you give for it, and the saved one is replaced, or removed when you give none. To remove the saved key and keep the API, run `fair-witness setup --api-key ''`. It removes the key before it contacts the API, so the key is gone even when an API that needs one then refuses to answer. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
 Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
 
@@ -72,7 +72,7 @@ The DAMAP URL and the AI settings can also be passed as flags or environment var
 |---|---|---|
 | `--url` | | DAMAP URL |
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API |
-| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it, or empty to remove the saved one |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use |
 
 ```sh

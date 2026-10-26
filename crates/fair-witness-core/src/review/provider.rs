@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, Endpoint};
-use genai::{Client, ModelIden, ServiceTarget, WebConfig, webc};
+use genai::{Client, Headers, ModelIden, ServiceTarget, WebConfig, webc};
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
@@ -12,6 +12,7 @@ use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
 use serde::Deserialize;
 use serde_json::Value;
+use url::Url;
 
 use crate::net;
 
@@ -72,7 +73,16 @@ pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
     .build()
     .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
     let endpoint = Endpoint::from_owned(base_url(url));
-    let auth = AuthData::from_single(api_key.unwrap_or_default());
+    let auth = match api_key {
+        Some(key) => AuthData::from_single(key),
+        // genai's OpenAI adapter sends `Authorization: Bearer ` even without a key, which an API
+        // that takes none can refuse. The override sends the chat request to the URL genai would
+        // use, without that header, the only one the adapter sets.
+        None => AuthData::RequestOverride {
+            url: chat_url(url)?,
+            headers: Headers::default(),
+        },
+    };
     Client::builder()
         .with_reqwest(http)
         .with_service_target_resolver_fn(move |target: ServiceTarget| {
@@ -84,6 +94,15 @@ pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
         })
         .build()
         .with_context(|| format!("could not set up a client for the AI API at {url}"))
+}
+
+/// Where genai's OpenAI adapter sends a chat request for the API at `url`.
+fn chat_url(url: &str) -> Result<String> {
+    let base = Url::parse(&base_url(url))
+        .with_context(|| format!("{url} is not a web address like https://example.org"))?;
+    let mut chat = base.join("chat/completions")?;
+    chat.set_query(base.query());
+    Ok(chat.to_string())
 }
 
 /// A request the API refused with 429 Too Many Requests.
@@ -266,8 +285,10 @@ fn wait(seconds: f64) -> Option<Duration> {
 mod tests {
     use serde_json::json;
 
+    use genai::chat::{ChatMessage, ChatRequest};
+
     use super::*;
-    use crate::testing::{EFFORT_NOT_ALLOWED, Reply, fake_model, redirect};
+    use crate::testing::{EFFORT_NOT_ALLOWED, Reply, fake_model, one_token, redirect};
 
     #[tokio::test]
     async fn lists_the_models_a_server_offers() {
@@ -301,6 +322,38 @@ mod tests {
 
         assert_eq!(list_models(&url, None).await.unwrap(), ["qwen3:8b"]);
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sends_an_authorization_header_only_with_a_key() {
+        let (url, server) = fake_model(vec![one_token(), one_token()]);
+        for api_key in [Some("sk-test".to_string()), None] {
+            openai_compatible(&url, api_key)
+                .unwrap()
+                .exec_chat(
+                    "small",
+                    ChatRequest::new(vec![ChatMessage::user("Hi")]),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let requests = server.join().unwrap();
+        let heads: Vec<(&str, bool)> = requests
+            .iter()
+            .map(|(head, _)| {
+                let line = head.lines().next().unwrap_or_default();
+                (line, head.to_lowercase().contains("authorization:"))
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            [
+                ("POST /v1/chat/completions HTTP/1.1", true),
+                ("POST /v1/chat/completions HTTP/1.1", false)
+            ]
+        );
     }
 
     #[test]
