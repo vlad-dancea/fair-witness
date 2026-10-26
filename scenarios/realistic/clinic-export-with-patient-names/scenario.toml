@@ -1,8 +1,19 @@
-description = "A researcher saves the clinic's raw export, with patient names and birth dates, next to the anonymised data."
+description = "A researcher saves the clinic's monthly export, a ZIP attachment, into the data folder, extracts it a few seconds later and deletes the archive. The export names the patients and their birth dates. The DMP is small."
+
+[[set]]
+changes = [{ created = "data/clinic-export-2026-10.zip" }]
+contradicts = false
+explanation = "The DMP expects monthly exports from the clinic, and nothing in an archive's name or first bytes contradicts it."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/clinic-export-2026-10.zip" } }]
 
 [[set]]
 changes = [{ created = "data/clinic-export-2026-10.csv" }]
 contradicts = true
-dmp_field = "dataset[0].personal_data"
+dmp_field = ["dataset[0].personal_data", "ethical_issues_description"]
 explanation = "The export names the patients and their birth dates, but the DMP says the clinic anonymises every record and the project holds no personal data."
 fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/clinic-export-2026-10.csv" } }]
+
+[[set]]
+changes = [{ deleted = "data/clinic-export-2026-10.zip" }]
+contradicts = false
+explanation = "Deleting the archive after extracting it removes nothing the DMP plans."
