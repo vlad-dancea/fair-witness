@@ -458,8 +458,8 @@ fn written_while_held(event: &DebouncedEvent, sent: Instant) -> Option<Instant> 
     Some(written_at(event.paths.first()?)?.min(sent))
 }
 
-/// When the file at `path` was last written, as an instant, or none for a folder or a path that
-/// is gone. A time ahead of the clock counts as now.
+/// When the file at `path` was last written, as an instant, or none for a folder, a path that is
+/// gone or a time ahead of the clock, which says nothing about when the file was written.
 fn written_at(path: &Path) -> Option<Instant> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
@@ -467,7 +467,7 @@ fn written_at(path: &Path) -> Option<Instant> {
     }
     let age = SystemTime::now()
         .duration_since(metadata.modified().ok()?)
-        .unwrap_or_default();
+        .ok()?;
     Instant::now().checked_sub(age)
 }
 
@@ -1044,6 +1044,27 @@ mod tests {
                 [Change::Changed(PathBuf::from("results.csv"))],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn ends_a_set_with_a_file_dated_in_the_future_in_time() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+
+        // As an archive extracted with the dates it was made with, by a clock that ran ahead.
+        let file = fs::File::create(root.join("results.csv")).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        drop(file);
+        let started = Instant::now();
+        let set = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+
+        assert_eq!(
+            set.unwrap().unwrap().unwrap(),
+            [Change::Created(PathBuf::from("results.csv"))]
+        );
+        assert!(started.elapsed() < DEBOUNCE * 10, "{:?}", started.elapsed());
     }
 
     #[tokio::test]
