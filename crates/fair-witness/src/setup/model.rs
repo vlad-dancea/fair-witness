@@ -3,9 +3,8 @@ use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::project::{AiConfig, Effort, Project};
 use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
-use reqwest::Client;
 
-use super::damap::{http_client, web_url};
+use super::damap::web_url;
 use crate::tui::model_panel::describe;
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
@@ -35,19 +34,17 @@ pub struct ModelArgs {
 
 pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     let mut config = project.config()?.context("this folder is not set up yet")?;
-    let http = http_client()?;
     let mut previous = config.ai.take();
     let saved_key = project.credentials()?.api_key;
     let (url, api_key, models) = match args.ai_url {
         Some(url) => {
             let url = web_url(&url)?;
             let api_key = args.api_key.or(saved_key);
-            let models = review::list_models(&http, &url, api_key.as_deref()).await?;
+            let models = review::list_models(&url, api_key.as_deref()).await?;
             (url, api_key, models)
         }
         None => {
             ask_for_api(
-                &http,
                 previous.as_ref().map(|ai| ai.url.clone()),
                 args.api_key,
                 saved_key,
@@ -138,7 +135,6 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
 }
 
 async fn ask_for_api(
-    http: &Client,
     previous: Option<String>,
     given_key: Option<String>,
     saved_key: Option<String>,
@@ -172,7 +168,7 @@ async fn ask_for_api(
                     .or_else(|| saved_key.clone())
             }
         };
-        match review::list_models(http, &url, api_key.as_deref()).await {
+        match review::list_models(&url, api_key.as_deref()).await {
             Ok(models) => return Ok((url, api_key, models)),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }

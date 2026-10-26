@@ -14,8 +14,6 @@ use ratatui::widgets::{
 use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
 use tokio::task::JoinHandle;
 
-use crate::setup::damap::http_client;
-
 pub struct ModelSettings {
     pub project: Project,
     pub reviewer: Arc<Reviewer>,
@@ -112,10 +110,7 @@ impl ModelPanel {
         let url = settings.url.clone();
         let api_key = settings.api_key.clone();
         tokio::spawn(async move {
-            let listed = match http_client() {
-                Ok(http) => review::list_models(&http, &url, api_key.as_deref()).await,
-                Err(e) => Err(e),
-            };
+            let listed = review::list_models(&url, api_key.as_deref()).await;
             let _ = sender.send(listed);
         });
         let current = settings.reviewer.choice();
