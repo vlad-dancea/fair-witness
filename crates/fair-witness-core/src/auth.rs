@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::net::{self, in_the_clear};
+
 /// What logging in to DAMAP asks of the person in front of the screen.
 pub trait Prompts {
     /// Tells them how the login goes, such as which DAMAP it reached.
@@ -14,6 +16,9 @@ pub trait Prompts {
 }
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// How long a request to the login server may take.
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Deserialize)]
 pub struct Tokens {
@@ -52,8 +57,18 @@ impl std::fmt::Display for OAuthError {
     }
 }
 
+/// Says that the login server at `url` would get the login unencrypted.
+fn unencrypted(url: &str) -> String {
+    format!(
+        "DAMAP's login server at {url} uses plain HTTP to another machine, which would send the \
+         login unencrypted\nAsk the people who run this DAMAP to serve its login over https://"
+    )
+}
+
 pub struct Oidc {
-    http: Client,
+    /// For the token endpoint, which may be on another machine than the issuer and so need
+    /// another proxy setting.
+    token_http: Client,
     client_id: String,
     scope: String,
     token_endpoint: String,
@@ -61,17 +76,17 @@ pub struct Oidc {
 }
 
 impl Oidc {
-    pub async fn discover(
-        http: Client,
-        issuer: &str,
-        client_id: &str,
-        scope: &str,
-    ) -> Result<Self> {
+    pub async fn discover(issuer: &str, client_id: &str, scope: &str) -> Result<Self> {
+        // The issuer is asked where to log in, so an answer read and changed along the way could
+        // send the login anywhere.
+        if in_the_clear(issuer) {
+            bail!(unencrypted(issuer));
+        }
         let url = format!(
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let discovery: Discovery = http
+        let discovery: Discovery = net::client(issuer, TIMEOUT)?
             .get(&url)
             .send()
             .await
@@ -80,8 +95,19 @@ impl Oidc {
             .json()
             .await
             .with_context(|| format!("unexpected OpenID configuration at {url}"))?;
+        let endpoints = [
+            Some(&discovery.token_endpoint),
+            discovery.device_authorization_endpoint.as_ref(),
+        ];
+        if let Some(endpoint) = endpoints
+            .into_iter()
+            .flatten()
+            .find(|url| in_the_clear(url))
+        {
+            bail!(unencrypted(endpoint));
+        }
         Ok(Self {
-            http,
+            token_http: net::client(&discovery.token_endpoint, TIMEOUT)?,
             client_id: client_id.to_string(),
             scope: scope.to_string(),
             token_endpoint: discovery.token_endpoint,
@@ -121,8 +147,7 @@ impl Oidc {
         &self,
         endpoint: &str,
     ) -> Result<Result<DeviceAuthorization, OAuthError>> {
-        let response = self
-            .http
+        let response = net::client(endpoint, TIMEOUT)?
             .post(endpoint)
             .form(&[
                 ("client_id", self.client_id.as_str()),
@@ -147,6 +172,10 @@ impl Oidc {
             .verification_uri_complete
             .as_deref()
             .unwrap_or(&authorization.verification_uri);
+        // The browser would ask for the password there.
+        if in_the_clear(link) {
+            bail!(unencrypted(link));
+        }
         prompts.confirm_code(link, &authorization.user_code);
 
         let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
@@ -187,7 +216,7 @@ impl Oidc {
         ];
         form.extend_from_slice(params);
         let response = self
-            .http
+            .token_http
             .post(&self.token_endpoint)
             .form(&form)
             .send()
@@ -211,5 +240,90 @@ impl Oidc {
                 .await
                 .context("unexpected error from the login server")?))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::testing::fake_model;
+
+    /// Keeps the links it is asked to open in the browser.
+    #[derive(Default)]
+    struct Browser(RefCell<Vec<String>>);
+
+    impl Prompts for Browser {
+        fn notice(&self, _: &str) {}
+
+        fn confirm_code(&self, link: &str, _: &str) {
+            self.0.borrow_mut().push(link.to_string());
+        }
+
+        fn username_and_password(&self) -> Result<(String, String)> {
+            bail!("not asked in this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_in_over_plain_http_only_to_this_machine() {
+        let elsewhere = "http://login.example.org/realms/damap";
+        let here = "http://localhost:9/realms/damap";
+        // What a login server on this machine says, each in turn.
+        let (issuer, server) = fake_model(vec![
+            json!({ "token_endpoint": format!("{elsewhere}/token") }),
+            json!({
+                "token_endpoint": format!("{here}/token"),
+                "device_authorization_endpoint": format!("{elsewhere}/device"),
+            }),
+            json!({
+                "token_endpoint": format!("{here}/token"),
+                "device_authorization_endpoint": "https://login.example.org/device",
+            }),
+        ]);
+        let mut refused = Vec::new();
+        for issuer in [elsewhere, &issuer, &issuer, &issuer] {
+            let discovered = Oidc::discover(issuer, "damap", "openid").await;
+            refused.push(discovered.err().map(|e| format!("{e:#}")));
+        }
+
+        assert_eq!(
+            refused,
+            [
+                Some(unencrypted(elsewhere)),
+                Some(unencrypted(&format!("{elsewhere}/token"))),
+                Some(unencrypted(&format!("{elsewhere}/device"))),
+                None,
+            ]
+        );
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn opens_a_login_page_over_plain_http_only_on_this_machine() {
+        let page = "http://login.example.org/device?user_code=ABCD-EFGH";
+        let (device_endpoint, device) = fake_model(vec![json!({
+            "device_code": "secret",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://login.example.org/device",
+            "verification_uri_complete": page,
+            "expires_in": 60,
+        })]);
+        let (issuer, discovery) = fake_model(vec![json!({
+            "token_endpoint": "http://localhost:9/token",
+            "device_authorization_endpoint": device_endpoint,
+        })]);
+        let oidc = Oidc::discover(&issuer, "damap", "openid").await.unwrap();
+        let browser = Browser::default();
+
+        let refused = oidc.login(&browser).await.err().map(|e| format!("{e:#}"));
+
+        assert_eq!(refused, Some(unencrypted(page)));
+        assert!(browser.0.borrow().is_empty());
+        assert_eq!(discovery.join().unwrap().len(), 1);
+        assert_eq!(device.join().unwrap().len(), 1);
     }
 }
