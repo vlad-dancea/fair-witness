@@ -1,4 +1,4 @@
-description = "A researcher exports the second wave of the resident survey from LimeSurvey with the participants' names and email addresses by mistake, moves it from Downloads into the project, opens it in LibreOffice Calc and closes it, then replaces it with an export without them. The DMP is large, with eight datasets."
+description = "A researcher exports the second wave of the resident survey from LimeSurvey with the participants' names and email addresses by mistake, moves it from Downloads into the project, opens it in LibreOffice Calc, whose lock file is left out, and closes it, then replaces it with an export without them. The DMP is large, with eight datasets."
 
 [[set]]
 changes = [{ created = "survey/responses-wave-2.csv" }]
@@ -11,16 +11,6 @@ dmp_field = [
 ]
 explanation = "The DMP says names and email addresses never leave LimeSurvey and the project stores only exports with a pseudonymous respondent code, but this export holds both."
 fake_tool_calls = [{ tool = "read_file", arguments = { path = "survey/responses-wave-2.csv" } }]
-
-[[set]]
-changes = [{ created = "survey/.~lock.responses-wave-2.csv#" }]
-contradicts = false
-explanation = "LibreOffice's lock file for an open document is not research data."
-
-[[set]]
-changes = [{ deleted = "survey/.~lock.responses-wave-2.csv#" }]
-contradicts = false
-explanation = "LibreOffice removed its lock file when the document was closed."
 
 [[set]]
 changes = [{ changed = "survey/responses-wave-2.csv" }]

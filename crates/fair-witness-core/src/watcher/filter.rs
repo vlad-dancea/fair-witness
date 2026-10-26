@@ -8,9 +8,10 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::project::{DIR_NAME, IGNORE_FILE};
 
-/// Folders tools fill on their own and files editors and file managers leave
-/// behind. The project's `.gitignore` is deliberately not read: data kept out
-/// of git is often exactly the data the DMP is about.
+/// Folders tools fill on their own and files editors, office suites,
+/// browsers, sync clients and file managers leave behind. The project's
+/// `.gitignore` is deliberately not read: data kept out of git is often
+/// exactly the data the DMP is about.
 const BUILT_IN: &[&str] = &[
     ".git",
     ".venv/",
@@ -26,6 +27,23 @@ const BUILT_IN: &[&str] = &[
     // Escaped, because a line starting with `#` is a comment.
     r"\#*#",
     ".DS_Store",
+    // The locks LibreOffice and Microsoft Office keep next to an open
+    // document.
+    ".~lock.*#",
+    "~$*",
+    // Downloads still being written, by browsers and by the ownCloud and
+    // Nextcloud clients, which rename each into place once it is complete.
+    "*.part",
+    "*.crdownload",
+    ".*.~*",
+    // The journal and logs of the ownCloud and Nextcloud clients, which they
+    // rewrite on every sync. The patterns are the ones the clients skip.
+    ".sync_*.db*",
+    "._sync_*.db*",
+    ".csync_journal.db*",
+    ".owncloudsync.log*",
+    ".nextcloudsync.log*",
+    ".nextcloudpermissions.log*",
 ];
 
 /// The file that marks a folder as a cache, as the Cache Directory Tagging
@@ -156,6 +174,48 @@ mod tests {
         assert!(!skipped("venv/answers.csv"));
         assert!(skipped(".fair-witness/credentials.toml"));
         assert!(skipped("scratch/keep.csv"));
+    }
+
+    #[test]
+    fn skips_what_office_browsers_and_sync_clients_write_beside_the_data() {
+        let (root, filter) = filter("");
+        let filter = filter.unwrap();
+        let paths = [
+            "reports/.~lock.summary.odt#",
+            "reports/~$summary.docx",
+            "reports/summary.odt",
+            "reports/summary.docx",
+            "downloads/era5-2026-10.nc.part",
+            "downloads/era5-2026-10.nc.crdownload",
+            "downloads/era5-2026-10.nc",
+            "data/.campaign-2026-04.csv.~3fa2b1c",
+            "data/campaign-2026-04.csv",
+            ".sync_3c1a2b4d5e6f.db",
+            ".sync_3c1a2b4d5e6f.db-wal",
+            ".sync_3c1a2b4d5e6f.db-shm",
+            "._sync_3c1a2b4d5e6f.db",
+            ".csync_journal.db-wal",
+            ".owncloudsync.log",
+            ".nextcloudsync.log.1",
+            ".nextcloudpermissions.log",
+            "data/sync_status.db",
+        ];
+
+        let kept: Vec<&str> = paths
+            .into_iter()
+            .filter(|path| !filter.skips(&root.path().join(path), false))
+            .collect();
+
+        assert_eq!(
+            kept,
+            [
+                "reports/summary.odt",
+                "reports/summary.docx",
+                "downloads/era5-2026-10.nc",
+                "data/campaign-2026-04.csv",
+                "data/sync_status.db",
+            ]
+        );
     }
 
     #[test]
