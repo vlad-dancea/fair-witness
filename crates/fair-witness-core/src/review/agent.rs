@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use genai::Client;
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatResponse, ReasoningEffort, Tool, ToolChoice,
-    ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ReasoningEffort, Tool,
+    ToolChoice, ToolResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -420,10 +420,13 @@ fn options(effort: &Effort) -> ChatOptions {
     // genai knows only a fixed list of efforts, and without one in the options it reads one from
     // the end of the model name, so that `qwen3-max` would go out as `qwen3` at effort `max`. A
     // budget stops that and adds nothing to an OpenAI request, so the effort goes in as given
-    // through the extra body.
+    // through the extra body. For a model name it reads as GPT-5.6 or later, genai also adds
+    // `prompt_cache_options`, which only OpenAI's own API knows, unless the options ask for a
+    // cache. A five-minute one stops that and adds nothing to an OpenAI request either.
     let options = ChatOptions::default()
         .with_tool_choice(ToolChoice::Auto)
-        .with_reasoning_effort(ReasoningEffort::Budget(0));
+        .with_reasoning_effort(ReasoningEffort::Budget(0))
+        .with_cache_control(CacheControl::Ephemeral5m);
     match effort.sent() {
         Some(effort) => options.with_extra_body(json!({ "reasoning_effort": effort })),
         None => options,
@@ -625,6 +628,39 @@ mod tests {
                 json!({ "model": "qwen3-max" }),
                 json!({ "model": "qwen3-max", "reasoning_effort": "ultra" }),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_newer_gpt_models_only_the_fields_any_compatible_api_takes() {
+        let root = tempfile::tempdir().unwrap();
+        let (url, server) = fake_model(vec![verdict()]);
+        let reviewer = Reviewer::new(
+            &AiConfig {
+                url,
+                model: "gpt-5.6".to_string(),
+                effort: Effort::default(),
+            },
+            None,
+        )
+        .unwrap();
+
+        reviewer
+            .review(&input(root.path(), "{}", &[]), &|_| {})
+            .await
+            .unwrap();
+
+        let body = server.join().unwrap().remove(0).1;
+        let mut fields: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            ["messages", "model", "stream", "tool_choice", "tools"]
         );
     }
 
