@@ -1,0 +1,6 @@
+description = "A tool writes 3000 files into one new folder at once. The review names only the folder, and list_dir shows the first 200 files and how many more there are."
+
+[[set]]
+contradicts = false
+explanation = "Soil measurements as CSV files are what the DMP plans."
+fake_tool_calls = [{ tool = "list_dir", arguments = { path = "sensors" } }]

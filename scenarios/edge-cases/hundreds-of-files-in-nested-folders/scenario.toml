@@ -1,0 +1,11 @@
+description = "A researcher copies 450 photos at once into a new tree of folders three levels deep, one per camera and day. The 487 changes are more than the review names one by one, so it names only the top folder and the model has to walk the folders with list_dir to see what arrived."
+
+[[set]]
+contradicts = false
+explanation = "The DMP keeps the camera trap photos as JPEG files in one folder per camera and day, about 15 a day from each camera."
+fake_tool_calls = [
+  { tool = "list_dir", arguments = { path = "cameras" } },
+  { tool = "list_dir", arguments = { path = "cameras/camera-1" } },
+  { tool = "list_dir", arguments = { path = "cameras/camera-1/2026-09-21" } },
+  { tool = "read_file", arguments = { path = "cameras/camera-1/2026-09-21/IMG_12101.JPG" } },
+]
