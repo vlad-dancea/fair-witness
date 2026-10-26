@@ -37,30 +37,34 @@ const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Change {
-    Created(#[serde(with = "lossy")] PathBuf),
-    Changed(#[serde(with = "lossy")] PathBuf),
+    Created(#[serde(with = "escaped")] PathBuf),
+    Changed(#[serde(with = "escaped")] PathBuf),
     Renamed {
-        #[serde(with = "lossy")]
+        #[serde(with = "escaped")]
         from: PathBuf,
-        #[serde(with = "lossy")]
+        #[serde(with = "escaped")]
         to: PathBuf,
     },
-    Deleted(#[serde(with = "lossy")] PathBuf),
+    Deleted(#[serde(with = "escaped")] PathBuf),
 }
 
-/// Writes a path that is not valid UTF-8 with replacement characters, as the screen shows it,
-/// so that every change can be serialized.
-mod lossy {
+/// Writes a path as the screen and the model show it, so that every change can be serialized,
+/// also one whose name is not valid UTF-8, and read back unchanged.
+mod escaped {
     use std::path::{Path, PathBuf};
 
+    use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
+    use crate::escape;
+
     pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&path.to_string_lossy())
+        serializer.serialize_str(&escape::path(path))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-        PathBuf::deserialize(deserializer)
+        let text = String::deserialize(deserializer)?;
+        escape::unescape(&text).map_err(|e| D::Error::custom(format!("{text}: {e}")))
     }
 }
 
@@ -981,19 +985,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn serializes_a_path_that_is_not_utf8() {
+    fn serializes_a_path_that_is_not_utf8_and_reads_it_back() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let change = Change::Renamed {
-            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa.csv")),
+            from: PathBuf::from(OsStr::from_bytes(b"data/\xffa\n.csv")),
             to: PathBuf::from("data/a.csv"),
         };
 
+        let json = serde_json::to_value(&change).unwrap();
         assert_eq!(
-            serde_json::to_value(&change).unwrap(),
-            serde_json::json!({ "renamed": { "from": "data/\u{fffd}a.csv", "to": "data/a.csv" } })
+            json,
+            serde_json::json!({ "renamed": { "from": "data/\\xffa\\n.csv", "to": "data/a.csv" } })
         );
+        assert_eq!(serde_json::from_value::<Change>(json).unwrap(), change);
     }
 
     #[tokio::test]
