@@ -305,7 +305,7 @@ Then run `fair-witness setup --url http://localhost:8085` and log in as `user` w
 mise install            # the pinned Rust toolchain, with clippy and rustfmt
 mise run dev -- setup   # run fair-witness from source
 mise run format         # format the sources
-mise run scenarios      # run the scripted researcher sessions in scenarios/
+mise run scenarios      # run the scripted researcher sessions in scenarios/edge-cases/ and scenarios/realistic/
 mise run check          # everything CI checks: formatting, clippy, tests, scenarios
 ```
 

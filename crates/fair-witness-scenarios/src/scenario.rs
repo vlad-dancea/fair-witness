@@ -17,9 +17,31 @@ pub const FILES: &str = "files";
 /// verdict expected for each change set the script makes.
 pub struct Scenario {
     pub name: String,
+    pub kind: Kind,
     pub dir: PathBuf,
     pub description: String,
     pub sets: Vec<Expected>,
+}
+
+/// What a scenario is for, by the folder it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Changes picked to strain the watcher and the review, however unlikely, which run only
+    /// with the fake model.
+    EdgeCase,
+    /// A researcher's everyday work at the pace they do it, which real models are measured on.
+    Realistic,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 2] = [Kind::EdgeCase, Kind::Realistic];
+
+    pub fn folder(self) -> &'static str {
+        match self {
+            Kind::EdgeCase => "edge-cases",
+            Kind::Realistic => "realistic",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -133,27 +155,35 @@ fn path_continues(mut rest: &str) -> bool {
     true
 }
 
-/// The folders in `root` that hold a scenario, by name, as absolute paths, since the script
-/// runs in another folder.
-pub fn find(root: &Path) -> Result<Vec<PathBuf>> {
+/// The folders in each kind's folder of `root` that hold a scenario, edge cases first and then
+/// by name, as absolute paths, since the script runs in another folder.
+pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
     let root = root
         .canonicalize()
         .with_context(|| format!("could not find {}", root.display()))?;
-    let entries =
-        fs::read_dir(&root).with_context(|| format!("could not read {}", root.display()))?;
     let mut found = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path.join(FILE).is_file() {
-            found.push(path);
+    for kind in Kind::ALL {
+        let folder = root.join(kind.folder());
+        if !folder.is_dir() {
+            continue;
         }
+        let entries = fs::read_dir(&folder)
+            .with_context(|| format!("could not read {}", folder.display()))?;
+        let mut dirs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.join(FILE).is_file() {
+                dirs.push(path);
+            }
+        }
+        dirs.sort();
+        found.extend(dirs.into_iter().map(|dir| (kind, dir)));
     }
-    found.sort();
     Ok(found)
 }
 
 impl Scenario {
-    pub fn load(dir: &Path) -> Result<Self> {
+    pub fn load(kind: Kind, dir: &Path) -> Result<Self> {
         let path = dir.join(FILE);
         let text = fs::read_to_string(&path)
             .with_context(|| format!("could not read {}", path.display()))?;
@@ -195,6 +225,7 @@ impl Scenario {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            kind,
             dir: dir.to_path_buf(),
             description: file.description,
             sets: file.sets,
@@ -231,7 +262,7 @@ mod tests {
         fs::write(dir.path().join(FILE), toml).unwrap();
         fs::write(dir.path().join(DMP), "{}").unwrap();
         fs::write(dir.path().join(SCRIPT), "").unwrap();
-        let loaded = Scenario::load(dir.path());
+        let loaded = Scenario::load(Kind::EdgeCase, dir.path());
         (dir, loaded)
     }
 

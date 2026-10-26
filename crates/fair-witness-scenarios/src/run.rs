@@ -14,9 +14,10 @@ use fair_witness_core::review::{Checked, ModelChoice, Reviewer};
 use fair_witness_core::secret::hide;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
+use fair_witness_core::watcher;
 
 use crate::report::Refused;
-use crate::scenario::{DMP, FILES, SCRIPT, Scenario};
+use crate::scenario::{DMP, FILES, Kind, SCRIPT, Scenario};
 
 /// Generous, so that a slow CI machine still makes it, while a scenario that hangs fails.
 const STARTUP: Duration = Duration::from_secs(20);
@@ -41,6 +42,7 @@ static GROUPS: Mutex<Option<Vec<u32>>> = Mutex::new(Some(Vec::new()));
 /// How to run fair-witness for every scenario.
 pub struct Settings {
     pub binary: PathBuf,
+    /// For the edge cases. Realistic scenarios run at fair-witness's own.
     pub debounce: Duration,
     /// The key for the API of the real models, which only the checks and fair-witness get.
     pub api_key: Option<String>,
@@ -94,6 +96,18 @@ fn file_name(name: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+impl Settings {
+    /// How long fair-witness waits for the folder to be quiet in `scenario`: the edge cases'
+    /// debounce, or for a realistic scenario fair-witness's own, since its pace is a
+    /// researcher's.
+    fn debounce_for(&self, scenario: &Scenario) -> Duration {
+        match scenario.kind {
+            Kind::EdgeCase => self.debounce,
+            Kind::Realistic => watcher::DEBOUNCE,
+        }
+    }
 }
 
 /// Asks the API once whether it takes each real model at its effort, as fair-witness does when it
@@ -186,6 +200,7 @@ fn run_into(
 
     let mut script = Process::start_group(SCRIPT, &mut script_command(scenario, folder.path()))
         .context("could not start bash")?;
+    let debounce = settings.debounce_for(scenario);
     let mut set = 0;
     let mut deadline = Instant::now() + SCRIPT_STEP;
     let code = loop {
@@ -231,10 +246,7 @@ fn run_into(
     }
     // A set of changes the script made after it last waited comes two and a half debounces
     // after the last of them.
-    witness.collect_for(
-        settings.debounce * 5 / 2 + Duration::from_millis(200),
-        records,
-    )?;
+    witness.collect_for(debounce * 5 / 2 + Duration::from_millis(200), records)?;
     witness.stop(records)
 }
 
@@ -260,7 +272,7 @@ fn witness_command(
         .arg("--skip-model-check")
         .env(
             "FAIR_WITNESS_DEBOUNCE_MS",
-            settings.debounce.as_millis().to_string(),
+            settings.debounce_for(scenario).as_millis().to_string(),
         );
     match (model, &settings.api_key) {
         (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
@@ -568,6 +580,7 @@ mod tests {
     fn scenario() -> Scenario {
         Scenario {
             name: "notes".to_string(),
+            kind: Kind::EdgeCase,
             dir: PathBuf::from("/scenarios/notes"),
             description: String::new(),
             sets: Vec::new(),

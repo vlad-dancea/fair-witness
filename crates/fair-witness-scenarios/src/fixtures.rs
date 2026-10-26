@@ -6,11 +6,12 @@ use fair_witness_core::session::Record;
 use fair_witness_core::watcher::Change;
 use serde_json::{Value, json};
 
-use crate::scenario::{Expected, Scenario};
+use crate::scenario::{Expected, Kind, Scenario};
 
 pub fn scenario(name: &str, sets: Vec<Expected>) -> Scenario {
     Scenario {
         name: name.to_string(),
+        kind: Kind::Realistic,
         dir: PathBuf::new(),
         description: String::new(),
         sets,

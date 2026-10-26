@@ -19,7 +19,7 @@ description = "Run the tests"
 run = "cargo test --locked"
 
 [tasks.scenarios]
-description = "Run the researcher scenarios in scenarios/ with the fake model or, with --model, a real one, with arguments after --, such as `mise run scenarios -- --help`"
+description = "Run the researcher scenarios in scenarios/ with the fake model or, with --model, the realistic ones with a real model, with arguments after --, such as `mise run scenarios -- --help`"
 run = [
   "cargo build --locked -p fair-witness",
   "cargo run --locked -p fair-witness-scenarios --",

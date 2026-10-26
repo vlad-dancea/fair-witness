@@ -1,6 +1,9 @@
 # Scenarios
 
-Each folder here is a scripted research session. A researcher changes files in a project folder while fair-witness watches it, and the scenario says what each review should find. `mise run scenarios` runs them against headless fair-witness with a fake model, and `mise run check` and CI run them too. With `--model`, they run against real models instead, to measure how often each gives the expected verdict.
+Each scenario is a scripted research session. A researcher changes files in a project folder while fair-witness watches it, and the scenario says what each review should find. `mise run scenarios` runs them against headless fair-witness with a fake model, and `mise run check` and CI run them too. There are two kinds, each in a folder of its own:
+
+- `edge-cases/` try to break the watcher, the change sets and the model's tools, with changes picked for that rather than for being likely: thousands of files at once, odd file names, files moved in and out, renamed twice or created and deleted at once. They run at a short debounce and only with the fake model.
+- `realistic/` are a researcher's everyday work at the pace they do it: downloading and extracting data, copying files from instruments, writing a script while pressing Ctrl+S, working in a notebook that autosaves. They run at fair-witness's own debounce, and with `--model` they run against real models, to measure how long reviews take, what they cost and how often a model gives the expected verdict. They are made up, so the verdicts give a rough idea of accuracy at best.
 
 ## Running them
 
@@ -9,6 +12,8 @@ mise run scenarios                    # every scenario
 mise run scenarios -- clinic excel    # those whose names contain "clinic" or "excel"
 mise run scenarios -- --help          # the other options
 ```
+
+Names are unique across both folders. The edge cases take seconds each. A realistic scenario takes as long as the researcher would, up to a minute or two, since its pauses are real.
 
 The fake model answers each review with the scenario's tool calls and then its expected verdict, so these runs check watching, grouping changes into sets, the tools and the events, but not how well a model judges. The runner prints which scenarios passed and failed, with what went wrong, and exits with 1 if any failed.
 
@@ -23,7 +28,7 @@ read -rs FAIR_WITNESS_API_KEY && export FAIR_WITNESS_API_KEY   # paste the key, 
 mise run scenarios -- --model <model> --effort low --effort high --jobs 4
 ```
 
-`--model` reviews with a model of an OpenAI-compatible API instead of the fake one, by default TU Wien's Aqueduct (`--ai-url` changes it). Each `--model` runs at each `--effort`, by default only `default`. An effort is a name the model takes, such as `low` or `xhigh`, and goes to the API as given. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. A model's verdicts vary, so each scenario runs 5 times with each model and effort, and `--repeats` changes that. Such a run costs tokens and takes minutes, so it happens only when asked, never in `mise run check` or CI.
+`--model` reviews the realistic scenarios with a model of an OpenAI-compatible API instead of the fake one, and skips the edge cases, which measure nothing. The API is TU Wien's Aqueduct unless `--ai-url` names another. Each `--model` runs at each `--effort`, by default only `default`. An effort is a name the model takes, such as `low` or `xhigh`, and goes to the API as given. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. A model's verdicts vary, so each scenario runs 5 times with each model and effort, and `--repeats` changes that. Such a run costs tokens and takes minutes, so it happens only when asked, never in `mise run check` or CI.
 
 Before the runs, the runner asks the API once whether it takes each model and effort, with a request like the first of a review but cut off after one token, as `fair-witness run` does when it starts. A model and effort the API refuses does not run. The runner lists it under "Refused by the API" with the API's message, keeps it in `refused` in `results.json` and exits with 1. When a check cannot tell, such as when the API answers `429 Too Many Requests`, the runner says so on stderr and runs the model anyway. Every run gets the hidden `--skip-model-check` of `fair-witness run`, so that each model and effort is checked once and not in every run, and the fake model needs no check.
 
@@ -38,7 +43,7 @@ A verdict is right when it says whether the changes contradict the DMP as the sc
 ## A scenario
 
 ```
-clinic-export-with-patient-names/
+realistic/clinic-export-with-patient-names/
   scenario.toml   what each change set should hold and the verdict it should get
   dmp.json        the maDMP the changes are checked against
   script.sh       what the researcher does
@@ -51,7 +56,7 @@ The runner copies `files/` into a new folder in the system's temp folder, starts
 
 The script changes files in the project folder, which is its working directory, and calls `wait_for_verdict` after each change set. `wait_for_verdict` returns once fair-witness has reviewed what changed since the last call. The script calls it once for each set in `scenario.toml` and changes nothing after the last call.
 
-fair-witness ends a change set once the folder has been quiet for the debounce, 500 milliseconds for scenarios (`--debounce-ms` changes it), or once the set's first change is 30 debounces old, as in a long copy that never leaves the folder quiet. Changes less than a debounce apart end up in the same set, but a `sleep` or a slow command that leaves the folder quiet for longer than the debounce splits the set in two, which fails the scenario. fair-witness sees a change only once the change is a debounce old, so a set comes about two and a half debounces after its last change. Writes to a file that stays open count only once they pause for a debounce.
+fair-witness ends a change set once the folder has been quiet for the debounce, or once the set's first change is 30 debounces old, as in a long copy that never leaves the folder quiet. The debounce is 500 milliseconds for the edge cases (`--debounce-ms` changes it) and fair-witness's own 2 seconds for the realistic scenarios. Changes less than a debounce apart end up in the same set, and a `sleep` or a slow command that leaves the folder quiet for longer than the debounce splits the set in two. fair-witness sees a change only once the change is a debounce old, so a set comes about two and a half debounces after its last change. Writes to a file that stays open count only once they pause for a debounce.
 
 The script runs with `set -euo pipefail`, so a failing command fails the scenario. It must not read stdin, which `wait_for_verdict` uses. When the script ends, whatever it started in the background is stopped, unless it left the script's process group, as `setsid` does. Like a test, the script runs with the permissions of whoever runs the scenarios, so read a scenario before you run it.
 
@@ -99,4 +104,4 @@ With the fake model, a set passes when its changes match, if given, and its revi
 
 ### For the fake and the real models alike
 
-A scenario runs unchanged with both. The fake model reads its answer from `scenario.toml`, but a real model sees only the DMP, the list of changes and what it reads with `list_dir` and `read_file`, never the `description` or the `explanation`. So the expected verdict must follow from those alone, and the files must hold what a careful reviewer would read to decide, such as the names in a clinic export. When a careful reviewer could cite more than one field of the DMP, list each of them in `dmp_field`, so that a model is not counted wrong for a reasonable choice.
+A realistic scenario runs unchanged with both. The fake model reads its answer from `scenario.toml`, but a real model sees only the DMP, the list of changes and what it reads with `list_dir` and `read_file`, never the `description` or the `explanation`. So the expected verdict must follow from those alone, and the files must hold what a careful reviewer would read to decide, such as the names in a clinic export. When a careful reviewer could cite more than one field of the DMP, list each of them in `dmp_field`, so that a model is not counted wrong for a reasonable choice.
