@@ -18,6 +18,7 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.2", features = ["macros", "rt", "sync", "time"] }
 toml = "1.1.6"
 tracing = "0.1.44"
+url = "2.5.8"
 
 [features]
 # The fake model in `testing`, for the tests of crates that use this one.

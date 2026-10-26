@@ -2,10 +2,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::project::{AiConfig, Effort, Project};
-use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
-use reqwest::Client;
+use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer, in_the_clear};
 
-use super::damap::{http_client, web_url};
+use super::damap::web_url;
 use crate::tui::model_panel::describe;
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
@@ -35,19 +34,30 @@ pub struct ModelArgs {
 
 pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     let mut config = project.config()?.context("this folder is not set up yet")?;
-    let http = http_client()?;
     let mut previous = config.ai.take();
     let saved_key = project.credentials()?.api_key;
     let (url, api_key, models) = match args.ai_url {
         Some(url) => {
             let url = web_url(&url)?;
-            let api_key = args.api_key.or(saved_key);
-            let models = review::list_models(&http, &url, api_key.as_deref()).await?;
+            let api_key = match args.api_key {
+                Some(_) if in_the_clear(&url) => {
+                    bail!(
+                        "{}, or leave out --api-key if it needs none",
+                        unencrypted(&url)
+                    )
+                }
+                Some(key) => Some(key),
+                None if in_the_clear(&url) => {
+                    println!("{}", no_key_sent(&url));
+                    None
+                }
+                None => saved_key,
+            };
+            let models = review::list_models(&url, api_key.as_deref()).await?;
             (url, api_key, models)
         }
         None => {
             ask_for_api(
-                &http,
                 previous.as_ref().map(|ai| ai.url.clone()),
                 args.api_key,
                 saved_key,
@@ -138,7 +148,6 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
 }
 
 async fn ask_for_api(
-    http: &Client,
     previous: Option<String>,
     given_key: Option<String>,
     saved_key: Option<String>,
@@ -157,7 +166,20 @@ async fn ask_for_api(
             }
         };
         let api_key = match &given_key {
+            Some(_) if in_the_clear(&url) => {
+                println!(
+                    "{}, or leave out --api-key if it needs none. Try again, or press Ctrl+C to \
+                     stop.",
+                    unencrypted(&url)
+                );
+                default = url;
+                continue;
+            }
             Some(key) => Some(key.clone()),
+            None if in_the_clear(&url) => {
+                println!("{}", no_key_sent(&url));
+                None
+            }
             None => {
                 let prompt = match saved_key {
                     Some(_) => "API key (empty keeps the saved one)",
@@ -172,12 +194,27 @@ async fn ask_for_api(
                     .or_else(|| saved_key.clone())
             }
         };
-        match review::list_models(http, &url, api_key.as_deref()).await {
+        match review::list_models(&url, api_key.as_deref()).await {
             Ok(models) => return Ok((url, api_key, models)),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }
         default = url;
     }
+}
+
+/// Says that `url` would carry the API key unencrypted, and how to reach the API safely.
+pub fn unencrypted(url: &str) -> String {
+    format!(
+        "{url} uses plain HTTP to another machine, which would send the API key unencrypted\n\
+         Use https://, or reach the API through this machine, such as at http://localhost \
+         through an SSH tunnel"
+    )
+}
+
+/// Why `setup` neither asks for a key for `url` nor sends the saved one, which may be for
+/// another API.
+fn no_key_sent(url: &str) -> String {
+    format!("No API key is sent to {url}, since it uses plain HTTP to another machine.")
 }
 
 fn choose_model(
@@ -208,7 +245,7 @@ fn choose_model(
 
 #[cfg(test)]
 mod tests {
-    use fair_witness_core::project::{Config, DamapConfig};
+    use fair_witness_core::project::{Config, Credentials, DamapConfig};
     use fair_witness_core::testing::{
         EFFORT_REFUSED, Reply, Request, bad_request, fake_model, one_token,
     };
@@ -295,6 +332,56 @@ mod tests {
                  choose one from the list"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn sends_no_api_key_over_plain_http_to_another_machine() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project
+            .save_config(&Config {
+                damap: DamapConfig {
+                    frontend_url: "https://damap.example.org".to_string(),
+                    dmp_id: Some(3),
+                },
+                ai: None,
+            })
+            .unwrap();
+        project
+            .save_credentials(&Credentials {
+                api_key: Some("sk-saved".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+        let (url, server) = fake_model(vec![
+            json!({ "object": "list", "data": [{ "id": "small", "object": "model" }] }).into(),
+            Reply::from(one_token()),
+        ]);
+        // 0.0.0.0 reaches this machine on Linux and macOS, but fair-witness cannot tell that it
+        // is not another one.
+        let url = url.replace("127.0.0.1", "0.0.0.0");
+        let args = |api_key: Option<&str>| ModelArgs {
+            ai_url: Some(url.clone()),
+            api_key: api_key.map(str::to_string),
+            model: Some("small".to_string()),
+        };
+
+        assert_eq!(
+            setup(&project, args(Some("sk-given")))
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "{url} uses plain HTTP to another machine, which would send the API key \
+                 unencrypted\nUse https://, or reach the API through this machine, such as at \
+                 http://localhost through an SSH tunnel, or leave out --api-key if it needs none"
+            )
+        );
+        setup(&project, args(None)).await.unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|(head, _)| !head.contains("sk-")));
+        assert_eq!(project.credentials().unwrap().api_key, None);
     }
 
     #[test]

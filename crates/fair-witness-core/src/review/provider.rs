@@ -3,21 +3,21 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, Endpoint};
-use genai::{Client, ModelIden, ServiceTarget, webc};
+use genai::{Client, ModelIden, ServiceTarget, WebConfig, webc};
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use reqwest::Client as HttpClient;
 use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
+use reqwest::{Client as HttpClient, ClientBuilder};
 use serde::Deserialize;
 use serde_json::Value;
+use url::{Host, Url};
 
-pub async fn list_models(
-    http: &HttpClient,
-    url: &str,
-    api_key: Option<&str>,
-) -> Result<Vec<String>> {
+/// How long listing the models may take.
+const LIST_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct Models {
         data: Vec<Model>,
@@ -27,6 +27,13 @@ pub async fn list_models(
         id: String,
     }
 
+    let http = for_api(
+        HttpClient::builder()
+            .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
+            .timeout(LIST_TIMEOUT),
+        url,
+    )
+    .build()?;
     let url = format!("{}models", base_url(url));
     let mut request = http.get(&url);
     if let Some(key) = api_key {
@@ -53,10 +60,44 @@ fn base_url(url: &str) -> String {
     format!("{}/", url.trim_end_matches('/'))
 }
 
+/// Whether an API key sent to `url` would cross the network unencrypted: plain HTTP to another
+/// machine than this one. fair-witness reads an address without a scheme as HTTPS.
+pub fn in_the_clear(url: &str) -> bool {
+    Url::parse(url.trim()).is_ok_and(|url| url.scheme() == "http" && !on_this_machine(&url))
+}
+
+fn on_this_machine(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// `builder` for the API at `url`. An API on this machine is reached without a proxy from
+/// `HTTP_PROXY` and the like, which could not reach it there and, over plain HTTP, would get the
+/// API key unencrypted.
+fn for_api(builder: ClientBuilder, url: &str) -> ClientBuilder {
+    if Url::parse(url.trim()).is_ok_and(|url| on_this_machine(&url)) {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
 pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
+    // The client genai builds by default, but for this API.
+    let http = for_api(
+        WebConfig::default().apply_to_builder(HttpClient::builder()),
+        url,
+    )
+    .build()
+    .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
     let endpoint = Endpoint::from_owned(base_url(url));
     let auth = AuthData::from_single(api_key.unwrap_or_default());
     Client::builder()
+        .with_reqwest(http)
         .with_service_target_resolver_fn(move |target: ServiceTarget| {
             Ok(ServiceTarget {
                 endpoint: endpoint.clone(),
@@ -261,7 +302,7 @@ mod tests {
             ]
         })]);
 
-        let models = list_models(&HttpClient::new(), &format!("{url}/"), Some("sk-test"))
+        let models = list_models(&format!("{url}/"), Some("sk-test"))
             .await
             .unwrap();
 
@@ -327,6 +368,29 @@ mod tests {
         assert!(!asks_for_effort(&body(
             "openai does not support parameters: ['reasoning_effort']"
         )));
+    }
+
+    #[test]
+    fn sends_a_key_over_plain_http_only_to_this_machine() {
+        assert_eq!(
+            [
+                "https://models.example.org/v1",
+                "models.example.org/v1",
+                "http://127.0.0.1:8080/v1",
+                "http://LOCALHOST:1234",
+                "http://[::1]:9/v1",
+                "http://models.example.org/v1",
+                "http://10.0.0.5:8080/v1",
+                "HTTP://Models.Example.org",
+                "http://127.0.0.1@models.example.org/v1",
+                "http://models.example.org\\@127.0.0.1/v1",
+                "http://localhost.example.org",
+            ]
+            .map(in_the_clear),
+            [
+                false, false, false, false, false, true, true, true, true, true, true
+            ]
+        );
     }
 
     #[test]
