@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{Change, Kind};
+use crate::escape;
 
 /// Above this many changes, a change set is listed per folder.
 pub const MAX_LISTED: usize = 50;
@@ -32,9 +33,9 @@ impl Listed<'_> {
     pub fn describe(&self) -> String {
         match self {
             Listed::One(Change::Renamed { from, to }) => {
-                format!("{} -> {}", from.display(), to.display())
+                format!("{} -> {}", escape::path(from), escape::path(to))
             }
-            Listed::One(change) => change.path().display().to_string(),
+            Listed::One(change) => escape::path(change.path()),
             Listed::Many {
                 count,
                 folder,
@@ -45,7 +46,7 @@ impl Listed<'_> {
                 format!("{count} paths in the project folder")
             }
             Listed::Many { count, folder, .. } => {
-                format!("{count} paths under {}/", folder.display())
+                format!("{count} paths under {}/", escape::path(folder))
             }
         }
     }
@@ -125,7 +126,7 @@ fn label(folder: &Path) -> String {
     if folder.as_os_str().is_empty() {
         "the project folder".to_string()
     } else {
-        format!("{}/", folder.display())
+        format!("{}/", escape::path(folder))
     }
 }
 
