@@ -414,8 +414,8 @@ struct Held {
     /// The paths the set created, changed or renamed something to, under the names its later
     /// renames gave them, without what it deleted.
     paths: BTreeSet<PathBuf>,
-    /// The size each file had when the watcher last looked at it.
-    sizes: HashMap<PathBuf, u64>,
+    /// Each file as the watcher last looked at it.
+    seen: HashMap<PathBuf, Seen>,
 }
 
 impl Held {
@@ -430,7 +430,7 @@ impl Held {
             last,
             next_look,
             paths,
-            sizes: HashMap::new(),
+            seen: HashMap::new(),
         }
     }
 
@@ -457,8 +457,7 @@ impl Held {
     /// and would otherwise seem quiet. The watcher looks only every `LOOKS`th of a debounce, and
     /// a write that bridged the pause can be hidden behind a later one by then, so that much
     /// later still counts. Only files the watcher still knows count, so not those in a folder
-    /// tagged as a cache since, and only when their size changed since the last look, since a
-    /// new time alone, as `touch` gives, says nothing was written.
+    /// tagged as a cache since, and only when `Seen::written_since` says they were written.
     fn note_writes(&mut self, root: &Path, known: &BTreeSet<PathBuf>, debounce: Duration) {
         let mut files: BTreeSet<&PathBuf> = BTreeSet::new();
         for path in &self.paths {
@@ -471,11 +470,11 @@ impl Held {
         }
         let mut written = Vec::new();
         for file in files {
-            let Some((at, size)) = file_written(file) else {
+            let Some((at, now)) = file_written(file) else {
                 continue;
             };
-            let before = self.sizes.insert(file.clone(), size);
-            if before.is_some_and(|before| before != size) {
+            let before = self.seen.insert(file.clone(), now);
+            if before.is_some_and(|before| now.written_since(&before)) {
                 written.push(at);
             }
         }
@@ -576,16 +575,39 @@ fn written_at(path: &Path) -> Option<Instant> {
     file_written(path).map(|(at, _)| at)
 }
 
-/// When the file at `path` was last written, as `written_at` gives it, and its size.
-fn file_written(path: &Path) -> Option<(Instant, u64)> {
+/// When the file at `path` was last written, as `written_at` gives it, and how it looked then.
+fn file_written(path: &Path) -> Option<(Instant, Seen)> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
     }
-    let age = SystemTime::now()
-        .duration_since(metadata.modified().ok()?)
-        .ok()?;
-    Some((Instant::now().checked_sub(age)?, metadata.len()))
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    let seen = Seen {
+        size: metadata.len(),
+        modified,
+        accessed: metadata.accessed().ok(),
+    };
+    Some((Instant::now().checked_sub(age)?, seen))
+}
+
+/// A file's size and times as the watcher saw them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seen {
+    size: u64,
+    modified: SystemTime,
+    accessed: Option<SystemTime>,
+}
+
+impl Seen {
+    /// Whether the file was written since it looked like `before`: its modification time moved
+    /// on and its size changed, or its access time is not the new modification time. `touch`
+    /// sets both times to the same instant and writes nothing, while a program that sized the
+    /// file in advance, as some downloads do, writes without changing its size.
+    fn written_since(&self, before: &Seen) -> bool {
+        self.modified > before.modified
+            && (self.size != before.size || self.accessed != Some(self.modified))
+    }
 }
 
 /// Whether `FolderWatcher::apply` can make a change of an event of this kind, which it cannot
@@ -1195,14 +1217,17 @@ mod tests {
         let start = Instant::now() - debounce * 10;
         let names = ["bridged.csv", "paused.csv"];
         let known: BTreeSet<PathBuf> = names.map(|name| root.join(name)).into();
+        let at = |after: Duration| SystemTime::now() - (Instant::now() - (start + after));
         for name in names {
-            fs::write(root.join(name), "a").unwrap();
+            let file = fs::File::create(root.join(name)).unwrap();
+            std::io::Write::write_all(&mut &file, b"a").unwrap();
+            file.set_modified(at(Duration::ZERO)).unwrap();
         }
         let mut held = names.map(|name| {
             let changes = vec![Change::Created(PathBuf::from(name))];
             Held::new(changes, start, start, start)
         });
-        // The first look only learns the files' sizes.
+        // The first look only learns how the files look.
         for held in &mut held {
             held.note_writes(root, &known, debounce);
         }
@@ -1215,8 +1240,7 @@ mod tests {
                 .open(root.join(name))
                 .unwrap();
             std::io::Write::write_all(&mut file, b"b").unwrap();
-            let age = Instant::now() - (start + after);
-            file.set_modified(SystemTime::now() - age).unwrap();
+            file.set_modified(at(after)).unwrap();
         };
         write("bridged.csv", debounce * 11 / 10);
         write("paused.csv", debounce * 3 / 2);
@@ -1402,6 +1426,34 @@ mod tests {
         .await;
 
         assert_eq!(sets.len(), 1, "{sets:?}");
+    }
+
+    #[tokio::test]
+    async fn keeps_a_file_sized_in_advance_in_one_set_while_it_is_written() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        // As a download that sets the file's size first and then fills it in, so the size never
+        // changes while it is written.
+        let sets = sets_while(&mut watcher, debounce * 15, move || {
+            let mut file = fs::File::create(root.join("reads.fastq.gz")).unwrap();
+            file.set_len(1 << 20).unwrap();
+            let started = Instant::now();
+            let mut offset = 0;
+            while started.elapsed() < debounce * 8 {
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                file.write_all(&[1; 4096]).unwrap();
+                offset = (offset + 4096) % (1 << 20);
+                std::thread::sleep(debounce / 10);
+            }
+        })
+        .await;
+
+        assert_eq!(sets, [[Change::Created(PathBuf::from("reads.fastq.gz"))]]);
     }
 
     #[tokio::test]
