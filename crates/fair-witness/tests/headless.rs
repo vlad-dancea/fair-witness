@@ -29,13 +29,18 @@ struct Run {
 impl Run {
     /// Starts `fair-witness run --headless` in the folder `here`.
     fn start(here: &Path, arguments: &[&str]) -> Self {
-        let mut run = Self::start_unread(here, arguments);
+        Self::start_with(here, arguments, &[])
+    }
+
+    /// Like `start`, with the environment variables `env` set as well.
+    fn start_with(here: &Path, arguments: &[&str], env: &[(&str, &str)]) -> Self {
+        let mut run = Self::start_unread(here, arguments, env);
         run.stdout = lines(run.unread.take().unwrap());
         run
     }
 
-    /// Like `start`, but nothing reads stdout, as with a reader that stopped reading.
-    fn start_unread(here: &Path, arguments: &[&str]) -> Self {
+    /// Like `start_with`, but nothing reads stdout, as with a reader that stopped reading.
+    fn start_unread(here: &Path, arguments: &[&str], env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fair-witness"))
             .current_dir(here)
             .arg("run")
@@ -46,6 +51,7 @@ impl Run {
             .env_remove("FAIR_WITNESS_API_KEY")
             .env_remove("FAIR_WITNESS_MODEL")
             .env_remove("FAIR_WITNESS_EFFORT")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -355,6 +361,70 @@ fn stops_when_the_api_refuses_the_model_and_effort() {
 }
 
 #[test]
+fn refuses_to_send_the_api_key_over_plain_http_to_another_machine() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+
+    let mut run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            "http://models.example.org/v1",
+            "--api-key",
+            "sk-test",
+            "--model",
+            "test",
+        ],
+    );
+
+    assert_eq!(run.exit_code(), Some(2));
+    assert_eq!(
+        run.stderr_until("Use https://").join("\n"),
+        "error: http://models.example.org/v1 uses plain HTTP to another machine, which would \
+         send the API key unencrypted\nUse https://, or reach the API through this machine, \
+         such as at http://localhost through an SSH tunnel, or leave out --api-key if it needs \
+         none"
+    );
+}
+
+#[test]
+fn sends_the_api_key_to_this_machine_without_a_proxy() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    // A proxy would get the key unencrypted over plain HTTP, so it must not be asked. If it
+    // were, the check would wait for its answer and `run` would not get to the DMP.
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let (endpoint, server) = fake_model(vec![one_token()]);
+
+    let run = Run::start_with(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            &endpoint,
+            "--api-key",
+            "sk-test",
+            "--model",
+            "test",
+        ],
+        &[("HTTP_PROXY", &proxy_url), ("NO_PROXY", "")],
+    );
+
+    run.stderr_until("Comparing");
+    assert!(proxy.accept().is_err());
+    let (head, _) = &server.join().unwrap()[0];
+    assert!(
+        head.to_lowercase()
+            .contains("authorization: bearer sk-test"),
+        "{head}"
+    );
+    assert_eq!(run.stop(), Some(0));
+}
+
+#[test]
 fn starts_when_the_model_cannot_be_checked() {
     let (root, dmp_file) = unset_folder_with_a_dmp();
     let endpoint = format!("http://127.0.0.1:{}/v1", free_port());
@@ -449,6 +519,7 @@ fn start_with_a_large_dmp(project: &Path) -> Run {
             "--model",
             "test",
         ],
+        &[],
     );
     run.stderr_until("Comparing");
     run

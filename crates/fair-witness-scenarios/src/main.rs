@@ -23,11 +23,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fair_witness_core::project::Effort;
+use fair_witness_core::review::in_the_clear;
 use fair_witness_core::secret::can_hide;
 use fair_witness_core::session::Record;
 use jiff::Timestamp;
 use serde::Serialize;
-use url::{Host, Url};
 
 use report::{Accuracy, Outcome, Refused};
 use run::{API_KEY, Model, Settings};
@@ -540,21 +540,6 @@ fn with_scheme(ai_url: &str) -> String {
     }
 }
 
-/// Whether a key sent to `ai_url` would cross the network unencrypted: plain HTTP to another
-/// machine than this one. fair-witness reads an address without a scheme as HTTPS.
-fn in_the_clear(ai_url: &str) -> bool {
-    let Ok(url) = Url::parse(ai_url.trim()) else {
-        return false;
-    };
-    url.scheme() == "http"
-        && !match url.host() {
-            Some(Host::Domain(domain)) => domain == "localhost",
-            Some(Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(Host::Ipv6(ip)) => ip.is_loopback(),
-            None => false,
-        }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,29 +719,6 @@ mod tests {
         assert_eq!(
             urls,
             ["https://models.example.org/v1", "http://127.0.0.1:8080/v1"]
-        );
-    }
-
-    #[test]
-    fn sends_a_key_over_plain_http_only_to_this_machine() {
-        assert_eq!(
-            [
-                AQUEDUCT,
-                "models.example.org/v1",
-                "http://127.0.0.1:8080/v1",
-                "http://LOCALHOST:1234",
-                "http://[::1]:9/v1",
-                "http://models.example.org/v1",
-                "http://10.0.0.5:8080/v1",
-                "HTTP://Models.Example.org",
-                "http://127.0.0.1@models.example.org/v1",
-                "http://models.example.org\\@127.0.0.1/v1",
-                "http://localhost.example.org",
-            ]
-            .map(in_the_clear),
-            [
-                false, false, false, false, false, true, true, true, true, true, true
-            ]
         );
     }
 }

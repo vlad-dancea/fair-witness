@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -128,14 +129,17 @@ pub fn check(models: &[Model], settings: &Settings) -> Result<Vec<Refused>> {
         let Model::Real { url, name, effort } = model else {
             continue;
         };
-        let reviewer = reviewers.entry(url).or_insert_with(|| {
-            let ai = AiConfig {
-                url: url.clone(),
-                model: name.clone(),
-                effort: effort.clone(),
-            };
-            Reviewer::new(&ai, settings.api_key.clone())
-        });
+        let reviewer = match reviewers.entry(url) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let ai = AiConfig {
+                    url: url.clone(),
+                    model: name.clone(),
+                    effort: effort.clone(),
+                };
+                entry.insert(Reviewer::new(&ai, settings.api_key.clone())?)
+            }
+        };
         let choice = ModelChoice {
             model: name.clone(),
             effort: effort.clone(),

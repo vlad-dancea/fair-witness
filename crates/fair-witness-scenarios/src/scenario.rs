@@ -303,8 +303,8 @@ mod tests {
                     "report_verdict",
                     json!({
                         "contradicts": true,
-                        "dmp_field": "dataset[0].personal_data",
-                        "explanation": "The DMP says there is no personal data."
+                        "explanation": "The DMP says there is no personal data.",
+                        "dmp_field": "dataset[0].personal_data"
                     })
                 ),
             ]

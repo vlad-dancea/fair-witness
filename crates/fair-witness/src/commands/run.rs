@@ -8,12 +8,13 @@ use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
-use fair_witness_core::review::{Checked, Reviewer};
+use fair_witness_core::review::{Checked, Reviewer, in_the_clear};
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::Failure;
 use crate::setup::damap::{TerminalPrompts, http_client, web_url};
+use crate::setup::model::unencrypted;
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::{self, ModelSettings};
 use crate::{diagnostics, notifications};
@@ -157,7 +158,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     };
     match (source, ai) {
         (Some(source), Some((ai, api_key))) => {
-            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone()));
+            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone())?);
             // Before the DMP, so that a refusal comes before any DAMAP login.
             if !args.skip_model_check {
                 check_model(&reviewer, &ai.url, &mut status).await?;
@@ -266,6 +267,14 @@ fn ai(
         (None, Some(_)) => project.credentials()?.api_key,
         (None, None) => None,
     };
+    // Also for an API saved before `setup` refused plain HTTP to another machine.
+    if api_key.is_some() && in_the_clear(&url) {
+        let without_key = match args.api_key {
+            Some(_) => "or leave out --api-key if it needs none",
+            None => "or run `fair-witness setup` again to use it without the saved key",
+        };
+        bail!("{}, {without_key}", unencrypted(&url));
+    }
     Ok(Some((AiConfig { url, model, effort }, api_key)))
 }
 
