@@ -608,6 +608,21 @@ mod tests {
         .unwrap();
         let real = load(root.path(), &[], false).unwrap();
         assert_eq!(names(&real), [(Kind::Realistic, "notes")]);
+        // Nor through a linked folder of realistic scenarios.
+        #[cfg(unix)]
+        {
+            let linked = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("edge-cases"),
+                linked.path().join("realistic"),
+            )
+            .unwrap();
+            let error = load(linked.path(), &[], false).map(|_| ()).unwrap_err();
+            assert!(
+                error.to_string().starts_with("found no scenarios"),
+                "{error}"
+            );
+        }
         let error = load(root.path(), &["names".to_string()], false)
             .map(|_| ())
             .unwrap_err();

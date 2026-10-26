@@ -164,7 +164,9 @@ pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
     let mut found = Vec::new();
     for kind in Kind::ALL {
         let folder = root.join(kind.folder());
-        if !folder.is_dir() {
+        // A link, here or for a scenario below, could make edge cases count as realistic and
+        // send them to a real model.
+        if !fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir()) {
             continue;
         }
         let entries = fs::read_dir(&folder)
@@ -172,7 +174,6 @@ pub fn find(root: &Path) -> Result<Vec<(Kind, PathBuf)>> {
         let mut dirs = Vec::new();
         for entry in entries {
             let entry = entry?;
-            // A link could make an edge case count as realistic and reach a real model.
             if !entry.file_type()?.is_dir() {
                 continue;
             }
