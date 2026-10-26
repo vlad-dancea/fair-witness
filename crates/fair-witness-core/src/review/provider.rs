@@ -316,6 +316,16 @@ mod tests {
     async fn follows_a_redirect_from_an_api_on_another_machine() {
         use crate::testing::{Reply, redirect};
 
+        // A proxy from the environment would get the requests to 0.0.0.0 instead of the fake API,
+        // and a test cannot unset it while other tests run.
+        let proxies = ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+        if let Some(name) = proxies
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipped, since {name} is set");
+            return;
+        }
         let (url, server) = fake_model(vec![
             redirect("/v1/models/"),
             Reply::from(json!({ "object": "list", "data": [{ "id": "qwen3:8b" }] })),
