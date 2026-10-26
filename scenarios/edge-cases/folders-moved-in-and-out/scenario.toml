@@ -1,0 +1,33 @@
+description = "A researcher moves a folder of 20 files into the project from elsewhere, then moves another folder out of it. Moving in reports the folder and every file in it as created, and moving out reports the folder as deleted."
+
+[[set]]
+changes = [
+  { created = "campaign-2026-11" },
+  { created = "campaign-2026-11/site-01.csv" },
+  { created = "campaign-2026-11/site-02.csv" },
+  { created = "campaign-2026-11/site-03.csv" },
+  { created = "campaign-2026-11/site-04.csv" },
+  { created = "campaign-2026-11/site-05.csv" },
+  { created = "campaign-2026-11/site-06.csv" },
+  { created = "campaign-2026-11/site-07.csv" },
+  { created = "campaign-2026-11/site-08.csv" },
+  { created = "campaign-2026-11/site-09.csv" },
+  { created = "campaign-2026-11/site-10.csv" },
+  { created = "campaign-2026-11/site-11.csv" },
+  { created = "campaign-2026-11/site-12.csv" },
+  { created = "campaign-2026-11/site-13.csv" },
+  { created = "campaign-2026-11/site-14.csv" },
+  { created = "campaign-2026-11/site-15.csv" },
+  { created = "campaign-2026-11/site-16.csv" },
+  { created = "campaign-2026-11/site-17.csv" },
+  { created = "campaign-2026-11/site-18.csv" },
+  { created = "campaign-2026-11/site-19.csv" },
+  { created = "campaign-2026-11/site-20.csv" },
+]
+contradicts = false
+explanation = "Soil measurements as one CSV file per site and campaign are what the DMP plans."
+
+[[set]]
+changes = [{ deleted = "campaign-2026-04" }]
+contradicts = false
+explanation = "Moving measurements out of the project folder changes nothing the DMP says."

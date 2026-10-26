@@ -1,0 +1,7 @@
+description = "A folder of two files is deleted and a file with the same name takes its place in the same set. The set reports the folder as deleted and the file as created."
+
+[[set]]
+changes = [{ deleted = "data" }, { created = "data" }]
+contradicts = false
+explanation = "The file still holds soil measurements as CSV, which the DMP plans."
+fake_tool_calls = [{ tool = "read_file", arguments = { path = "data" } }]
