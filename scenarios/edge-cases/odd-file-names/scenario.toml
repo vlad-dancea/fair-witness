@@ -1,4 +1,4 @@
-description = "A researcher creates files whose names have spaces, umlauts, Chinese characters, a leading dash, a line break or 254 characters, an empty file and an empty folder, then links to outside the project and to nothing, then a file whose name is not valid UTF-8. The last set checks only that fair-witness copes, since TOML cannot hold that name."
+description = "A researcher creates files whose names have spaces, umlauts, Chinese characters, a leading dash, a line break or 254 characters, an empty file and an empty folder, then links to outside the project and to nothing, then a file whose name is not valid UTF-8 beside one whose name spells its escape. The model reads both by the escaped names the events give them."
 
 [[set]]
 changes = [
@@ -30,5 +30,13 @@ contradicts = false
 explanation = "Links hold no research data, so the DMP says nothing about them."
 
 [[set]]
+changes = [
+  { created = 'latin1-\xe9t\xe9.csv' },
+  { created = 'latin1-\\xe9t\\xe9.csv' },
+]
 contradicts = false
 explanation = "Soil measurements as CSV files are what the DMP plans, whatever their names."
+fake_tool_calls = [
+  { tool = "read_file", arguments = { path = 'latin1-\xe9t\xe9.csv' } },
+  { tool = "read_file", arguments = { path = 'latin1-\\xe9t\\xe9.csv' } },
+]

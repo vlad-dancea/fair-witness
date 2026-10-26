@@ -15,6 +15,7 @@ ln -s / outside-folder-link
 ln -s missing-target dangling-link
 wait_for_verdict
 
-# A name that is not valid UTF-8.
+# A name that is not valid UTF-8, and one that spells how fair-witness escapes it.
 printf 'sample,ph\nS07-1,6.4\n' > $'latin1-\xe9t\xe9.csv'
+printf 'sample,ph\nS08-1,6.1\n' > 'latin1-\xe9t\xe9.csv'
 wait_for_verdict
