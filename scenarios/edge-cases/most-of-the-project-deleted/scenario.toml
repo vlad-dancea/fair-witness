@@ -1,0 +1,16 @@
+description = "A researcher creates five folders of 60 files each, then deletes four of the folders at once. The deletion reports each folder once, not each of its 240 files."
+
+[[set]]
+contradicts = false
+explanation = "Soil measurements as one CSV file per site and campaign are what the DMP plans."
+
+[[set]]
+changes = [
+  { deleted = "raw/campaign-01" },
+  { deleted = "raw/campaign-02" },
+  { deleted = "raw/campaign-03" },
+  { deleted = "raw/campaign-04" },
+]
+contradicts = false
+explanation = "Deleting measurements from the project folder contradicts nothing the DMP says."
+fake_tool_calls = [{ tool = "list_dir", arguments = { path = "raw" } }]
