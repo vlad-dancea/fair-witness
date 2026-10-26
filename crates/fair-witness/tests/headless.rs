@@ -361,6 +361,34 @@ fn stops_when_the_api_refuses_the_model_and_effort() {
 }
 
 #[test]
+fn refuses_to_send_the_api_key_over_plain_http_to_another_machine() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+
+    let mut run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            "http://models.example.org/v1",
+            "--api-key",
+            "sk-test",
+            "--model",
+            "test",
+        ],
+    );
+
+    assert_eq!(run.exit_code(), Some(2));
+    assert_eq!(
+        run.stderr_until("Use https://").join("\n"),
+        "error: http://models.example.org/v1 uses plain HTTP to another machine, which would \
+         send the API key unencrypted\nUse https://, or reach the API through this machine, \
+         such as at http://localhost through an SSH tunnel, or leave out --api-key if it needs \
+         none"
+    );
+}
+
+#[test]
 fn sends_the_api_key_to_this_machine_without_a_proxy() {
     let (root, dmp_file) = unset_folder_with_a_dmp();
     // A proxy would get the key unencrypted over plain HTTP, so it must not be asked. If it
