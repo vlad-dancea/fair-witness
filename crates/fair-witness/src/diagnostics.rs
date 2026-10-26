@@ -4,7 +4,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use fair_witness_core::project;
-use tracing::{Level, Subscriber};
+use tracing::Subscriber;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::filter::{EnvFilter, FilterExt, filter_fn};
 use tracing_subscriber::fmt::{self, MakeWriter};
 use tracing_subscriber::prelude::*;
@@ -12,9 +13,16 @@ use tracing_subscriber::prelude::*;
 /// Sets which diagnostics are written, with the syntax of `RUST_LOG`.
 pub const LEVEL_VARIABLE: &str = "FAIR_WITNESS_LOG";
 const DEFAULT_LEVEL: &str = "info";
-/// The watcher sees the diagnostics file, which is in the watched folder. These crates log
-/// every file event below warn, so writing that line would cause the next, without end.
-const WATCHER_CRATES: [&str; 2] = ["notify", "notify_debouncer_full"];
+/// The most each of these crates may write, whatever `FAIR_WITNESS_LOG` says. The watcher sees
+/// the diagnostics file, which is in the watched folder, and `notify` and
+/// `notify_debouncer_full` log every file event below warn, so writing that line would cause
+/// the next, without end. `genai` logs the whole body of every AI API response at trace and
+/// quotes the response in an error, either of which can repeat the API key.
+const LIMITS: [(&str, LevelFilter); 3] = [
+    ("notify", LevelFilter::WARN),
+    ("notify_debouncer_full", LevelFilter::WARN),
+    ("genai", LevelFilter::OFF),
+];
 
 /// Writes the diagnostics of this process to a new file at `path`, at the level
 /// `FAIR_WITNESS_LOG` sets.
@@ -33,21 +41,23 @@ where
 {
     // A filter of its own, because a more specific directive in `filter`, such as
     // `notify::inotify=trace`, would win over any directive added there.
-    let quiet_watcher =
-        filter_fn(|metadata| *metadata.level() <= Level::WARN || !from_watcher(metadata.target()));
+    let limited = filter_fn(|metadata| {
+        limit(metadata.target()).is_none_or(|limit| *metadata.level() <= limit)
+    });
     tracing_subscriber::registry().with(
         fmt::layer()
             .with_writer(writer)
             .with_ansi(false)
-            .with_filter(filter.and(quiet_watcher)),
+            .with_filter(filter.and(limited)),
     )
 }
 
-fn from_watcher(target: &str) -> bool {
-    WATCHER_CRATES.iter().any(|name| {
+fn limit(target: &str) -> Option<LevelFilter> {
+    LIMITS.iter().find_map(|&(name, limit)| {
         target
             .strip_prefix(name)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            .then_some(limit)
     })
 }
 
@@ -85,17 +95,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn keeps_the_watcher_below_warn_out_whatever_the_level() {
+    /// The log `log` writes at `level`.
+    fn written_at(level: &str, log: impl FnOnce()) -> String {
         let written = Written::default();
-        let level = "trace,notify=trace,notify::inotify=trace,notify_debouncer_full=trace";
         let filter = filter(Ok(level.to_string())).unwrap();
         let make_writer = {
             let written = written.clone();
             move || written.clone()
         };
+        tracing::subscriber::with_default(subscriber(filter, make_writer), log);
+        String::from_utf8(written.0.lock().unwrap().clone()).unwrap()
+    }
 
-        tracing::subscriber::with_default(subscriber(filter, make_writer), || {
+    /// Each line of `written` without its time, level and target.
+    fn messages(written: &str) -> Vec<&str> {
+        written
+            .lines()
+            .map(|line| line.split_once(": ").unwrap().1)
+            .collect()
+    }
+
+    #[test]
+    fn keeps_the_watcher_below_warn_out_whatever_the_level() {
+        let level = "trace,notify=trace,notify::inotify=trace,notify_debouncer_full=trace";
+        let written = written_at(level, || {
             tracing::trace!(target: "notify::inotify", "inotify event");
             tracing::debug!(target: "notify_debouncer_full", "raw event");
             tracing::warn!(target: "notify", "watch failed");
@@ -103,15 +126,32 @@ mod tests {
             tracing::trace!(target: "fair_witness_core::session", "event logged");
         });
 
-        let written = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
-        let messages: Vec<&str> = written
-            .lines()
-            .map(|line| line.split_once(": ").unwrap().1)
-            .collect();
         assert_eq!(
-            messages,
+            messages(&written),
             ["watch failed", "notification shown", "event logged"]
         );
+    }
+
+    #[test]
+    fn keeps_the_ai_api_responses_out_whatever_the_level() {
+        let level = "trace,genai=trace,genai::webc::web_client=trace";
+        let written = written_at(level, || {
+            // As genai logs a refused request, whose body repeats the key, and a reply whose
+            // token counts it cannot read.
+            tracing::trace!(
+                target: "genai::webc::web_client",
+                "AI Response failed. Body:\n{{\"error\":{{\"message\":\"Incorrect API key \
+                 provided: sk-secret\"}}}}"
+            );
+            tracing::error!(
+                target: "genai::adapter::adapters::openai::adapter_shared",
+                "Fail to deserialize usage. Cause: invalid type: string \"sk-secret\", expected i32"
+            );
+            tracing::trace!(target: "fair_witness_core::review", "request sent");
+        });
+
+        assert!(!written.contains("sk-secret"), "{written}");
+        assert_eq!(messages(&written), ["request sent"]);
     }
 
     #[test]
