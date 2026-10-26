@@ -475,7 +475,7 @@ mod tests {
         };
         let settings = ModelSettings {
             project: Project::new(PathBuf::from("/home/researcher/sleep-study")),
-            reviewer: Arc::new(Reviewer::new(&ai, None)),
+            reviewer: Arc::new(Reviewer::new(&ai, None).unwrap()),
             url,
             api_key: None,
         };
@@ -645,7 +645,7 @@ mod tests {
             model: "qwen3:8b".to_string(),
             effort: "medium".parse().unwrap(),
         };
-        panel.reviewer = Arc::new(Reviewer::new(&ai, None));
+        panel.reviewer = Arc::new(Reviewer::new(&ai, None).unwrap());
         for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
             panel.handle_key(key.into());
         }

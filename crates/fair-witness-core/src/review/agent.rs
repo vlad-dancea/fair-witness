@@ -144,16 +144,16 @@ pub struct ModelChoice {
 }
 
 impl Reviewer {
-    pub fn new(config: &AiConfig, api_key: Option<String>) -> Self {
-        Self {
-            client: openai_compatible(&config.url, api_key.clone()),
+    pub fn new(config: &AiConfig, api_key: Option<String>) -> Result<Self> {
+        Ok(Self {
+            client: openai_compatible(&config.url, api_key.clone())?,
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
                 effort: config.effort.clone(),
             }),
             allowing_effort: Mutex::default(),
             api_key,
-        }
+        })
     }
 
     pub fn choice(&self) -> ModelChoice {
@@ -501,6 +501,7 @@ mod tests {
             },
             Some("sk-test".to_string()),
         )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -605,7 +606,8 @@ mod tests {
                     effort: effort.parse().unwrap(),
                 },
                 None,
-            );
+            )
+            .unwrap();
             reviewer
                 .review(&input(root.path(), "{}", &[]), &|_| {})
                 .await

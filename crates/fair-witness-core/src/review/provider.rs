@@ -53,7 +53,7 @@ fn base_url(url: &str) -> String {
     format!("{}/", url.trim_end_matches('/'))
 }
 
-pub fn openai_compatible(url: &str, api_key: Option<String>) -> Client {
+pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
     let endpoint = Endpoint::from_owned(base_url(url));
     let auth = AuthData::from_single(api_key.unwrap_or_default());
     Client::builder()
@@ -65,6 +65,7 @@ pub fn openai_compatible(url: &str, api_key: Option<String>) -> Client {
             })
         })
         .build()
+        .with_context(|| format!("could not set up a client for the AI API at {url}"))
 }
 
 /// A request the API refused with 429 Too Many Requests.
