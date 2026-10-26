@@ -28,6 +28,8 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
         id: String,
     }
 
+    // Unlike DAMAP's client, it follows any redirect: an API that takes no key may be on another
+    // machine over plain HTTP, and reqwest drops the key on a redirect to another host or scheme.
     let http = net::for_server(
         HttpClient::builder()
             .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
@@ -265,7 +267,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::testing::{EFFORT_NOT_ALLOWED, fake_model};
+    use crate::testing::{EFFORT_NOT_ALLOWED, Reply, fake_model, redirect};
 
     #[tokio::test]
     async fn lists_the_models_a_server_offers() {
@@ -285,6 +287,20 @@ mod tests {
         let (head, _) = &server.join().unwrap()[0];
         assert!(head.starts_with("GET /v1/models "), "{head}");
         assert!(head.contains("authorization: Bearer sk-test"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn follows_a_redirect_from_an_api_on_another_machine() {
+        let (url, server) = fake_model(vec![
+            redirect("/v1/models/"),
+            Reply::from(json!({ "object": "list", "data": [{ "id": "qwen3:8b" }] })),
+        ]);
+        // 0.0.0.0 reaches this machine on Linux and macOS, but fair-witness cannot tell that it
+        // is not another one.
+        let url = url.replace("127.0.0.1", "0.0.0.0");
+
+        assert_eq!(list_models(&url, None).await.unwrap(), ["qwen3:8b"]);
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[test]

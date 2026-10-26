@@ -60,6 +60,8 @@ Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers 
 
 Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
 
+fair-witness talks to DAMAP over plain `http://` only on this machine: `localhost`, `127.0.0.0/8` and `[::1]`, such as a DAMAP [running locally](#running-damap-locally) at `http://localhost:8085`. Anywhere else the login would cross the network unencrypted, and anyone along the way could read it and act as you in DAMAP. With the username and password login, that includes your password. `setup` and `run` refuse such a DAMAP URL before they send anything to it, and the same for DAMAP's login server, whose address comes from DAMAP. They reach a DAMAP or login server on this machine directly, also when `HTTP_PROXY` or `ALL_PROXY` names a proxy.
+
 An API key goes over plain `http://` only to this machine: `localhost`, `127.0.0.0/8` and `[::1]`. Anywhere else it would cross the network unencrypted, where anyone along the way could read it and use it. fair-witness reaches an API on this machine directly, also when `HTTP_PROXY` or `ALL_PROXY` names a proxy, which would get the key the same way. For an API on another machine, use `https://`, or reach it at `http://localhost` through an SSH tunnel, such as `ssh -L 11434:localhost:11434 lab-machine` for Ollama on a lab machine. For a plain `http://` address on another machine, `setup` neither asks for a key nor sends the saved one, so an API that needs no key still works, and it refuses a key given with `--api-key`.
 
 ### Setting up without prompts
@@ -278,7 +280,9 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"this folder is not set up yet"**: run `fair-witness setup` in the folder, or in one of its parent folders.
 - **"Is DAMAP running?"**: the saved DAMAP URL can't be reached. Start DAMAP, or run `setup` to change the URL.
 - **"… does not look like an OpenAI-compatible API"**: the AI URL usually needs to end in `/v1`.
-- **"uses plain HTTP to another machine"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
+- **"… which would send the DAMAP login unencrypted"**: the DAMAP URL uses plain HTTP to another machine. Run `setup` with DAMAP's `https://` address, also for a URL saved by an earlier `setup`.
+- **"DAMAP's login server … uses plain HTTP"**: DAMAP logs in through a login server on another machine over plain HTTP. Only the people who run that DAMAP can change it.
+- **"… which would send the API key unencrypted"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
 - **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
 - **"… refuses your-model (high effort)"**: the API does not take the model at this effort, and its message after the colon says why, such as which efforts the model takes. Pass another with `--effort`, or `--effort default` to send none, and save it with `m` and `Enter`. Or choose another model with `setup`.

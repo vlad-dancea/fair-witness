@@ -1,11 +1,8 @@
-use std::time::Duration;
-
 use anyhow::{Result, bail};
 use dialoguer::{Confirm, Input, Password};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{Damap, InstanceConfig, discover, reach, save_session};
 use fair_witness_core::project::Project;
-use reqwest::Client;
 use reqwest::Url;
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
@@ -36,16 +33,15 @@ pub async fn setup(
     project: &Project,
     url: Option<String>,
 ) -> Result<Damap> {
-    let http = http_client()?;
     let previous_url = match around {
         Some(around) => around.config()?.map(|c| c.damap.frontend_url),
         None => None,
     };
     let (damap, instance) = match url {
-        Some(url) => reach(&http, &web_url(&url)?).await?,
-        None => ask_for_damap(&http, previous_url.clone()).await?,
+        Some(url) => reach(&web_url(&url)?).await?,
+        None => ask_for_damap(previous_url.clone()).await?,
     };
-    let oidc = discover(http, &damap, &instance, &TerminalPrompts).await?;
+    let oidc = discover(&damap, &instance, &TerminalPrompts).await?;
     let refresh_token = match around {
         Some(around) => around.credentials()?.refresh_token,
         None => None,
@@ -91,14 +87,7 @@ pub fn web_url(input: &str) -> Result<String> {
     }
 }
 
-pub fn http_client() -> Result<Client> {
-    Ok(Client::builder()
-        .user_agent(concat!("fair-witness/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(15))
-        .build()?)
-}
-
-async fn ask_for_damap(http: &Client, previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
+async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
     let mut default = previous.unwrap_or_else(|| DEFAULT_URL.to_string());
     loop {
         let input: String = Input::new()
@@ -112,9 +101,13 @@ async fn ask_for_damap(http: &Client, previous: Option<String>) -> Result<(Damap
                 continue;
             }
         };
-        let damap = Damap::new(http.clone(), &url);
-        match damap.instance_config().await {
-            Ok(instance) => return Ok((damap, instance)),
+        let reached = async {
+            let damap = Damap::new(&url)?;
+            let instance = damap.instance_config().await?;
+            anyhow::Ok((damap, instance))
+        };
+        match reached.await {
+            Ok(reached) => return Ok(reached),
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }
         default = url;
