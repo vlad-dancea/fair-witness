@@ -155,7 +155,11 @@ impl FolderWatcher {
     fn apply(&mut self, event: &DebouncedEvent, changes: &mut Vec<Change>) {
         let paths = &event.paths;
         match event.kind {
-            EventKind::Create(_) => paths.iter().for_each(|path| self.discover(path, changes)),
+            EventKind::Create(_) => paths.iter().for_each(|path| self.arrive(path, changes)),
+            // The debouncer adds such a remove when a file is renamed over a path that has events
+            // of its own, as `sed -i` does after reading the file, and the create or rename of
+            // that path follows it, so the path was replaced and not removed.
+            EventKind::Remove(_) if event.info() == Some("override") => {}
             EventKind::Remove(_) => paths.iter().for_each(|path| self.forget(path, changes)),
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
                 self.rename(&paths[0], &paths[1], changes)
@@ -163,7 +167,7 @@ impl FolderWatcher {
             EventKind::Modify(ModifyKind::Name(_)) => {
                 for path in paths {
                     if fs::symlink_metadata(path).is_ok() {
-                        self.discover(path, changes);
+                        self.arrive(path, changes);
                     } else {
                         self.forget(path, changes);
                     }
@@ -184,6 +188,17 @@ impl FolderWatcher {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A path that was created or moved in from outside. A file already there was replaced, as
+    /// a program that saves by renaming a new file over the old one does, which the debouncer
+    /// hands on as a create of the old name, so it changed.
+    fn arrive(&mut self, path: &Path, changes: &mut Vec<Change>) {
+        if !self.known.contains(path) || !path.is_file() {
+            self.discover(path, changes);
+        } else if !self.filter.skips(path, false) {
+            changes.push(Change::Changed(path.to_path_buf()));
         }
     }
 
@@ -872,6 +887,32 @@ mod tests {
             [Change::Changed(PathBuf::from("run.log"))]
         );
         assert!(waited >= debounce * LONGEST_SET, "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn reports_a_file_replaced_by_a_rename_as_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let outside = tempfile::tempdir().unwrap();
+        for name in ["saved.csv", "moved.csv"] {
+            fs::write(root.join(name), "a").unwrap();
+        }
+        let mut watcher = watch(root);
+
+        // As `sed -i` saves: it reads the old file, writes a new one and renames that over it.
+        fs::read(root.join("saved.csv")).unwrap();
+        fs::write(root.join(".saved.csv.tmp"), "b").unwrap();
+        fs::rename(root.join(".saved.csv.tmp"), root.join("saved.csv")).unwrap();
+        // As a file manager replaces a file with one moved in from elsewhere.
+        fs::write(outside.path().join("moved.csv"), "b").unwrap();
+        fs::rename(outside.path().join("moved.csv"), root.join("moved.csv")).unwrap();
+
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by(|a, b| a.path().cmp(b.path()));
+        assert_eq!(
+            changes,
+            ["moved.csv", "saved.csv"].map(|name| Change::Changed(PathBuf::from(name)))
+        );
     }
 
     #[tokio::test]
