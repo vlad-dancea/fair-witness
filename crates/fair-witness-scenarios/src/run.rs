@@ -15,9 +15,10 @@ use fair_witness_core::review::{Checked, ModelChoice, Reviewer};
 use fair_witness_core::secret::hide;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
+use fair_witness_core::watcher;
 
 use crate::report::Refused;
-use crate::scenario::{DMP, FILES, SCRIPT, Scenario};
+use crate::scenario::{DMP, FILES, Kind, SCRIPT, Scenario};
 
 /// Generous, so that a slow CI machine still makes it, while a scenario that hangs fails.
 const STARTUP: Duration = Duration::from_secs(20);
@@ -25,7 +26,9 @@ const FAKE_REVIEW: Duration = Duration::from_secs(20);
 /// Generous, since a real model's review can take up to 12 replies at a high effort from a busy
 /// API, while a review that hangs still fails.
 const REAL_REVIEW: Duration = Duration::from_secs(10 * 60);
-const SCRIPT_STEP: Duration = Duration::from_secs(60);
+/// Generous, since a realistic task such as a long copy or a script written over a few minutes
+/// runs at a researcher's pace, while a script that hangs still fails.
+const SCRIPT_STEP: Duration = Duration::from_secs(5 * 60);
 const STOP: Duration = Duration::from_secs(10);
 
 /// fair-witness reads the API key from here, so that it is not on a command line.
@@ -42,6 +45,7 @@ static GROUPS: Mutex<Option<Vec<u32>>> = Mutex::new(Some(Vec::new()));
 /// How to run fair-witness for every scenario.
 pub struct Settings {
     pub binary: PathBuf,
+    /// For the edge cases. Realistic scenarios run at fair-witness's own.
     pub debounce: Duration,
     /// The key for the API of the real models, which only the checks and fair-witness get.
     pub api_key: Option<String>,
@@ -95,6 +99,18 @@ fn file_name(name: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+impl Settings {
+    /// How long fair-witness waits for the folder to be quiet in `scenario`: the edge cases'
+    /// debounce, or for a realistic scenario fair-witness's own, since its pace is a
+    /// researcher's.
+    fn debounce_for(&self, scenario: &Scenario) -> Duration {
+        match scenario.kind {
+            Kind::EdgeCase => self.debounce,
+            Kind::Realistic => watcher::DEBOUNCE,
+        }
+    }
 }
 
 /// Asks the API once whether it takes each real model at its effort, as fair-witness does when it
@@ -190,6 +206,7 @@ fn run_into(
 
     let mut script = Process::start_group(SCRIPT, &mut script_command(scenario, folder.path()))
         .context("could not start bash")?;
+    let debounce = settings.debounce_for(scenario);
     let mut set = 0;
     let mut deadline = Instant::now() + SCRIPT_STEP;
     let code = loop {
@@ -235,10 +252,7 @@ fn run_into(
     }
     // A set of changes the script made after it last waited comes two and a half debounces
     // after the last of them.
-    witness.collect_for(
-        settings.debounce * 5 / 2 + Duration::from_millis(200),
-        records,
-    )?;
+    witness.collect_for(debounce * 5 / 2 + Duration::from_millis(200), records)?;
     witness.stop(records)
 }
 
@@ -264,7 +278,7 @@ fn witness_command(
         .arg("--skip-model-check")
         .env(
             "FAIR_WITNESS_DEBOUNCE_MS",
-            settings.debounce.as_millis().to_string(),
+            settings.debounce_for(scenario).as_millis().to_string(),
         );
     match (model, &settings.api_key) {
         (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
@@ -287,12 +301,14 @@ fn script_command(scenario: &Scenario, folder: &Path) -> Command {
     command
 }
 
-/// Defines `wait_for_verdict` and runs the script given as `$0` in a subshell. bash then says how
-/// the script ended and waits to be killed with the process group it leads, since a group whose
-/// leader is reaped first can lose its id to another one.
+/// Defines `wait_for_verdict`, which waits for as many verdicts as it is given, one without a
+/// number, and runs the script given as `$0` in a subshell. bash then says how the script ended
+/// and waits to be killed with the process group it leads, since a group whose leader is reaped
+/// first can lose its id to another one.
 fn prelude() -> String {
     format!(
-        "wait_for_verdict() {{\n    echo '{WAIT}'\n    read -r _\n}}\n\
+        "wait_for_verdict() {{\n    for _ in $(seq \"${{1:-1}}\"); do\n        echo '{WAIT}'\n        \
+         read -r _\n    done\n}}\n\
          (\n    set -euo pipefail\n    . \"$0\"\n)\n\
          echo \"{ENDED}$?\"\n\
          read -r _\n"
@@ -572,10 +588,36 @@ mod tests {
     fn scenario() -> Scenario {
         Scenario {
             name: "notes".to_string(),
+            kind: Kind::EdgeCase,
             dir: PathBuf::from("/scenarios/notes"),
             description: String::new(),
             sets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn waits_for_as_many_verdicts_as_the_script_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SCRIPT),
+            "wait_for_verdict 2\necho between\nwait_for_verdict\n",
+        )
+        .unwrap();
+        let mut scenario = scenario();
+        scenario.dir = dir.path().to_path_buf();
+        let mut bash = script_command(&scenario, dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // One answer for each verdict, and one more that lets bash end after the script.
+        bash.stdin.take().unwrap().write_all(b"\n\n\n\n").unwrap();
+
+        let output = bash.wait_with_output().unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{WAIT}\n{WAIT}\nbetween\n{WAIT}\n{ENDED}0\n")
+        );
     }
 
     /// What `command` does with the API key: `None` when it inherits it, `Some(None)` when it
