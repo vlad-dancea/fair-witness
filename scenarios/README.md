@@ -58,7 +58,7 @@ The script changes files in the project folder, which is its working directory, 
 
 fair-witness ends a change set once the folder has been quiet for the debounce, or once the set's first change is 30 debounces old, as in a long copy that never leaves the folder quiet. The debounce is 500 milliseconds for the edge cases (`--debounce-ms` changes it) and fair-witness's own 2 seconds for the realistic scenarios. Changes less than a debounce apart end up in the same set, and a `sleep` or a slow command that leaves the folder quiet for longer than the debounce splits the set in two. fair-witness sees a change only once the change is a debounce old, so a set comes about two and a half debounces after its last change. Writes to a file that stays open count only once they pause for a debounce.
 
-A script runs for at most 5 minutes between two waits.
+A script runs for at most 5 minutes before its first wait, between two waits and after its last.
 
 ### Writing a realistic scenario
 
