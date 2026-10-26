@@ -1,6 +1,6 @@
 [package]
 name = "fair-witness"
-version = "0.1.0"
+version = "0.1.33"
 edition = "2024"
 description = "Flags folder changes that contradict your DAMAP data management plan"
 repository = "https://github.com/vlad-dancea/fair-witness"
