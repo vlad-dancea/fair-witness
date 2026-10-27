@@ -21,7 +21,7 @@ pub trait Prompts: Notices {
     /// Asks them to confirm `code` at `link` in the browser.
     fn confirm_code(&self, link: &str, code: &str);
     fn username_and_password(&self) -> Result<(String, String)>;
-    /// Asks whether to keep the saved session rather than log in again, such as as someone else.
+    /// Asks whether to keep the saved session, or to log in again, such as with another account.
     fn stay_logged_in(&self) -> Result<bool>;
 }
 
