@@ -99,9 +99,9 @@ A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json`, t
 
 ### What is ignored
 
-Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to:
+Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to them, and the AI cannot read them:
 
-- `.fair-witness/` itself
+- `.fair-witness/`, also in a subfolder, such as one that `setup` made there or that came with a colleague's folder
 - `.git`, so a commit does not count as a change
 - folders tools fill on their own: `.venv/`, `venv/`, `__pycache__/`, `node_modules/` and `.ipynb_checkpoints/`
 - folders a tool tagged as a cache with a [`CACHEDIR.TAG`](https://bford.info/cachedir/) file, as cargo tags `target/` and pytest, mypy and ruff tag their `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/`
@@ -112,7 +112,7 @@ Some files in a project are not research data, and checking them would only cost
 
 A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy and replace the API key with a new one. The DAMAP session in the copy stays valid until it expires.
 
-To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. `.fair-witness/` itself is always skipped:
+To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. A `.fair-witness/` folder is always skipped, wherever it is:
 
 ```gitignore
 # scratch output of the analysis scripts
@@ -189,7 +189,9 @@ created: data/patients.csv                                       #1
 - **`contradicts the DMP`** (red): the AI names the DMP field it clashes with and explains why. You also get a **desktop notification**, so you see it even when the terminal is in the background.
 - **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it.
 
-To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or into `.fair-witness/`.
+Changes you make while the AI checks a set show up right away as sets of their own, and the AI checks them in turn, each verdict under its own set. A file that is gone by the time the AI gets to its set stays listed, and the AI is told that it can no longer be read.
+
+To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
 
@@ -275,7 +277,7 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 {"time":"2026-10-23T13:48:24.913Z","event":"verdict","set":1,"verdict":{"contradicts":true,"dmp_field":"dataset[0].personal_data","explanation":"..."}}
 ```
 
-Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
+Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. The `changes` of the next sets can come before that, while the set is still reviewed, since the sets are reviewed one after another. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 

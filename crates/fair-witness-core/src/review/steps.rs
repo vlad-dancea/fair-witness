@@ -6,11 +6,13 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 
 use super::{Trace, Verdict};
-use crate::watcher::Change;
+use crate::watcher::{Change, Filter};
 
 /// What a step of a review looks at.
 pub struct Input<'a> {
     pub root: &'a Path,
+    /// What in `root` is not research data, which the watcher leaves out and no step may read.
+    pub filter: &'a Filter,
     pub dmp: &'a str,
     pub changes: &'a [Change],
     /// What earlier steps found, for the later ones to take into account.
@@ -41,6 +43,7 @@ pub trait Step: Send + Sync {
 pub async fn review(
     steps: &[Arc<dyn Step>],
     root: &Path,
+    filter: &Filter,
     dmp: &str,
     changes: &[Change],
     trace: &(dyn Fn(Trace) + Sync),
@@ -49,6 +52,7 @@ pub async fn review(
     for step in steps {
         let input = Input {
             root,
+            filter,
             dmp,
             changes,
             found: &found,
@@ -106,7 +110,8 @@ mod tests {
             model(endpoint),
         ];
 
-        let decided = review(&steps, root.path(), "{}", &[], &|_| {}).await;
+        let filter = Filter::new(root.path()).unwrap();
+        let decided = review(&steps, root.path(), &filter, "{}", &[], &|_| {}).await;
 
         assert_eq!(decided.unwrap(), verdict());
         assert!(server.join().unwrap().is_empty());
@@ -127,8 +132,10 @@ mod tests {
             model(endpoint),
         ];
 
+        std::fs::write(root.path().join("survey.csv"), "name\nAnna Muster\n").unwrap();
         let changes = [Change::Created("survey.csv".into())];
-        review(&steps, root.path(), "{}", &changes, &|_| {})
+        let filter = Filter::new(root.path()).unwrap();
+        review(&steps, root.path(), &filter, "{}", &changes, &|_| {})
             .await
             .unwrap();
 
