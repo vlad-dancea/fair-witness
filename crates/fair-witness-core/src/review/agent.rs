@@ -223,8 +223,11 @@ impl Reviewer {
         choice: &ModelChoice,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
-        // Once, so that the first message and `list_changes` agree on what is gone.
-        let gone = prompt::gone(input.root, input.changes);
+        // Once, so that the first message and `list_changes` agree on what is gone. Looking at
+        // every path of a large set can block, such as on a network drive, and on the runtime
+        // it would keep the review's timeout from firing.
+        let (root, changes) = (input.root.to_path_buf(), input.changes.to_vec());
+        let gone = tokio::task::spawn_blocking(move || prompt::gone(&root, &changes)).await?;
         let about_changes = prompt::about_changes(input.changes, &gone, input.found);
         let lines = input
             .changes

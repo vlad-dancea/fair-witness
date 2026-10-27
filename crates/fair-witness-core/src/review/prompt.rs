@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::watcher::{self, Change, Kind, Listed};
 
@@ -14,17 +14,18 @@ pub fn first_message(dmp: &str, about_changes: &str) -> String {
 
 /// The paths of `changes` under `root` that are gone by the time of the review. A set waits for
 /// the reviews before it, and its files can go meanwhile.
-pub fn gone<'a>(root: &Path, changes: &'a [Change]) -> HashSet<&'a Path> {
+pub fn gone(root: &Path, changes: &[Change]) -> HashSet<PathBuf> {
     changes
         .iter()
         .filter(|change| change.kind() != Kind::Deleted)
         .map(Change::path)
         .filter(|path| fs::symlink_metadata(root.join(path)).is_err())
+        .map(Path::to_path_buf)
         .collect()
 }
 
 /// `change` as the model is told it, in the first message or by `list_changes`.
-pub fn line(change: &Change, gone: &HashSet<&Path>) -> String {
+pub fn line(change: &Change, gone: &HashSet<PathBuf>) -> String {
     let line = format!(
         "{}: {}",
         change.kind().verb(),
@@ -39,7 +40,7 @@ pub fn line(change: &Change, gone: &HashSet<&Path>) -> String {
 
 /// What changed, with the paths that are `gone`, and what earlier steps of the review found,
 /// which the first message gives after the DMP.
-pub fn about_changes(changes: &[Change], gone: &HashSet<&Path>, found: &[String]) -> String {
+pub fn about_changes(changes: &[Change], gone: &HashSet<PathBuf>, found: &[String]) -> String {
     let listed = watcher::summarize(changes);
     let lines: Vec<String> = listed
         .iter()
