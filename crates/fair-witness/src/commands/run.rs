@@ -114,17 +114,17 @@ struct Dmp {
 
 pub async fn run(here: &Path, args: Args) -> Result<(), Failure> {
     if !args.headless {
-        let start = start(here, args).await.map_err(Failure::Setup)?;
-        return show_events(start).await.map_err(Failure::Runtime);
+        let start = start(here, args).await.map_err(Failure::NotStarted)?;
+        return show_events(start).await.map_err(Failure::Failed);
     }
     // Listening before startup, which can wait on DAMAP for a while, lets a script stop it then.
-    let stopped = stop_requested().map_err(Failure::Setup)?;
+    let stopped = stop_requested().map_err(Failure::NotStarted)?;
     tokio::pin!(stopped);
     let start = tokio::select! {
-        start = start(here, args) => start.map_err(Failure::Setup)?,
+        start = start(here, args) => start.map_err(Failure::NotStarted)?,
         () = &mut stopped => return Ok(()),
     };
-    print_events(start, stopped).await.map_err(Failure::Runtime)
+    print_events(start, stopped).await.map_err(Failure::Failed)
 }
 
 async fn start(here: &Path, args: Args) -> Result<Start> {

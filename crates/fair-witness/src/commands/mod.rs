@@ -53,8 +53,9 @@ count as one set (default 2000)."
 /// Why fair-witness stopped with an error, which decides its exit code.
 pub enum Failure {
     /// `run` could not start watching, such as in a folder that is not set up.
-    Setup(anyhow::Error),
-    Runtime(anyhow::Error),
+    NotStarted(anyhow::Error),
+    /// Any other error, such as one while `run` watches or from `setup`.
+    Failed(anyhow::Error),
 }
 
 impl Failure {
@@ -62,21 +63,21 @@ impl Failure {
     /// from one that failed while watching.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Failure::Setup(_) => 2,
-            Failure::Runtime(_) => 1,
+            Failure::NotStarted(_) => 2,
+            Failure::Failed(_) => 1,
         }
     }
 
     pub fn error(&self) -> &anyhow::Error {
         match self {
-            Failure::Setup(e) | Failure::Runtime(e) => e,
+            Failure::NotStarted(e) | Failure::Failed(e) => e,
         }
     }
 }
 
 impl From<anyhow::Error> for Failure {
     fn from(e: anyhow::Error) -> Self {
-        Failure::Runtime(e)
+        Failure::Failed(e)
     }
 }
 
@@ -84,7 +85,7 @@ pub async fn run() -> Result<(), Failure> {
     let command = Cli::parse().command;
     let here = env::current_dir()
         .context("could not determine the current directory")
-        .map_err(Failure::Setup)?;
+        .map_err(Failure::NotStarted)?;
     match command {
         Command::Setup { url, model } => {
             let project = Project::find(&here);
