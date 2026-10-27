@@ -4,16 +4,18 @@ mod summary;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::mem;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use notify_debouncer_full::file_id::{self, FileId};
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer_opt,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -123,6 +125,15 @@ impl Change {
     }
 }
 
+/// What the watcher reports instead of a change set.
+#[derive(Debug)]
+pub enum WatchError {
+    /// Watching failed for some paths, and goes on.
+    Failed(Vec<notify::Error>),
+    /// The project folder was moved or deleted, so nothing is watched any more.
+    Gone,
+}
+
 pub struct FolderWatcher {
     _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     /// The debouncer's batches, each with when it handed the batch on.
@@ -130,6 +141,9 @@ pub struct FolderWatcher {
     debounce: Duration,
     held: Option<Held>,
     root: PathBuf,
+    /// The project folder's id when watching started, which tells it from a folder that took its
+    /// place since.
+    root_id: FileId,
     known: BTreeSet<PathBuf>,
     filter: Filter,
 }
@@ -141,9 +155,21 @@ impl FolderWatcher {
         let filter = Filter::new(root)?;
         let (tx, events) = mpsc::unbounded_channel();
         let debounce = debounce.max(SHORTEST_DEBOUNCE);
-        let mut debouncer = new_debouncer(debounce, None, move |result| {
-            let _ = tx.send((Instant::now(), result));
-        })?;
+        let root_id = file_id::get_file_id(root)
+            .with_context(|| format!("could not read {}", root.display()))?;
+        // A link can lead to a share with more folders than the system lets a user watch, and
+        // what changes there is not the project's, which `walk` and the model's tools also stay
+        // out of.
+        let config = notify::Config::default().with_follow_symlinks(false);
+        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+            debounce,
+            None,
+            move |result| {
+                let _ = tx.send((Instant::now(), result));
+            },
+            RecommendedCache::new(),
+            config,
+        )?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
         walk(root, &filter, &mut |path| {
@@ -155,6 +181,7 @@ impl FolderWatcher {
             debounce,
             held: None,
             root: root.to_path_buf(),
+            root_id,
             known,
             filter,
         })
@@ -417,9 +444,30 @@ impl FolderWatcher {
         take_under(&mut self.known, path)
     }
 
+    /// Whether the project folder was moved or deleted, which the events say when it was the
+    /// folder itself. When a folder above it moved, no event says so, but the folder is no
+    /// longer where the later events name it, or another one is. A folder that cannot be looked
+    /// at, as when a folder above it is closed to the user for a while, is still there.
+    fn gone(&self, events: &[DebouncedEvent]) -> bool {
+        let moved_or_removed = |kind: &EventKind| {
+            kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_)))
+        };
+        let on_root = events
+            .iter()
+            .any(|event| moved_or_removed(&event.kind) && event.paths.contains(&self.root));
+        on_root
+            || match file_id::get_file_id(&self.root) {
+                Ok(id) => id != self.root_id,
+                Err(e) => matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ),
+            }
+    }
+
     /// The next change set, once the folder has been quiet for the debounce or the set's first
     /// change is 30 debounces old.
-    pub async fn next(&mut self) -> Option<Result<Vec<Change>, Vec<notify::Error>>> {
+    pub async fn next(&mut self) -> Option<Result<Vec<Change>, WatchError>> {
         loop {
             // By the clock, since batches of other files can keep coming while a file is copied.
             self.look_if_due();
@@ -444,14 +492,33 @@ impl FolderWatcher {
                         }
                     }
                 }
-                None => self.events.recv().await,
+                // Windows sends no event when the project folder itself is deleted, and no system
+                // sends one when a folder above it moves, so a quiet folder is looked at once a
+                // debounce.
+                None => match tokio::time::timeout(self.debounce, self.events.recv()).await {
+                    Ok(received) => received,
+                    Err(_) if self.gone(&[]) => return Some(Err(WatchError::Gone)),
+                    Err(_) => continue,
+                },
             };
             let (sent, events) = match received {
                 Some((sent, Ok(events))) => (sent, events),
-                Some((_, Err(errors))) => return Some(Err(errors)),
-                // The set is complete, or the debouncer stopped.
+                Some((_, Err(errors))) => return Some(Err(WatchError::Failed(errors))),
+                // The set is complete, or the debouncer stopped. A folder can go without an event
+                // while the set is held, and the set goes with it then, as below.
+                None if self.gone(&[]) => {
+                    self.held = None;
+                    return Some(Err(WatchError::Gone));
+                }
                 None => return self.held.take().map(|held| Ok(held.changes)),
             };
+            // The watches stay on the folder wherever it went, or on nothing, and their events
+            // name paths that are not the project's any more. The held set goes too, since
+            // nothing in it can be read where it was.
+            if self.gone(&events) {
+                self.held = None;
+                return Some(Err(WatchError::Gone));
+            }
             // Only events that can make a change count, so that reading a file bridges no
             // pause, and a batch that made none, such as in a folder the filter leaves out, keeps
             // no set open.
@@ -1116,6 +1183,126 @@ mod tests {
             "{changes:?}"
         );
         assert!(created(&changes).is_empty(), "{changes:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_changes_behind_a_link_to_a_folder_outside_the_project() {
+        let share = tempfile::tempdir().unwrap();
+        let campaign = share.path().join("campaign");
+        fs::create_dir_all(campaign.join("day-01")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::os::unix::fs::symlink(&campaign, root.join("raw")).unwrap();
+        let mut watcher = watch(root);
+
+        // In a folder that was there when watching started, and in one made since.
+        fs::write(campaign.join("day-01/samples.csv"), "a").unwrap();
+        fs::create_dir(campaign.join("day-02")).unwrap();
+        fs::write(root.join("notes.md"), "Day 2 is on the share.").unwrap();
+
+        assert_eq!(
+            drain(&mut watcher).await,
+            [Change::Created(PathBuf::from("notes.md"))]
+        );
+    }
+
+    /// Asserts that the watcher of a project folder stops once `go`, called `way`, moved or
+    /// deleted it.
+    async fn assert_stops_once(way: &str, go: impl FnOnce(&Path)) {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("lab/project");
+        fs::create_dir_all(&root).unwrap();
+        let mut watcher = watch(&root);
+        // Lets the events of reading the folder at the start pass, so that only `go` can stop it.
+        assert!(
+            tokio::time::timeout(QUIET, watcher.next()).await.is_err(),
+            "{way}"
+        );
+
+        go(&root);
+
+        let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        assert!(
+            matches!(next, Ok(Some(Err(WatchError::Gone)))),
+            "{way}: {next:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_once_the_project_folder_is_moved_or_deleted() {
+        assert_stops_once("moved", |root| {
+            fs::rename(root, root.with_file_name("moved")).unwrap();
+        })
+        .await;
+        assert_stops_once("deleted", |root| fs::remove_dir_all(root).unwrap()).await;
+        // No event says that a folder above it moved.
+        assert_stops_once("moved with its parent", |root| {
+            let parent = root.parent().unwrap();
+            fs::rename(parent, parent.with_file_name("moved")).unwrap();
+        })
+        .await;
+        assert_stops_once("moved with its parent and then changed", |root| {
+            let parent = root.parent().unwrap();
+            let moved = parent.with_file_name("moved");
+            fs::rename(parent, &moved).unwrap();
+            fs::write(moved.join("project/notes.md"), "a").unwrap();
+        })
+        .await;
+        assert_stops_once("moved with its parent and replaced", |root| {
+            let parent = root.parent().unwrap();
+            let moved = parent.with_file_name("moved");
+            fs::rename(parent, &moved).unwrap();
+            fs::create_dir_all(root).unwrap();
+            fs::write(root.join("notes.md"), "new").unwrap();
+            fs::write(moved.join("project/notes.md"), "a").unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drops_the_set_it_holds_once_another_folder_takes_the_project_folders_place() {
+        // Long enough that the set is surely held, and not yet complete, when the folder moves.
+        let debounce = Duration::from_millis(400);
+        let parent = tempfile::tempdir().unwrap();
+        let lab = parent.path().join("lab");
+        let root = lab.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let mut watcher = FolderWatcher::new(&root, debounce).unwrap();
+
+        fs::write(root.join("results.csv"), "a").unwrap();
+        assert!(
+            tokio::time::timeout(debounce * 2, watcher.next())
+                .await
+                .is_err()
+        );
+        // No event says so, since the watches went with the folder.
+        fs::rename(&lab, parent.path().join("moved")).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("results.csv"), "someone else's").unwrap();
+
+        let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        assert!(matches!(next, Ok(Some(Err(WatchError::Gone)))), "{next:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keeps_watching_a_project_folder_closed_to_the_user_for_a_while() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let lab = parent.path().join("lab");
+        let root = lab.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let mut watcher = watch(&root);
+
+        // The batch with the write comes while nobody can look into the project folder.
+        fs::write(root.join("notes.md"), "a").unwrap();
+        fs::set_permissions(&lab, fs::Permissions::from_mode(0o000)).unwrap();
+        let next = tokio::time::timeout(QUIET, watcher.next()).await;
+        fs::set_permissions(&lab, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!matches!(next, Ok(Some(Err(WatchError::Gone)))), "{next:?}");
     }
 
     #[cfg(unix)]
