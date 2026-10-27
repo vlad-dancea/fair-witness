@@ -1,11 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
-use fair_witness_core::net::in_the_clear;
+use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Effort, Project};
 use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
 
-use super::damap::web_url;
 use crate::tui::model_panel::describe;
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
@@ -56,7 +55,7 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
                 Some(_) if in_the_clear(&url) => {
                     bail!(
                         "{}, or leave out --api-key if it needs none",
-                        unencrypted(&url)
+                        api_key_unencrypted(&url)
                     )
                 }
                 Some(key) => Some(key),
@@ -137,9 +136,11 @@ impl SavedKey {
     /// The saved key, if it was saved for `url`, since another API would get a key that is not
     /// its own.
     fn for_api(&self, url: &str) -> Option<String> {
-        self.key
-            .clone()
-            .filter(|_| self.url.as_deref() == Some(url))
+        self.key.clone().filter(|_| {
+            self.url
+                .as_deref()
+                .is_some_and(|saved| same_url(saved, url))
+        })
     }
 }
 
@@ -148,7 +149,7 @@ impl SavedKey {
 /// review on another.
 fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, String) {
     let (effort, line) = match previous.filter(|ai| !ai.effort.is_default()) {
-        Some(ai) if ai.url == url && ai.model == model => {
+        Some(ai) if same_url(&ai.url, &url) && ai.model == model => {
             let line = format!(
                 "Changes will be checked with {model} ({} effort).",
                 ai.effort.name()
@@ -200,7 +201,7 @@ async fn ask_for_api(
                 println!(
                     "{}, or leave out --api-key if it needs none. Try again, or press Ctrl+C to \
                      stop.",
-                    unencrypted(&url)
+                    api_key_unencrypted(&url)
                 );
                 default = url;
                 continue;
@@ -229,15 +230,6 @@ async fn ask_for_api(
         }
         default = url;
     }
-}
-
-/// Says that `url` would carry the API key unencrypted, and how to reach the API safely.
-pub fn unencrypted(url: &str) -> String {
-    format!(
-        "{url} uses plain HTTP to another machine, which would send the API key unencrypted\n\
-         Use https://, or reach the API through this machine, such as at http://localhost \
-         through an SSH tunnel"
-    )
 }
 
 /// Why `setup` neither asks for a key for `url` nor sends the saved one, which may be for

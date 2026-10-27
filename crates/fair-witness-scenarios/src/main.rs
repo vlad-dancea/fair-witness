@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use fair_witness_core::net::in_the_clear;
+use fair_witness_core::net::{in_the_clear, web_url};
 use fair_witness_core::project::Effort;
 use fair_witness_core::secret::can_hide;
 use fair_witness_core::session::Record;
@@ -117,6 +117,7 @@ struct Args {
         long,
         value_name = "URL",
         default_value = AQUEDUCT,
+        value_parser = web_url,
         requires = "models",
         help = "The OpenAI-compatible API of the models"
     )]
@@ -456,7 +457,7 @@ fn models(args: &Args) -> Result<Vec<Model>> {
     for name in &args.models {
         for effort in &efforts {
             let model = Model::Real {
-                url: with_scheme(&args.ai_url),
+                url: args.ai_url.clone(),
                 name: name.clone(),
                 effort: effort.clone(),
             };
@@ -655,17 +656,6 @@ fn new_folder(output: &Path, name: &str) -> Result<PathBuf> {
     unreachable!("there is always a number left")
 }
 
-/// `ai_url` as fair-witness reads it, with HTTPS for an address without a scheme, so that the
-/// checks ask the API that the runs use.
-fn with_scheme(ai_url: &str) -> String {
-    let ai_url = ai_url.trim();
-    if ai_url.contains("://") {
-        ai_url.to_string()
-    } else {
-        format!("https://{ai_url}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,28 +813,34 @@ mod tests {
     }
 
     #[test]
-    fn reads_an_api_without_a_scheme_as_fair_witness_does() {
-        let urls: Vec<String> = ["models.example.org/v1", " http://127.0.0.1:8080/v1"]
-            .iter()
-            .map(|url| {
-                let args = Args::try_parse_from([
-                    "fair-witness-scenarios",
-                    "--model",
-                    "large",
-                    "--ai-url",
-                    url,
-                ])
-                .unwrap();
-                let Model::Real { url, .. } = models(&args).unwrap().remove(0) else {
-                    panic!("no real model");
-                };
-                url
-            })
-            .collect();
+    fn reads_the_api_url_as_fair_witness_does() {
+        let url = |url: &str| {
+            let args = Args::try_parse_from([
+                "fair-witness-scenarios",
+                "--model",
+                "large",
+                "--ai-url",
+                url,
+            ])
+            .map_err(|e| e.kind())?;
+            let Model::Real { url, .. } = models(&args).unwrap().remove(0) else {
+                panic!("no real model");
+            };
+            Ok(url)
+        };
 
         assert_eq!(
-            urls,
-            ["https://models.example.org/v1", "http://127.0.0.1:8080/v1"]
+            [
+                "models.example.org/v1",
+                " http://127.0.0.1:8080/v1/",
+                "ftp://models.example.org"
+            ]
+            .map(url),
+            [
+                Ok("https://models.example.org/v1".to_string()),
+                Ok("http://127.0.0.1:8080/v1".to_string()),
+                Err(clap::error::ErrorKind::ValueValidation)
+            ]
         );
     }
 }

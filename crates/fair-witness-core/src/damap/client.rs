@@ -52,9 +52,11 @@ pub struct Damap {
 
 impl Damap {
     /// DAMAP at `url`, unless it uses plain HTTP to another machine, where anyone along the way
-    /// could read the login.
+    /// could read the login. `url` is read as `web_url` reads it, so that addresses `same_url`
+    /// takes for the same DAMAP get the same requests.
     pub fn new(url: &str) -> Result<Self> {
-        if in_the_clear(url) {
+        let url = net::web_url(url)?;
+        if in_the_clear(&url) {
             bail!(
                 "{url} uses plain HTTP to another machine, which would send the DAMAP login \
                  unencrypted\nUse DAMAP's https:// address, or a DAMAP on this machine, such as \
@@ -62,8 +64,8 @@ impl Damap {
             );
         }
         Ok(Self {
-            http: net::client(url, TIMEOUT)?,
-            url: url.trim_end_matches('/').to_string(),
+            http: net::client(&url, TIMEOUT)?,
+            url,
             access_token: None,
         })
     }
@@ -78,7 +80,7 @@ impl Damap {
 
     pub async fn instance_config(&self) -> Result<InstanceConfig> {
         let response = send(
-            self.http.get(format!("{}/api/config", self.url)),
+            self.http.get(net::under(&self.url, "/api/config")?),
             "/api/config",
         )
         .await
@@ -105,7 +107,7 @@ impl Damap {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let request = self.http.get(format!("{}{path}", self.url));
+        let request = self.http.get(net::under(&self.url, path)?);
         send_json(self.authorize(request), path).await
     }
 
@@ -142,5 +144,43 @@ async fn send_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) -> 
         StatusCode::UNAUTHORIZED => bail!("DAMAP rejected the login token on {path}"),
         StatusCode::FORBIDDEN => bail!("not allowed to access {path}"),
         status => bail!("{path} failed with {status}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testing::fake_model;
+
+    #[tokio::test]
+    async fn asks_under_the_path_and_with_the_query_of_its_address() {
+        let instance = json!({
+            "issuer": "http://localhost/realms/damap",
+            "clientID": "damap",
+            "scope": "openid"
+        });
+        let (url, server) = fake_model(vec![instance, json!([])]);
+        let damap = Damap::new(&format!("{url}/?tenant=team")).unwrap();
+
+        damap.instance_config().await.unwrap();
+        damap.list_dmps().await.unwrap();
+
+        let requests = server.join().unwrap();
+        let lines: Vec<&str> = requests
+            .iter()
+            .map(|(head, _)| head.lines().next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            (damap.url(), lines),
+            (
+                format!("{url}?tenant=team").as_str(),
+                vec![
+                    "GET /v1/api/config?tenant=team HTTP/1.1",
+                    "GET /v1/api/dmps/list?tenant=team HTTP/1.1"
+                ]
+            )
+        );
     }
 }
