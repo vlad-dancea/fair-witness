@@ -12,7 +12,6 @@ use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
 use serde::Deserialize;
 use serde_json::Value;
-use url::Url;
 
 use crate::net;
 
@@ -31,6 +30,9 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
         id: String,
     }
 
+    // As `web_url` reads it, so that addresses `same_url` takes for the same API get the same
+    // requests.
+    let url = &net::web_url(url)?;
     // Unlike DAMAP's client, it follows any redirect: an API that takes no key may be on another
     // machine over plain HTTP, and reqwest drops the key on a redirect to another host or scheme.
     let http = net::for_server(
@@ -40,7 +42,7 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
         url,
     )
     .build()?;
-    let url = format!("{}models", base_url(url));
+    let url = net::under(url, "models")?;
     let mut request = http.get(&url);
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
@@ -62,12 +64,11 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
     Ok(ids)
 }
 
-fn base_url(url: &str) -> String {
-    format!("{}/", url.trim_end_matches('/'))
-}
-
 /// A client for the API at `url` that gives up on a request after `timeout`.
 pub fn openai_compatible(url: &str, api_key: Option<String>, timeout: Duration) -> Result<Client> {
+    // As `web_url` reads it, so that addresses `same_url` takes for the same API get the same
+    // requests.
+    let url = &net::web_url(url)?;
     // The client genai builds by default, but for this API and with timeouts, of which genai sets
     // none.
     let web = WebConfig::default()
@@ -76,14 +77,15 @@ pub fn openai_compatible(url: &str, api_key: Option<String>, timeout: Duration) 
     let http = net::for_server(web.apply_to_builder(HttpClient::builder()), url)
         .build()
         .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
-    let endpoint = Endpoint::from_owned(base_url(url));
+    // genai joins its paths to the endpoint and keeps its query.
+    let endpoint = Endpoint::from_owned(net::under(url, "")?);
     let auth = match api_key {
         Some(key) => AuthData::from_single(key),
         // genai's OpenAI adapter sends `Authorization: Bearer ` even without a key, which an API
         // that takes none can refuse. The override sends the chat request to the URL genai would
         // use, without that header, the only one the adapter sets.
         None => AuthData::RequestOverride {
-            url: chat_url(url)?,
+            url: net::under(url, "chat/completions")?,
             headers: Headers::default(),
         },
     };
@@ -98,15 +100,6 @@ pub fn openai_compatible(url: &str, api_key: Option<String>, timeout: Duration) 
         })
         .build()
         .with_context(|| format!("could not set up a client for the AI API at {url}"))
-}
-
-/// Where genai's OpenAI adapter sends a chat request for the API at `url`.
-fn chat_url(url: &str) -> Result<String> {
-    let base = Url::parse(&base_url(url))
-        .with_context(|| format!("{url} is not a web address like https://example.org"))?;
-    let mut chat = base.join("chat/completions")?;
-    chat.set_query(base.query());
-    Ok(chat.to_string())
 }
 
 /// A request the API refused with 429 Too Many Requests.
@@ -425,6 +418,59 @@ mod tests {
             [
                 ("POST /v1/chat/completions HTTP/1.1", true),
                 ("POST /v1/chat/completions HTTP/1.1", false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_the_same_requests_to_addresses_read_alike() {
+        let models = || json!({ "object": "list", "data": [] });
+        let (url, server) = fake_model(vec![
+            models(),
+            one_token(),
+            one_token(),
+            models(),
+            one_token(),
+            one_token(),
+        ]);
+        let alike = [
+            [
+                format!("{url}//."),
+                format!("{}/", url.replace("http", "HTTP")),
+            ],
+            [format!("{url}?tenant=team"), format!("{url}/?tenant=team")],
+        ];
+
+        for [one, other] in &alike {
+            assert!(net::same_url(one, other), "{one} and {other}");
+            list_models(one, None).await.unwrap();
+            for (url, api_key) in [(one, Some("sk-test".to_string())), (other, None)] {
+                openai_compatible(url, api_key, Duration::from_secs(10))
+                    .unwrap()
+                    .exec_chat(
+                        "small",
+                        ChatRequest::new(vec![ChatMessage::user("Hi")]),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let requests = server.join().unwrap();
+        let lines: Vec<&str> = requests
+            .iter()
+            .map(|(head, _)| head.lines().next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /v1/models HTTP/1.1",
+                "POST /v1/chat/completions HTTP/1.1",
+                "POST /v1/chat/completions HTTP/1.1",
+                "GET /v1/models?tenant=team HTTP/1.1",
+                "POST /v1/chat/completions?tenant=team HTTP/1.1",
+                "POST /v1/chat/completions?tenant=team HTTP/1.1"
             ]
         );
     }
