@@ -15,7 +15,7 @@ use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::debug_pane::DebugLog;
+use super::debug_pane::DebugPane;
 use super::model_panel::{ModelPanel, PanelOutcome};
 use crate::settings::ModelSettings;
 
@@ -39,13 +39,13 @@ pub enum Update {
 /// A line in the changes pane; a changed file carries the number of its
 /// change set, shown at the right edge, and a verdict carries it unshown and
 /// wraps under the text after its arrow.
-struct LogLine {
+struct ChangesLine {
     line: Line<'static>,
     set: Option<usize>,
     verdict: bool,
 }
 
-impl From<Line<'static>> for LogLine {
+impl From<Line<'static>> for ChangesLine {
     fn from(line: Line<'static>) -> Self {
         Self {
             line,
@@ -55,7 +55,7 @@ impl From<Line<'static>> for LogLine {
     }
 }
 
-impl LogLine {
+impl ChangesLine {
     fn verdict(set: usize, spans: Vec<Span<'static>>) -> Self {
         let mut line = vec![Span::raw(RESULT_ARROW)];
         line.extend(spans);
@@ -126,13 +126,14 @@ fn wrap_hanging(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 pub struct Screen {
     root: PathBuf,
     status: Vec<String>,
-    log: Vec<LogLine>,
-    /// Whether the oldest lines of `log` were dropped.
+    changes: Vec<ChangesLine>,
+    /// Whether the oldest lines of `changes` were dropped.
     dropped: bool,
-    /// The rows of `log` at a width, and the row each line starts at, kept until `log` changes.
+    /// The rows of `changes` at a width, and the row each line starts at, kept until a line is
+    /// added or dropped.
     rendered: Option<(usize, Vec<Line<'static>>, Vec<usize>)>,
     lines_from_bottom: usize,
-    debug: DebugLog,
+    debug: DebugPane,
     debug_lines_from_bottom: usize,
     debug_shown: bool,
     debug_focused: bool,
@@ -140,8 +141,8 @@ pub struct Screen {
     reviewing: Option<(usize, Instant)>,
     settings: Option<ModelSettings>,
     panel: Option<ModelPanel>,
-    /// Whether the session ended, which the header says, since the line in the log that says why
-    /// can be scrolled away.
+    /// Whether the session ended, which the header says, since the line in the changes pane that
+    /// says why can be scrolled away.
     stopped: bool,
     quit: bool,
 }
@@ -151,11 +152,11 @@ impl Screen {
         Self {
             root: root.to_path_buf(),
             status,
-            log: Vec::new(),
+            changes: Vec::new(),
             dropped: false,
             rendered: None,
             lines_from_bottom: 0,
-            debug: DebugLog::default(),
+            debug: DebugPane::default(),
             debug_lines_from_bottom: 0,
             debug_shown: false,
             debug_focused: false,
@@ -317,7 +318,7 @@ impl Screen {
         match record.event {
             Event::Changes { set, changes } => {
                 for listed in watcher::summarize(&changes) {
-                    self.push_line(LogLine {
+                    self.push_line(ChangesLine {
                         line: change_line(&listed),
                         set: Some(set),
                         verdict: false,
@@ -367,9 +368,9 @@ impl Screen {
         }
     }
 
-    fn push_line(&mut self, line: LogLine) {
+    fn push_line(&mut self, line: ChangesLine) {
         self.make_room();
-        self.log.push(line);
+        self.changes.push(line);
     }
 
     /// Puts the verdict of `set` under the set's changes, above the sets that came while it
@@ -378,34 +379,34 @@ impl Screen {
         self.reviewing = None;
         self.make_room();
         let end = self.end_of(set);
-        self.log.insert(end, LogLine::verdict(set, spans));
+        self.changes.insert(end, ChangesLine::verdict(set, spans));
     }
 
-    /// Drops the oldest line when the log is full, before a line is added, so that the new one
+    /// Drops the oldest line when the pane is full, before a line is added, so that the new one
     /// stays even when it goes first, as the verdict of a set whose lines were dropped does.
     fn make_room(&mut self) {
-        if self.log.len() >= MAX_LINES {
-            self.log.drain(..=self.log.len() - MAX_LINES);
+        if self.changes.len() >= MAX_LINES {
+            self.changes.drain(..=self.changes.len() - MAX_LINES);
             self.dropped = true;
         }
         self.rendered = None;
     }
 
-    /// Where the lines of change set `set` end in the log. A set without lines, such as one
-    /// whose lines were dropped, ends where the next set starts, or at the end of the log.
+    /// Where the lines of change set `set` end in the pane. A set without lines, such as one
+    /// whose lines were dropped, ends where the next set starts, or at the end of the pane.
     fn end_of(&self, set: usize) -> usize {
-        match self.log.iter().rposition(|line| line.set == Some(set)) {
+        match self.changes.iter().rposition(|line| line.set == Some(set)) {
             Some(last) => last + 1,
             None => self
-                .log
+                .changes
                 .iter()
                 .position(|line| line.set.is_some_and(|other| other > set))
-                .unwrap_or(self.log.len()),
+                .unwrap_or(self.changes.len()),
         }
     }
 
     /// The rows of the changes pane at `width`, with a spinner under the set being reviewed.
-    fn log_rows(&mut self, width: usize) -> Vec<Line<'static>> {
+    fn changes_rows(&mut self, width: usize) -> Vec<Line<'static>> {
         if self.rendered.as_ref().is_none_or(|(w, ..)| *w != width) {
             let mut rows = Vec::new();
             if self.dropped {
@@ -414,7 +415,7 @@ impl Screen {
                 ));
             }
             let mut starts = Vec::new();
-            for line in &self.log {
+            for line in &self.changes {
                 starts.push(rows.len());
                 rows.extend(line.render(width));
             }
@@ -479,15 +480,15 @@ impl Screen {
             } else {
                 Direction::Vertical
             };
-            let [log, debug] = Layout::new(
+            let [changes, debug] = Layout::new(
                 direction,
                 [Constraint::Percentage(40), Constraint::Percentage(60)],
             )
             .areas(body);
-            self.draw_log(frame, log);
+            self.draw_changes(frame, changes);
             self.draw_debug(frame, debug);
         } else {
-            self.draw_log(frame, body);
+            self.draw_changes(frame, body);
         }
 
         let mut keys = vec![
@@ -525,15 +526,15 @@ impl Screen {
         }
     }
 
-    fn draw_log(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_changes(&mut self, frame: &mut Frame, area: Rect) {
         let block = pane(" Changes ", self.debug_shown, !self.debug_focused);
-        if self.log.is_empty() {
+        if self.changes.is_empty() {
             let waiting =
                 Paragraph::new("No changes yet.".add_modifier(Modifier::DIM)).block(block);
             frame.render_widget(waiting, area);
             return;
         }
-        let lines = self.log_rows(block.inner(area).width as usize);
+        let lines = self.changes_rows(block.inner(area).width as usize);
         draw_scrolled(frame, area, block, lines, &mut self.lines_from_bottom);
     }
 
@@ -848,7 +849,7 @@ mod tests {
 
     #[test]
     fn puts_the_change_set_at_the_right_edge() {
-        let line = LogLine {
+        let line = ChangesLine {
             line: Line::from("created: a.csv"),
             set: Some(3),
             verdict: false,
@@ -858,7 +859,7 @@ mod tests {
 
     #[test]
     fn puts_the_change_set_after_text_too_long_for_the_row() {
-        let line = LogLine {
+        let line = ChangesLine {
             line: Line::from("created: data/raw/a.csv"),
             set: Some(12),
             verdict: false,
@@ -868,7 +869,7 @@ mod tests {
 
     #[test]
     fn indents_the_rest_of_a_verdict_under_its_text() {
-        let line = LogLine::verdict(
+        let line = ChangesLine::verdict(
             1,
             vec![
                 "in line:".green(),
@@ -896,7 +897,7 @@ mod tests {
         let apply = |screen: &mut Screen, event| {
             screen.apply(Update::Session(Record { time, event }));
             screen
-                .log_rows(40)
+                .changes_rows(40)
                 .iter()
                 .map(text)
                 .map(|row| match row.contains("checking against the DMP") {
@@ -966,7 +967,7 @@ mod tests {
         };
         // The first rows, with the spinner's frame and seconds left out.
         let top = |screen: &mut Screen| -> Vec<String> {
-            screen.log_rows(40)[..3]
+            screen.changes_rows(40)[..3]
                 .iter()
                 .map(text)
                 .map(|row| match row.contains("checking against the DMP") {
@@ -997,7 +998,7 @@ mod tests {
             },
         );
 
-        assert_eq!(screen.log.len(), MAX_LINES);
+        assert_eq!(screen.changes.len(), MAX_LINES);
         assert_eq!(
             reviewing,
             [
@@ -1032,13 +1033,13 @@ mod tests {
         );
         apply(&mut screen, Event::Reviewing { set: 1 });
         // Drawn once before the event, so that the rows it shows are rendered already.
-        screen.log_rows(40);
+        screen.changes_rows(40);
 
         let error = "the project folder was moved or deleted".to_string();
         apply(&mut screen, Event::WatchStopped { error });
 
         assert_eq!(
-            screen.log_rows(40).iter().map(text).collect::<Vec<_>>(),
+            screen.changes_rows(40).iter().map(text).collect::<Vec<_>>(),
             [
                 "created: results.csv                  #1",
                 "the project folder was moved or deleted",
