@@ -175,8 +175,8 @@ impl Reviewer {
         input: &Input<'_>,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
-        let tools = Arc::new(Tools::new(input.root)?);
-        let about_changes = prompt::about_changes(input.changes, input.found);
+        let tools = Arc::new(Tools::new(input.root, input.filter.clone())?);
+        let about_changes = prompt::about_changes(input.root, input.changes, input.found);
         let choice = self.choice();
         let definitions = definitions();
         trace(Trace::Setup {
@@ -500,11 +500,13 @@ mod tests {
         EFFORT_NOT_ALLOWED, EFFORT_REFUSED, Reply, bad_request, failure, fake_model, one_token,
         too_many_requests, tool_call,
     };
-    use crate::watcher::Change;
+    use crate::watcher::{Change, Filter};
 
     fn input<'a>(root: &'a std::path::Path, dmp: &'a str, changes: &'a [Change]) -> Input<'a> {
         Input {
             root,
+            // Leaked, so that a test can build its input in the call that takes it.
+            filter: Box::leak(Box::new(Filter::new(root).unwrap())),
             dmp,
             changes,
             found: &[],

@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::Receiver;
 use std::thread;
 
 use serde_json::{Value, json};
@@ -56,6 +57,8 @@ pub struct Reply {
     headers: String,
     content_type: &'static str,
     body: String,
+    /// Holds the reply back until it gets a message or its sender is dropped.
+    held: Option<Receiver<()>>,
 }
 
 impl From<Value> for Reply {
@@ -71,6 +74,7 @@ pub fn answer(status: &'static str, body: Value) -> Reply {
         headers: String::new(),
         content_type: "application/json",
         body: body.to_string(),
+        held: None,
     }
 }
 
@@ -88,6 +92,15 @@ pub fn hang_up() -> Reply {
     Reply {
         status: None,
         ..answer("200 OK", Value::Null)
+    }
+}
+
+/// `reply`, sent only once `release` gets a message or its sender is dropped, as a model
+/// that takes its time answers.
+pub fn held(reply: impl Into<Reply>, release: Receiver<()>) -> Reply {
+    Reply {
+        held: Some(release),
+        ..reply.into()
     }
 }
 
@@ -175,6 +188,9 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             };
             requests.push((head, body));
 
+            if let Some(release) = &reply.held {
+                let _ = release.recv();
+            }
             let Some(status) = reply.status else {
                 continue;
             };

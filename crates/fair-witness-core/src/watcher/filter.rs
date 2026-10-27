@@ -53,7 +53,9 @@ pub const CACHE_TAG: &str = "CACHEDIR.TAG";
 /// have the name does not hide a folder.
 const CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
-/// Decides which paths in the project folder are not research data.
+/// Decides which paths in the project folder are not research data, for the watcher and for
+/// the model's tools alike.
+#[derive(Clone)]
 pub struct Filter {
     root: PathBuf,
     rules: Gitignore,
@@ -85,15 +87,22 @@ impl Filter {
     }
 
     pub fn skips(&self, path: &Path, is_dir: bool) -> bool {
-        let Ok(relative) = path.strip_prefix(&self.root) else {
-            return false;
-        };
+        path.strip_prefix(&self.root)
+            .is_ok_and(|relative| self.skips_relative(relative, is_dir))
+    }
+
+    /// Like `skips`, for a path relative to the project folder.
+    pub fn skips_relative(&self, relative: &Path, is_dir: bool) -> bool {
         if relative.as_os_str().is_empty() {
             return false;
         }
         // fair-witness writes its own files there, so no rule can let it
-        // through.
-        if relative.starts_with(DIR_NAME) {
+        // through. A subfolder has one when someone ran `setup` in it or it
+        // came from another project.
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == DIR_NAME)
+        {
             return true;
         }
         // As in git, a file in an ignored folder stays ignored even if a rule
@@ -165,7 +174,8 @@ mod tests {
 
     #[test]
     fn reads_rules_like_git() {
-        let (root, filter) = filter("!venv/\n!.fair-witness/\nscratch/\n!scratch/keep.csv\n");
+        let (root, filter) =
+            filter("!venv/\n!.fair-witness/\n!data/.fair-witness/\nscratch/\n!scratch/keep.csv\n");
         let filter = filter.unwrap();
         let skipped = |path: &str| filter.skips(&root.path().join(path), false);
 
@@ -173,6 +183,7 @@ mod tests {
         assert!(skipped("#notes.txt#"));
         assert!(!skipped("venv/answers.csv"));
         assert!(skipped(".fair-witness/credentials.toml"));
+        assert!(skipped("data/.fair-witness/log/x"));
         assert!(skipped("scratch/keep.csv"));
     }
 
