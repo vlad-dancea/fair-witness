@@ -170,8 +170,16 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         (Some(source), Some((ai, api_key))) => {
             let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone())?);
             // Before the DMP, so that a refusal comes before any DAMAP login.
-            if !args.skip_model_check {
-                check_model(&reviewer, &ai.url, &mut status).await?;
+            if !args.skip_model_check
+                && let Err(e) = check_model(&reviewer, &ai.url, &mut status).await
+            {
+                // The status holds only why the saved API key is not sent, if it is not, which
+                // is why an API that needs one refuses.
+                let why = status
+                    .iter()
+                    .map(|line| format!("\n{line}"))
+                    .collect::<String>();
+                bail!("{e:#}{why}");
             }
             let dmp = match source {
                 Source::File(file) => read_dmp(&file)?,

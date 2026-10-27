@@ -11,7 +11,9 @@ use std::time::Duration;
 use fair_witness_core::project::{
     AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Effort, Project,
 };
-use fair_witness_core::testing::{EFFORT_REFUSED, bad_request, fake_model, one_token, tool_call};
+use fair_witness_core::testing::{
+    EFFORT_REFUSED, bad_request, failure, fake_model, one_token, tool_call,
+};
 use serde_json::{Value, json};
 
 /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -669,6 +671,34 @@ fn sends_the_saved_api_key_to_no_other_api() {
     let (head, _) = &server.join().unwrap()[0];
     assert!(!head.to_lowercase().contains("authorization"), "{head}");
     assert_eq!(run.stop(), Some(0));
+
+    // An API that needs a key refuses, and the error says why none was sent.
+    let refusal = || failure("401 Unauthorized", "No API key given.");
+    let (endpoint, _) = fake_model(vec![refusal(), refusal()]);
+    project
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: None,
+            },
+            ai: Some(AiConfig {
+                url: endpoint.clone(),
+                model: "test".to_string(),
+                effort: Effort::default(),
+            }),
+        })
+        .unwrap();
+    let mut refused = Run::start(root.path(), &["--dmp-file", &dmp_file]);
+    assert_eq!(refused.exit_code(), Some(2));
+    assert_eq!(
+        refused.stderr_until("The saved API key").join("\n"),
+        format!(
+            "error: {endpoint} refuses test: No API key given.\nPass another model with \
+             --model or another effort with --effort, or choose a model with `fair-witness \
+             setup`\nThe saved API key is for https://api.example.org/v1, so none is sent to \
+             {endpoint}. To save one for {endpoint}, run `fair-witness setup`."
+        )
+    );
 }
 
 #[test]
