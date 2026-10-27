@@ -321,10 +321,11 @@ fn save_on_signal(output: Arc<Mutex<Output>>) -> Result<()> {
         .context("could not listen for signals")?;
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
-            // Held until the exit, so that a run the stopped scripts cut short is not saved as
-            // if it had ended, and the runner does not mark its results finished.
-            let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+            // Before anything waits for the output, so that a disk that stalls cannot keep the
+            // scripts running. The runs they were in are not saved, as `run::stopping` says.
             run::stop_scripts();
+            // Held until the exit, so that the runner does not mark its results finished.
+            let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
             // Says nothing unless saving failed, and then waits at most a second for stderr,
             // since a stderr that blocks would keep the runner from exiting.
             if output.results.status == Status::Running
@@ -496,6 +497,10 @@ fn run_all(
                         return;
                     };
                     let ran = run::run(job.scenario, job.model, settings);
+                    // A signal stopped the scripts, so the run may not have ended on its own.
+                    if run::stopping() {
+                        return;
+                    }
                     let outcome = report::judge(job.scenario, job.model, job.repeat, &ran);
                     let how = progress.then(|| {
                         format!(
