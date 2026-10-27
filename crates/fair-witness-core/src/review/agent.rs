@@ -9,7 +9,7 @@ use genai::chat::{
     ToolChoice, ToolResponse,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
@@ -17,6 +17,7 @@ use super::provider::{
 };
 use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
+use super::{Trace, Verdict};
 use crate::project::{AiConfig, Effort};
 use crate::secret;
 
@@ -45,85 +46,6 @@ const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the 
 /// The most characters of what an API answered that a trace, an error or a check keeps. A
 /// gateway may answer with a whole web page.
 const MAX_ANSWER: usize = 1_000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Verdict {
-    pub contradicts: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dmp_field: Option<String>,
-    pub explanation: String,
-}
-
-/// What happened in a review, for the log and the debug pane. Fields without a value are left
-/// out of the log.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trace {
-    /// What the model is told before any change: the system prompt, the DMP and the tools it
-    /// may call. A session passes it on only when it differs from the last one.
-    Setup {
-        system: String,
-        dmp: String,
-        tools: Vec<String>,
-    },
-    /// The model the review asks. A session passes it on only when it differs from the last one.
-    Model(ModelChoice),
-    /// The first message of a review without the DMP, which `first_message` puts before it.
-    Prompt(String),
-    /// A later message from us, such as a reminder to hand in the verdict.
-    Sent(String),
-    /// The conversation so far goes to the model.
-    Request { turn: usize },
-    /// The API refused request `turn` with 429 Too Many Requests, so it goes again after
-    /// `wait_ms`, as retry number `retry`.
-    RateLimited {
-        turn: usize,
-        retry: usize,
-        wait_ms: u64,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
-        body: String,
-    },
-    /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
-    /// as LiteLLM does, so it goes again with the field, which later requests to the model
-    /// carry from the start.
-    EffortNotAllowed {
-        turn: usize,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
-        body: String,
-    },
-    Reply {
-        turn: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        texts: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        calls: Vec<(String, Value)>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stop_reason: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_in: Option<i32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_out: Option<i32>,
-        /// How long the model took to reply.
-        elapsed_ms: u64,
-    },
-    ToolResult {
-        name: String,
-        output: String,
-        /// Whether the call failed, so that `output` is the error the model is told, which a
-        /// file can look like.
-        #[serde(default, skip_serializing_if = "is_false")]
-        failed: bool,
-    },
-    /// Why a request or the whole review failed, in one line as `Reviewer::reportable` leaves
-    /// it. A request whose reply could not be read goes again after it.
-    Failed(String),
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
-}
 
 pub struct Reviewer {
     client: Client,
@@ -573,6 +495,8 @@ fn verdict_tool() -> Tool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use serde_json::Value;
 
     use super::*;
     use crate::testing::{
