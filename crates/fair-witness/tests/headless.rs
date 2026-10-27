@@ -8,8 +8,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
+use fair_witness_core::model::{Effort, ModelChoice};
 use fair_witness_core::project::{
-    AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Effort, Project,
+    AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Project,
 };
 use fair_witness_core::testing::{
     EFFORT_REFUSED, bad_request, failure, fake_model, one_token, tool_call,
@@ -718,8 +719,10 @@ fn sends_the_saved_api_key_to_no_other_api() {
             },
             ai: Some(AiConfig {
                 url: endpoint.clone(),
-                model: "test".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
             }),
         })
         .unwrap();
@@ -760,8 +763,10 @@ fn sends_the_saved_api_key_to_no_other_api() {
             },
             ai: Some(AiConfig {
                 url: endpoint.clone(),
-                model: "test".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
             }),
         })
         .unwrap();

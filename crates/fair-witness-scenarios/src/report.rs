@@ -1,5 +1,5 @@
 use fair_witness_core::escape;
-use fair_witness_core::project::Effort;
+use fair_witness_core::model::Effort;
 use fair_witness_core::review::{Trace, Verdict};
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::Change;
@@ -375,6 +375,8 @@ fn describe(contradicts: bool, fields: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use fair_witness_core::model::ModelChoice;
+    use fair_witness_core::project::AiConfig;
     use serde_json::json;
 
     use super::*;
@@ -501,11 +503,13 @@ mod tests {
                 expected(None, true, None),
             ],
         );
-        let model = Model::Real {
+        let model = Model::Real(AiConfig {
             url: "https://api.example.org/v1".to_string(),
-            name: "openai/large".to_string(),
-            effort: "high".parse().unwrap(),
-        };
+            choice: ModelChoice {
+                model: "openai/large".to_string(),
+                effort: "high".parse().unwrap(),
+            },
+        });
         let mut records = review(1, 0, 2, (100, 10), verdict(false, None));
         records.extend(review(
             2,

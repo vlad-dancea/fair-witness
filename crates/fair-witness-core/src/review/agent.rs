@@ -8,7 +8,6 @@ use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ReasoningEffort, Tool,
     ToolChoice, ToolResponse,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::prompt::{self, SYSTEM_PROMPT};
@@ -18,7 +17,8 @@ use super::provider::{
 use super::steps::{Input, Step, StepFuture, StepOutcome};
 use super::tools::Tools;
 use super::{Trace, Verdict};
-use crate::project::{AiConfig, Effort};
+use crate::model::{Effort, ModelChoice};
+use crate::project::AiConfig;
 use crate::secret;
 
 const MAX_TURNS: usize = 12;
@@ -74,13 +74,6 @@ pub enum ChoiceCheck {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelChoice {
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Effort::is_default")]
-    pub effort: Effort,
-}
-
 impl ModelStep {
     pub fn new(config: &AiConfig, api_key: Option<String>) -> Result<Self> {
         Self::with_timeouts(config, api_key, REQUEST_TIMEOUT, REVIEW_TIMEOUT)
@@ -95,10 +88,7 @@ impl ModelStep {
     ) -> Result<Self> {
         Ok(Self {
             client: openai_compatible(&config.url, api_key.clone(), request)?,
-            choice: Mutex::new(ModelChoice {
-                model: config.model.clone(),
-                effort: config.effort.clone(),
-            }),
+            choice: Mutex::new(config.choice.clone()),
             allowing_effort: Mutex::default(),
             api_key,
             request_timeout: request,
@@ -516,8 +506,10 @@ mod tests {
         ModelStep::new(
             &AiConfig {
                 url,
-                model: "test".to_string(),
-                effort: "low".parse().unwrap(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: "low".parse().unwrap(),
+                },
             },
             Some("sk-test".to_string()),
         )
@@ -622,8 +614,10 @@ mod tests {
             let reviewer = ModelStep::new(
                 &AiConfig {
                     url,
-                    model: "qwen3-max".to_string(),
-                    effort: effort.parse().unwrap(),
+                    choice: ModelChoice {
+                        model: "qwen3-max".to_string(),
+                        effort: effort.parse().unwrap(),
+                    },
                 },
                 None,
             )
@@ -655,8 +649,10 @@ mod tests {
         let reviewer = ModelStep::new(
             &AiConfig {
                 url,
-                model: "gpt-5.6".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "gpt-5.6".to_string(),
+                    effort: Effort::default(),
+                },
             },
             None,
         )
@@ -1150,8 +1146,10 @@ mod tests {
         let reviewer = ModelStep::with_timeouts(
             &AiConfig {
                 url: endpoint,
-                model: "test".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
             },
             None,
             REQUEST_TIMEOUT,

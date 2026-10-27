@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod damap;
 pub mod escape;
+pub mod model;
 pub mod net;
 pub mod project;
 pub mod review;

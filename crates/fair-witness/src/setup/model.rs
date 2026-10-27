@@ -1,11 +1,10 @@
 use anyhow::{Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
-use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
-use fair_witness_core::project::{AiConfig, ApiKey, Effort, Project};
-use fair_witness_core::review::{self, ChoiceCheck, ModelChoice, ModelStep};
-
-use crate::tui::model_panel::describe;
+use fair_witness_core::model::{Effort, ModelChoice};
+use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
+use fair_witness_core::project::{AiConfig, ApiKey, Project};
+use fair_witness_core::review::{self, ChoiceCheck, ModelStep};
 
 const DEFAULT_URL: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
 
@@ -80,18 +79,14 @@ pub async fn setup(
         &url,
         &models,
         args.model.clone(),
-        previous.as_ref().map(|ai| ai.model.clone()),
+        previous.as_ref().map(|ai| ai.choice.model.clone()),
     )?;
     // The model and effort are checked last, so that one the API refuses is chosen again.
     let (ai, line) = loop {
         let (ai, line) = chosen(previous.clone(), url.clone(), model.clone());
-        let choice = ModelChoice {
-            model: ai.model.clone(),
-            effort: ai.effort.clone(),
-        };
-        let described = describe(&choice);
+        let described = ai.choice.to_string();
         match ModelStep::new(&ai, api_key.clone())?
-            .try_choice(&choice)
+            .try_choice(&ai.choice)
             .await
         {
             ChoiceCheck::Accepted => break (ai, line),
@@ -104,7 +99,7 @@ pub async fn setup(
             }
             // `setup` asks for no effort, so the one kept from before goes, and the model is
             // checked at its own.
-            ChoiceCheck::Refused(message) if !ai.effort.is_default() => {
+            ChoiceCheck::Refused(message) if !ai.choice.effort.is_default() => {
                 println!("{url} refuses {described}: {message}");
                 previous = None;
             }
@@ -134,24 +129,24 @@ pub async fn setup(
 /// with the API and model it was chosen for, since an effort one model takes can fail every
 /// review on another.
 fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, String) {
-    let (effort, line) = match previous.filter(|ai| !ai.effort.is_default()) {
-        Some(ai) if same_url(&ai.url, &url) && ai.model == model => {
+    let (effort, line) = match previous.filter(|ai| !ai.choice.effort.is_default()) {
+        Some(ai) if ai.for_api(&url).is_some_and(|saved| saved.model == model) => {
             let line = format!(
                 "Changes will be checked with {model} ({} effort).",
-                ai.effort.name()
+                ai.choice.effort.name()
             );
-            (ai.effort, line)
+            (ai.choice.effort, line)
         }
         Some(ai) => {
-            let was_for = if ai.model == model {
-                format!("{} at {}", ai.model, ai.url)
+            let was_for = if ai.choice.model == model {
+                format!("{} at {}", ai.choice.model, ai.url)
             } else {
-                ai.model
+                ai.choice.model
             };
             let line = format!(
                 "Changes will be checked with {model} (default effort), since the {} effort \
                  saved before was for {was_for}. Press `m` in `fair-witness run` to choose one.",
-                ai.effort.name()
+                ai.choice.effort.name()
             );
             (Effort::default(), line)
         }
@@ -160,7 +155,8 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
             format!("Changes will be checked with {model}."),
         ),
     };
-    (AiConfig { url, model, effort }, line)
+    let choice = ModelChoice { model, effort };
+    (AiConfig { url, choice }, line)
 }
 
 async fn ask_for_api(
@@ -285,8 +281,10 @@ mod tests {
         let (url, server) = fake_model(replies);
         let ai = saved.map(|(model, effort)| AiConfig {
             url: url.clone(),
-            model: model.to_string(),
-            effort: effort.parse().unwrap(),
+            choice: ModelChoice {
+                model: model.to_string(),
+                effort: effort.parse().unwrap(),
+            },
         });
         let (_root, project) = folder(None);
 
@@ -313,7 +311,10 @@ mod tests {
         .await;
 
         let ai = set_up.unwrap();
-        assert_eq!((ai.model.as_str(), ai.effort), ("small", Effort::default()));
+        assert_eq!(
+            (ai.choice.model.as_str(), ai.choice.effort),
+            ("small", Effort::default())
+        );
         let efforts: Vec<&Value> = requests[1..]
             .iter()
             .map(|(_, body)| &body["reasoning_effort"])
@@ -359,8 +360,10 @@ mod tests {
         let chosen = |url: &str| {
             Some(AiConfig {
                 url: url.to_string(),
-                model: "small".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "small".to_string(),
+                    effort: Effort::default(),
+                },
             })
         };
         let other = "https://other.example.org/v1";
@@ -442,13 +445,15 @@ mod tests {
         let saved = |effort: &str| {
             Some(AiConfig {
                 url: "https://api.example.org/v1".to_string(),
-                model: "small".to_string(),
-                effort: effort.parse().unwrap(),
+                choice: ModelChoice {
+                    model: "small".to_string(),
+                    effort: effort.parse().unwrap(),
+                },
             })
         };
         let outcome = |previous, url: &str, model: &str| {
             let (ai, line) = chosen(previous, url.to_string(), model.to_string());
-            (ai.effort, line)
+            (ai.choice.effort, line)
         };
 
         assert_eq!(

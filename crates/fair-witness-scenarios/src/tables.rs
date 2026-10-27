@@ -330,6 +330,9 @@ fn indent(problem: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use fair_witness_core::model::ModelChoice;
+    use fair_witness_core::project::AiConfig;
+
     use super::*;
     use crate::fixtures::{expected, review, review_failed, scenario, verdict};
     use crate::report::{self, Refused, judge};
@@ -345,10 +348,14 @@ mod tests {
                 expected(None, true, Some("dataset[0].personal_data")),
             ],
         );
-        let model = |name: &str, effort: &str| Model::Real {
-            url: "https://api.example.org/v1".to_string(),
-            name: name.to_string(),
-            effort: effort.parse().unwrap(),
+        let model = |name: &str, effort: &str| {
+            Model::Real(AiConfig {
+                url: "https://api.example.org/v1".to_string(),
+                choice: ModelChoice {
+                    model: name.to_string(),
+                    effort: effort.parse().unwrap(),
+                },
+            })
         };
         let (large, small) = (model("large", "high"), model("small", "default"));
         let ran = |reviews: Vec<Vec<_>>| Ran {

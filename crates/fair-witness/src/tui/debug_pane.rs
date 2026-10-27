@@ -1,12 +1,11 @@
-use fair_witness_core::review::{ModelChoice, Trace, Verdict, first_message};
+use fair_witness_core::model::ModelChoice;
+use fair_witness_core::review::{Trace, Verdict, first_message};
 use fair_witness_core::session::{Event, Record};
 use jiff::tz::TimeZone;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use super::model_panel;
 
 /// Oldest entries go first once the pane holds this many, so a long session
 /// does not slow down drawing.
@@ -367,7 +366,7 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
 fn render_turn(turn: &Turn, width: usize, collapsed: bool, lines: &mut Vec<Line<'static>>) {
     let indent = [Span::raw(INDENT)];
     let mut details = vec![format!("turn {}", turn.number)];
-    details.extend(turn.choice.as_ref().map(model_panel::describe));
+    details.extend(turn.choice.as_ref().map(ModelChoice::to_string));
     let Some(reply) = &turn.reply else {
         lines.push(badge("AI", Color::Magenta, &details.join(" · ")));
         let waiting = BodyLine::new(
@@ -722,7 +721,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use fair_witness_core::project::{AiConfig, Effort, Project};
+    use fair_witness_core::model::Effort;
+    use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::ModelStep;
     use fair_witness_core::session::Session;
     use fair_witness_core::testing::{fake_model, tool_call};
@@ -947,8 +947,10 @@ mod tests {
         ]);
         let ai = AiConfig {
             url: endpoint,
-            model: "test".to_string(),
-            effort: Effort::default(),
+            choice: ModelChoice {
+                model: "test".to_string(),
+                effort: Effort::default(),
+            },
         };
         let project = Project::new(root.path().to_path_buf());
         let log = project.run_log().unwrap().events;

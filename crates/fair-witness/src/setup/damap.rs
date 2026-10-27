@@ -114,7 +114,8 @@ async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfi
 mod tests {
     use std::fs;
 
-    use fair_witness_core::project::{AiConfig, Effort};
+    use fair_witness_core::model::{Effort, ModelChoice};
+    use fair_witness_core::project::AiConfig;
     use fair_witness_core::testing::fake_model;
     use serde_json::json;
 
@@ -163,8 +164,10 @@ mod tests {
         let (same, other) = (damap(), damap());
         let ai = AiConfig {
             url: "https://api.example.org/v1".to_string(),
-            model: "small".to_string(),
-            effort: Effort::default(),
+            choice: ModelChoice {
+                model: "small".to_string(),
+                effort: Effort::default(),
+            },
         };
         project
             .save_config(&Config {
@@ -189,7 +192,7 @@ mod tests {
                 .await
                 .unwrap();
             let login = project.credentials().unwrap().damap.unwrap();
-            let model = config.ai.map(|ai| ai.model);
+            let model = config.ai.map(|ai| ai.choice.model);
             chosen.push((
                 config.damap.frontend_url,
                 config.damap.dmp_id,
