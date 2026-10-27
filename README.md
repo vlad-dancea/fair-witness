@@ -171,7 +171,7 @@ created: data/patients.csv                                       #1
 
 Changes less than two seconds apart go into one set. In a folder that never stays quiet that long, such as during a long copy, a set ends a minute after its first change. Writes to a file that a program keeps open, such as a log, show up only once they pause for two seconds. `created`, `changed`, `renamed` and `deleted` are colored so you can tell them apart. Files that are not research data are left out, as described in [What is ignored](#what-is-ignored).
 
-A set of more than 50 changes is listed per folder instead, for you and for the AI, such as `created: 412 paths under data/raw/`. The AI can still list the folder to see what is in it.
+A set of more than 50 changes is listed per folder instead, for you and for the AI, such as `created: 412 paths under data/raw/`. The AI can still ask for every changed path, 200 at a time.
 
 ### 3. Read the verdict
 
@@ -191,7 +191,7 @@ created: data/patients.csv                                       #1
 
 Changes you make while the AI checks a set show up right away as sets of their own, and the AI checks them in turn, each verdict under its own set. A file that is gone by the time the AI gets to its set stays listed, and the AI is told that it can no longer be read.
 
-To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
+To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders, 200 entries at a time, and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
 
