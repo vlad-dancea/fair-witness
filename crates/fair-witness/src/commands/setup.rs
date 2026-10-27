@@ -1,8 +1,9 @@
 use anyhow::Result;
 use fair_witness_core::project::{DIR_NAME, IGNORE_FILE, Project};
 
+use crate::setup::damap::{self, TerminalPrompts};
+use crate::setup::dmp;
 use crate::setup::model::{self, ModelArgs};
-use crate::setup::{damap, dmp};
 
 /// Sets up `project`, offering the DAMAP URL and login of the project around it, if any.
 pub async fn run(
@@ -11,9 +12,13 @@ pub async fn run(
     url: Option<String>,
     model: ModelArgs,
 ) -> Result<()> {
-    let damap = damap::setup(around, &project, url).await?;
-    dmp::choose(&project, &damap).await?;
-    model::setup(&project, model).await?;
+    let (damap, mut config) = damap::setup(around, &project, url, &TerminalPrompts).await?;
+    dmp::choose(&damap, &mut config.damap).await?;
+    config.ai = Some(model::setup(&project, config.ai.take(), model).await?);
+    // Saved once every question is answered, so that a `setup` stopped early leaves the
+    // settings as they were.
+    project.create()?;
+    project.save_config(&config)?;
     println!("Run `fair-witness run` to start watching this folder.");
     println!(
         "Edit {} to choose which paths to ignore.",
