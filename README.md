@@ -110,7 +110,7 @@ Some files in a project are not research data, and checking them would only cost
 - downloads that are not finished yet, from browsers (`*.part`, `*.crdownload`) and from the ownCloud and Nextcloud clients (`.*.~*`), so a download shows up only under its final name
 - the journal and logs of the ownCloud and Nextcloud clients (`.sync_*.db*`, `._sync_*.db*`, `.csync_journal.db*`, `.owncloudsync.log*`, `.nextcloudsync.log*`, `.nextcloudpermissions.log*`)
 
-A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy and replace the API key with a new one. The DAMAP session in the copy stays valid until it expires.
+A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy, replace the API key with a new one and run `fair-witness logout`, which ends the DAMAP session in the copy as long as you have not logged in again since the client last uploaded it. Then run `setup` to log in again.
 
 To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. A `.fair-witness/` folder is always skipped, wherever it is:
 
@@ -189,6 +189,8 @@ created: data/patients.csv                                       #1
 - **`contradicts the DMP`** (red): the AI names the DMP field it clashes with and explains why. You also get a **desktop notification**, so you see it even when the terminal is in the background.
 - **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it.
 
+Changes you make while the AI checks a set show up right away as sets of their own, and the AI checks them in turn, each verdict under its own set. A file that is gone by the time the AI gets to its set stays listed, and the AI is told that it can no longer be read.
+
 To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
@@ -238,7 +240,9 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 | `fair-witness run` | Watch the folder and check changes against the DMP |
 | `fair-witness run --dmp <id>` | Check against another DMP this time only, without changing the saved choice |
 | `fair-witness run --headless` | Print what happens as lines of JSON instead of drawing the screen, see [Running from a script](#running-from-a-script) |
-| `fair-witness logout` | Forget the saved DAMAP login for this folder |
+| `fair-witness logout` | End the DAMAP session and forget the saved login for this folder |
+
+`logout` asks DAMAP's login server to end the saved session before it forgets the login, so a copy of `credentials.toml` with the same login stops working too. A copy from before a later login holds another session, which `logout` cannot end. When DAMAP or its login server cannot be reached, or refuses, `logout` forgets the login anyway and says that the session stays valid until it expires.
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
@@ -275,7 +279,7 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 {"time":"2026-10-23T13:48:24.913Z","event":"verdict","set":1,"verdict":{"contradicts":true,"dmp_field":"dataset[0].personal_data","explanation":"..."}}
 ```
 
-Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
+Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. The `changes` of the next sets can come before that, while the set is still reviewed, since the sets are reviewed one after another. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 
@@ -289,11 +293,13 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"… which would send the DAMAP login unencrypted"**: the DAMAP URL uses plain HTTP to another machine. Run `setup` with DAMAP's `https://` address, also for a URL saved by an earlier `setup`.
 - **"DAMAP's login server … uses plain HTTP"**: DAMAP logs in through a login server on another machine over plain HTTP. Only the people who run that DAMAP can change it.
 - **"… which would send the API key unencrypted"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
-- **"answered 401 Unauthorized"**: the API key is missing or wrong. Aqueduct always needs one.
+- **"login failed: … answered …"**: DAMAP's login server refused the login, and its reason follows the status, such as "Invalid user credentials" for a wrong username or password. With only a status, such as `502 Bad Gateway`, the login server or a proxy in front of it failed. Try again later.
+- **"answered 401 Unauthorized"** from the AI API: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.
 - **"… refuses your-model (high effort)"**: the API does not take the model at this effort, and its message after the colon says why, such as which efforts the model takes. Pass another with `--effort`, or `--effort default` to send none, and save it with `m` and `Enter`. Or choose another model with `setup`.
 - **"429 Too Many Requests"**: the API limits how many requests a model gets a minute, and a review takes 2 or 3. fair-witness waits as long as the API asks, at most a minute each time, and sends the request again, up to 10 times. The review fails when the API keeps refusing or asks for a longer wait, as for a daily quota. Wait and change the files again, or pick a model with a higher limit with `m`.
-- **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly; try a larger one with `m`.
+- **"did not answer within 5 minutes"** or **"gave no verdict within 10 minutes"**: the API took the request but did not answer in time, as when its queue is stuck, Ollama loads a model that does not fit in memory, or the connection dropped with the VPN. fair-witness waits up to 5 minutes for each reply and 10 minutes for a whole review, with the waits after `429 Too Many Requests`. Then the change set fails and the next one is reviewed. Check that the API answers, or pick a faster model or a lower effort with `m`.
+- **"review failed"**: open the debug pane (`d`) to see the last request and the error. Small models sometimes don't call tools properly. fair-witness asks again twice when it cannot read a reply. When reviews still fail, try a larger model with `m`.
 - **Something else went wrong**: run `FAIR_WITNESS_LOG=debug fair-witness run` and read the newest `-diagnostics.log` in `.fair-witness/log/`.
 - **No desktop notification**: the change list shows "could not show a notification" with the reason. Verdicts still appear in the terminal.
 

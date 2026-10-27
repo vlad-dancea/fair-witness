@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::Receiver;
 use std::thread;
 
 use serde_json::{Value, json};
@@ -51,18 +52,66 @@ pub fn one_token() -> Value {
 
 /// What the fake model answers to one request.
 pub struct Reply {
-    status: &'static str,
+    /// `None` to hang up without answering.
+    status: Option<&'static str>,
     headers: String,
-    body: Value,
+    content_type: &'static str,
+    body: String,
+    /// Whether it keeps the connection open without answering.
+    silent: bool,
+    /// Holds the reply back until it gets a message or its sender is dropped.
+    held: Option<Receiver<()>>,
 }
 
 impl From<Value> for Reply {
     fn from(body: Value) -> Self {
-        Self {
-            status: "200 OK",
-            headers: String::new(),
-            body,
-        }
+        answer("200 OK", body)
+    }
+}
+
+/// An answer with `status`, such as `400 Bad Request`, and the JSON `body`.
+pub fn answer(status: &'static str, body: Value) -> Reply {
+    Reply {
+        status: Some(status),
+        headers: String::new(),
+        content_type: "application/json",
+        body: body.to_string(),
+        silent: false,
+        held: None,
+    }
+}
+
+/// A web page with `status`, as a proxy in front of a server answers when it cannot reach it.
+pub fn page(status: &'static str, html: &str) -> Reply {
+    Reply {
+        content_type: "text/html",
+        body: html.to_string(),
+        ..answer(status, Value::Null)
+    }
+}
+
+/// Closes the connection after reading the request, without answering.
+pub fn hang_up() -> Reply {
+    Reply {
+        status: None,
+        ..answer("200 OK", Value::Null)
+    }
+}
+
+/// No answer, as from a stuck API that takes the request and keeps the connection open.
+pub fn no_answer() -> Reply {
+    Reply {
+        silent: true,
+        ..answer("200 OK", Value::Null)
+    }
+}
+
+/// `reply`, sent only once `release` gets a message or its sender is dropped, as a model
+/// that takes its time answers.
+pub fn held(reply: impl Into<Reply>, release: Receiver<()>) -> Reply {
+    Reply {
+        held: Some(release),
+        ..reply.into()
     }
 }
 
@@ -70,9 +119,11 @@ impl From<Value> for Reply {
 /// `Retry-After` header if given.
 pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
     Reply {
-        status: "429 Too Many Requests",
         headers: retry_after.map_or(String::new(), |wait| format!("Retry-After: {wait}\r\n")),
-        body: json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+        ..answer(
+            "429 Too Many Requests",
+            json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+        )
     }
 }
 
@@ -94,9 +145,8 @@ pub const EFFORT_REFUSED: &str = "aqueduct.BadRequestError: OpenAIException - Er
 /// A 307 Temporary Redirect to `location`, which asks for the same request there, body and all.
 pub fn redirect(location: &str) -> Reply {
     Reply {
-        status: "307 Temporary Redirect",
         headers: format!("Location: {location}\r\n"),
-        body: Value::Null,
+        ..answer("307 Temporary Redirect", Value::Null)
     }
 }
 
@@ -107,21 +157,22 @@ pub fn bad_request(message: &str) -> Reply {
 
 /// An answer with `status`, such as `503 Service Unavailable`, and `message` in the body.
 pub fn failure(status: &'static str, message: &str) -> Reply {
-    Reply {
+    answer(
         status,
-        headers: String::new(),
-        body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
-    }
+        json!({ "error": { "message": message, "type": "invalid_request_error" } }),
+    )
 }
 
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
-/// requests it got once all replies are sent.
+/// requests it got once all replies are sent. The connections it gave no answer stay open until
+/// then.
 pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle<Vec<Request>>) {
     let replies: Vec<Reply> = replies.into_iter().map(Into::into).collect();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
+        let mut unanswered = Vec::new();
         for reply in replies {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream);
@@ -150,14 +201,24 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             };
             requests.push((head, body));
 
-            let body = reply.body.to_string();
+            if reply.silent {
+                unanswered.push(reader);
+                continue;
+            }
+            if let Some(release) = &reply.held {
+                let _ = release.recv();
+            }
+            let Some(status) = reply.status else {
+                continue;
+            };
             write!(
                 reader.get_mut(),
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                reply.status,
+                "HTTP/1.1 {status}\r\nContent-Type: {}\r\n{}\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.content_type,
                 reply.headers,
-                body.len()
+                reply.body.len(),
+                reply.body
             )
             .unwrap();
         }

@@ -33,8 +33,8 @@ pub enum Update {
 }
 
 /// A line in the changes pane; a changed file carries the number of its
-/// change set, shown at the right edge, and a verdict wraps under the text
-/// after its arrow.
+/// change set, shown at the right edge, and a verdict carries it unshown and
+/// wraps under the text after its arrow.
 struct LogLine {
     line: Line<'static>,
     set: Option<usize>,
@@ -52,12 +52,12 @@ impl From<Line<'static>> for LogLine {
 }
 
 impl LogLine {
-    fn verdict(spans: Vec<Span<'static>>) -> Self {
+    fn verdict(set: usize, spans: Vec<Span<'static>>) -> Self {
         let mut line = vec![Span::raw(RESULT_ARROW)];
         line.extend(spans);
         Self {
             line: Line::from(line),
-            set: None,
+            set: Some(set),
             verdict: true,
         }
     }
@@ -128,7 +128,8 @@ pub struct Screen {
     debug_lines_from_bottom: usize,
     debug_shown: bool,
     debug_focused: bool,
-    reviewing_since: Option<Instant>,
+    /// The change set under review, and since when.
+    reviewing: Option<(usize, Instant)>,
     settings: Option<ModelSettings>,
     panel: Option<ModelPanel>,
     quit: bool,
@@ -145,7 +146,7 @@ impl Screen {
             debug_lines_from_bottom: 0,
             debug_shown: false,
             debug_focused: false,
-            reviewing_since: None,
+            reviewing: None,
             settings,
             panel: None,
             quit: false,
@@ -190,7 +191,7 @@ impl Screen {
                     }
                     None => {
                         watching = false;
-                        self.reviewing_since = None;
+                        self.reviewing = None;
                         self.log.push(Line::from("Stopped watching.".red()).into());
                     }
                 },
@@ -307,31 +308,30 @@ impl Screen {
                     });
                 }
             }
-            Event::Reviewing { .. } => self.reviewing_since = Some(Instant::now()),
+            Event::Reviewing { set } => self.reviewing = Some((set, Instant::now())),
             Event::Trace { .. } => {}
-            Event::Verdict { verdict, .. } if verdict.contradicts => {
-                self.reviewing_since = None;
+            Event::Verdict { set, verdict } if verdict.contradicts => {
                 let field = verdict
                     .dmp_field
                     .map(|field| format!(" ({field})"))
                     .unwrap_or_default();
-                self.log.push(LogLine::verdict(vec![
-                    format!("contradicts the DMP{field}:").red().bold(),
-                    Span::raw(format!(" {}", verdict.explanation)),
-                ]));
+                self.add_verdict(
+                    set,
+                    vec![
+                        format!("contradicts the DMP{field}:").red().bold(),
+                        Span::raw(format!(" {}", verdict.explanation)),
+                    ],
+                );
             }
-            Event::Verdict { verdict, .. } => {
-                self.reviewing_since = None;
-                self.log.push(LogLine::verdict(vec![
+            Event::Verdict { set, verdict } => self.add_verdict(
+                set,
+                vec![
                     "in line with the DMP:".fg(IN_LINE_GREEN),
                     Span::raw(format!(" {}", verdict.explanation)),
-                ]))
-            }
-            Event::ReviewFailed { error, .. } => {
-                self.reviewing_since = None;
-                self.log.push(LogLine::verdict(vec![
-                    format!("review failed: {error}").red(),
-                ]))
+                ],
+            ),
+            Event::ReviewFailed { set, error } => {
+                self.add_verdict(set, vec![format!("review failed: {error}").red()]);
             }
             Event::WatchErrors { errors, .. } => {
                 for e in errors {
@@ -344,6 +344,47 @@ impl Screen {
                 self.log.push(Line::from(stopped.red()).into());
             }
         }
+    }
+
+    /// Puts the verdict of `set` under the set's changes, above the sets that came while it
+    /// was reviewed.
+    fn add_verdict(&mut self, set: usize, spans: Vec<Span<'static>>) {
+        self.reviewing = None;
+        let end = self.end_of(set);
+        self.log.insert(end, LogLine::verdict(set, spans));
+    }
+
+    /// Where the lines of change set `set` end in the log, or the end of the log when it has
+    /// none.
+    fn end_of(&self, set: usize) -> usize {
+        self.log
+            .iter()
+            .rposition(|line| line.set == Some(set))
+            .map_or(self.log.len(), |last| last + 1)
+    }
+
+    /// The rows of the changes pane at `width`, with a spinner under the set being reviewed.
+    fn log_rows(&self, width: usize) -> Vec<Line<'static>> {
+        let reviewed = self.reviewing.map(|(set, _)| self.end_of(set));
+        let mut rows = Vec::new();
+        let mut spinner_row = 0;
+        for (index, line) in self.log.iter().enumerate() {
+            rows.extend(line.render(width));
+            if reviewed == Some(index + 1) {
+                spinner_row = rows.len();
+            }
+        }
+        if let Some((_, since)) = self.reviewing {
+            let elapsed = since.elapsed();
+            let frame = SPINNER[(elapsed.as_millis() / TICK.as_millis()) as usize % SPINNER.len()];
+            let spinner = Line::from(vec![
+                format!("  {frame} ").cyan(),
+                format!("checking against the DMP… {}s", elapsed.as_secs())
+                    .add_modifier(Modifier::DIM),
+            ]);
+            rows.insert(spinner_row, spinner);
+        }
+        rows
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -438,21 +479,7 @@ impl Screen {
             frame.render_widget(waiting, area);
             return;
         }
-        let width = block.inner(area).width as usize;
-        let mut lines: Vec<Line<'static>> = self
-            .log
-            .iter()
-            .flat_map(|line| line.render(width))
-            .collect();
-        if let Some(since) = self.reviewing_since {
-            let elapsed = since.elapsed();
-            let frame = SPINNER[(elapsed.as_millis() / TICK.as_millis()) as usize % SPINNER.len()];
-            lines.push(Line::from(vec![
-                format!("  {frame} ").cyan(),
-                format!("checking against the DMP… {}s", elapsed.as_secs())
-                    .add_modifier(Modifier::DIM),
-            ]));
-        }
+        let lines = self.log_rows(block.inner(area).width as usize);
         draw_scrolled(frame, area, block, lines, &mut self.lines_from_bottom);
     }
 
@@ -785,10 +812,13 @@ mod tests {
 
     #[test]
     fn indents_the_rest_of_a_verdict_under_its_text() {
-        let line = LogLine::verdict(vec![
-            "in line:".green(),
-            Span::raw(" the file is fine and verylongwordhere"),
-        ]);
+        let line = LogLine::verdict(
+            1,
+            vec![
+                "in line:".green(),
+                Span::raw(" the file is fine and verylongwordhere"),
+            ],
+        );
         let rows: Vec<String> = line.render(16).iter().map(text).collect();
         assert_eq!(
             rows,
@@ -798,6 +828,75 @@ mod tests {
                 "   and",
                 "   verylongwordh",
                 "   ere"
+            ]
+        );
+    }
+
+    #[test]
+    fn puts_each_verdict_under_its_set_when_later_sets_came_during_the_review() {
+        let mut screen = screen();
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
+        // The rows, with the spinner's frame and seconds left out.
+        let apply = |screen: &mut Screen, event| {
+            screen.apply(Update::Session(Record { time, event }));
+            screen
+                .log_rows(40)
+                .iter()
+                .map(text)
+                .map(|row| match row.contains("checking against the DMP") {
+                    true => "spinner".to_string(),
+                    false => row,
+                })
+                .collect::<Vec<_>>()
+        };
+        let in_line = |set| Event::Verdict {
+            set,
+            verdict: Verdict {
+                contradicts: false,
+                dmp_field: None,
+                explanation: "Results.".to_string(),
+            },
+        };
+        for event in [
+            Event::Changes {
+                set: 1,
+                changes: vec![Change::Created("results.csv".into())],
+            },
+            Event::Reviewing { set: 1 },
+            Event::Changes {
+                set: 2,
+                changes: vec![Change::Changed("results.csv".into())],
+            },
+        ] {
+            apply(&mut screen, event);
+        }
+        let reviewing_the_first = apply(
+            &mut screen,
+            Event::Changes {
+                set: 3,
+                changes: vec![Change::Deleted("results.csv".into())],
+            },
+        );
+        apply(&mut screen, in_line(1));
+        let reviewing_the_second = apply(&mut screen, Event::Reviewing { set: 2 });
+
+        assert_eq!(
+            reviewing_the_first,
+            [
+                "created: results.csv                  #1",
+                "spinner",
+                "changed: results.csv                  #2",
+                "deleted: results.csv                  #3",
+            ]
+        );
+        assert_eq!(
+            reviewing_the_second,
+            [
+                "created: results.csv                  #1",
+                " ↳ in line with the DMP: Results.",
+                "changed: results.csv                  #2",
+                "spinner",
+                "deleted: results.csv                  #3",
             ]
         );
     }
