@@ -22,6 +22,10 @@ const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// How long a request to the login server may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The longest wait between polls for the login after failed ones, unless the login server asks
+/// for a longer one.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
+
 /// The fields of a request to the login server that hold a secret, which an error it answers
 /// with must not repeat.
 const SECRETS: [&str; 4] = ["password", "refresh_token", "device_code", "token"];
@@ -113,6 +117,17 @@ impl fmt::Display for Refusal {
             None => Ok(()),
         }
     }
+}
+
+/// How long to wait for the next poll after one that failed, which came `wait` after the one
+/// before, when the login server asks for `interval` between polls.
+fn after_failure(wait: Duration, interval: Duration) -> Duration {
+    // RFC 8628 asks to poll less often after a failed request. The second keeps a server that
+    // asks for no interval from getting a flood of them, and the cap lets the login go on soon
+    // after the server is back, while the code is still valid.
+    (wait * 2)
+        .max(Duration::from_secs(1))
+        .min(LONGEST_WAIT.max(interval))
 }
 
 /// Says that the login server at `url` would get the login unencrypted.
@@ -322,9 +337,7 @@ impl Oidc {
             wait = match &failure {
                 Some(e) => {
                     prompts.notice(&format!("Checking the login failed, trying again: {e:#}"));
-                    // RFC 8628 asks to poll less often after a failed request, and the second
-                    // keeps a server that asks for no interval from getting a flood of them.
-                    (wait * 2).max(Duration::from_secs(1))
+                    after_failure(wait, interval)
                 }
                 None => interval,
             };
@@ -459,6 +472,25 @@ mod tests {
     }
 
     const BAD_GATEWAY: &str = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+
+    #[test]
+    fn polls_less_often_after_failures_but_at_least_every_half_minute() {
+        // The seconds between polls while every poll fails, for a login server that asks for
+        // `interval`.
+        let waits = |interval: u64| {
+            let interval = Duration::from_secs(interval);
+            std::iter::successors(Some(interval), |&wait| Some(after_failure(wait, interval)))
+                .skip(1)
+                .take(5)
+                .map(|wait| wait.as_secs())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [waits(0), waits(5), waits(45)],
+            [[1, 2, 4, 8, 16], [10, 20, 30, 30, 30], [45, 45, 45, 45, 45]]
+        );
+    }
 
     /// The login server at `url`, with all its endpoints there.
     fn login_server(url: &str) -> Oidc {
