@@ -190,6 +190,7 @@ async fn read<T: DeserializeOwned>(endpoint: &str, response: Response) -> Result
 }
 
 pub struct Oidc {
+    issuer: String,
     /// For the token endpoint, which may be on another machine than the issuer and so need
     /// another proxy setting.
     token_http: Client,
@@ -232,6 +233,7 @@ impl Oidc {
             bail!(unencrypted(endpoint));
         }
         Ok(Self {
+            issuer: issuer.to_string(),
             token_http: net::client(&discovery.token_endpoint, TIMEOUT)?,
             client_id: client_id.to_string(),
             scope: scope.to_string(),
@@ -241,13 +243,25 @@ impl Oidc {
         })
     }
 
+    /// The login server, as DAMAP named it.
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
     pub async fn refresh(&self, refresh_token: &str) -> Result<Tokens> {
-        self.token_request(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .await?
-        .map_err(|e| anyhow!("session could not be refreshed: {e}"))
+        let mut tokens = self
+            .token_request(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+            ])
+            .await?
+            .map_err(|e| anyhow!("session could not be refreshed: {e}"))?;
+        // A login server that issues no new refresh token leaves the old one valid, as RFC 6749
+        // section 6 says, so that it stays saved.
+        tokens
+            .refresh_token
+            .get_or_insert_with(|| refresh_token.to_string());
+        Ok(tokens)
     }
 
     /// Ends the session `refresh_token` belongs to at the login server, as RFC 7009 describes.
@@ -510,6 +524,7 @@ mod tests {
     /// The login server at `url`, with all its endpoints there.
     fn login_server(url: &str) -> Oidc {
         Oidc {
+            issuer: url.to_string(),
             token_http: net::client(url, TIMEOUT).unwrap(),
             client_id: "damap".to_string(),
             scope: "openid".to_string(),
@@ -517,6 +532,29 @@ mod tests {
             device_endpoint: Some(format!("{url}/device")),
             revocation_endpoint: Some(format!("{url}/revoke")),
         }
+    }
+
+    #[tokio::test]
+    async fn keeps_the_refresh_token_when_a_refresh_brings_no_new_one() {
+        let (url, server) = fake_model(vec![
+            json!({ "access_token": "first", "refresh_token": "new" }),
+            json!({ "access_token": "second" }),
+        ]);
+        let oidc = login_server(&url);
+
+        let refreshed = [
+            oidc.refresh("old").await.unwrap(),
+            oidc.refresh("old").await.unwrap(),
+        ];
+
+        assert_eq!(
+            refreshed.map(|tokens| (tokens.access_token, tokens.refresh_token)),
+            [
+                ("first".to_string(), Some("new".to_string())),
+                ("second".to_string(), Some("old".to_string())),
+            ]
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[tokio::test]

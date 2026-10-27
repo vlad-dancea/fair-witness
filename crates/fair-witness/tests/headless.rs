@@ -8,8 +8,12 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
-use fair_witness_core::project::{Config, DamapConfig, Project};
-use fair_witness_core::testing::{EFFORT_REFUSED, bad_request, fake_model, one_token, tool_call};
+use fair_witness_core::project::{
+    AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Effort, Project,
+};
+use fair_witness_core::testing::{
+    EFFORT_REFUSED, bad_request, failure, fake_model, one_token, tool_call,
+};
 use serde_json::{Value, json};
 
 /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -555,6 +559,194 @@ fn refuses_a_saved_damap_on_another_machine_over_plain_http() {
          the DAMAP login unencrypted\nUse DAMAP's https:// address, or a DAMAP on this machine, \
          such as http://localhost:8085\nTo use a different URL, run `fair-witness setup`."
     );
+}
+
+#[test]
+fn sends_the_saved_login_to_no_other_damap_or_login_server() {
+    let saved_login_server = "https://login.example.org/realms/damap";
+    for saved_for_this_damap in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        // Accepts no connection, so that one waits for `accept` if the token was sent.
+        let token_endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+        token_endpoint.set_nonblocking(true).unwrap();
+        let (login_server, _) = fake_model(vec![json!({
+            "token_endpoint": format!("http://{}/token", token_endpoint.local_addr().unwrap()),
+        })]);
+        let (damap, _) = fake_model(vec![json!({
+            "issuer": login_server,
+            "clientID": "damap",
+            "scope": "openid",
+        })]);
+        // config.toml names another DAMAP than the login is for, as after an edit, or the same
+        // DAMAP, which now names another login server.
+        let saved_url = if saved_for_this_damap {
+            damap.clone()
+        } else {
+            "https://damap.example.org".to_string()
+        };
+        project
+            .save_config(&Config {
+                damap: DamapConfig {
+                    frontend_url: damap.clone(),
+                    dmp_id: Some(3),
+                },
+                ai: None,
+            })
+            .unwrap();
+        project
+            .save_credentials(&Credentials {
+                damap: Some(DamapLogin {
+                    url: saved_url.clone(),
+                    login_server: Some(saved_login_server.to_string()),
+                    refresh_token: "refresh".to_string(),
+                }),
+                ai: None,
+            })
+            .unwrap();
+
+        let mut run = Run::start(
+            root.path(),
+            &["--ai-url", "http://127.0.0.1:9/v1", "--model", "test"],
+        );
+
+        assert_eq!(run.exit_code(), Some(2));
+        let why = if saved_for_this_damap {
+            format!(
+                "is from the login server at {saved_login_server}, but {damap} now logs in at \
+                 {login_server}"
+            )
+        } else {
+            format!("is for {saved_url}, not {damap}")
+        };
+        assert_eq!(
+            run.stderr_until("error:").pop().unwrap(),
+            format!("error: the saved DAMAP login {why}; log in with `fair-witness setup`")
+        );
+        assert!(token_endpoint.accept().is_err());
+    }
+}
+
+#[test]
+fn sends_the_saved_api_key_to_no_other_api() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let project = Project::new(root.path().to_path_buf());
+    let (endpoint, server) = fake_model(vec![one_token()]);
+    // config.toml names another API than the key is for, as after an edit.
+    project
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: None,
+            },
+            ai: Some(AiConfig {
+                url: endpoint.clone(),
+                model: "test".to_string(),
+                effort: Effort::default(),
+            }),
+        })
+        .unwrap();
+    project
+        .save_credentials(&Credentials {
+            damap: None,
+            ai: Some(ApiKey {
+                url: "https://api.example.org/v1".to_string(),
+                key: "sk-saved".to_string(),
+            }),
+        })
+        .unwrap();
+
+    let run = Run::start(root.path(), &["--dmp-file", &dmp_file]);
+
+    assert_eq!(
+        run.stderr_until("The saved API key")[1..],
+        [
+            format!("Comparing changes with the DMP in {dmp_file}."),
+            format!(
+                "The saved API key is for https://api.example.org/v1, so none is sent to \
+                 {endpoint}. To save one for {endpoint}, run `fair-witness setup`."
+            ),
+        ]
+    );
+    let (head, _) = &server.join().unwrap()[0];
+    assert!(!head.to_lowercase().contains("authorization"), "{head}");
+    assert_eq!(run.stop(), Some(0));
+
+    // An API that needs a key refuses, and the error says why none was sent.
+    let refusal = || failure("401 Unauthorized", "No API key given.");
+    let (endpoint, _) = fake_model(vec![refusal(), refusal()]);
+    project
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: None,
+            },
+            ai: Some(AiConfig {
+                url: endpoint.clone(),
+                model: "test".to_string(),
+                effort: Effort::default(),
+            }),
+        })
+        .unwrap();
+    let mut refused = Run::start(root.path(), &["--dmp-file", &dmp_file]);
+    assert_eq!(refused.exit_code(), Some(2));
+    assert_eq!(
+        refused.stderr_until("The saved API key").join("\n"),
+        format!(
+            "error: {endpoint} refuses test: No API key given.\nPass another model with \
+             --model or another effort with --effort, or choose a model with `fair-witness \
+             setup`\nThe saved API key is for https://api.example.org/v1, so none is sent to \
+             {endpoint}. To save one for {endpoint}, run `fair-witness setup`."
+        )
+    );
+}
+
+#[test]
+fn takes_an_api_key_only_with_the_url_of_its_api() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let (endpoint, server) = fake_model(vec![one_token()]);
+    let key = [("FAIR_WITNESS_API_KEY", "sk-test")];
+    let model = ["--dmp-file", &dmp_file, "--model", "test"];
+
+    let mut alone = Run::start_with(root.path(), &model, &key);
+    let setup = Command::new(env!("CARGO_BIN_EXE_fair-witness"))
+        .current_dir(root.path())
+        .args(["setup", "--api-key", "sk-test"])
+        .env_remove("FAIR_WITNESS_AI_URL")
+        .env_remove("FAIR_WITNESS_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let with_url = Run::start_with(
+        root.path(),
+        &model,
+        &[key[0], ("FAIR_WITNESS_AI_URL", &endpoint)],
+    );
+
+    assert_eq!(alone.exit_code(), Some(2));
+    assert_eq!(
+        alone.stderr_until("  --ai-url"),
+        [
+            "error: the following required arguments were not provided:",
+            "  --ai-url <AI_URL>"
+        ]
+    );
+    assert_eq!(setup.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&setup.stderr).starts_with(
+            "error: the following required arguments were not provided:\n  --ai-url <AI_URL>\n"
+        ),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    with_url.stderr_until("Comparing");
+    let (head, _) = &server.join().unwrap()[0];
+    assert!(
+        head.to_lowercase()
+            .contains("authorization: bearer sk-test"),
+        "{head}"
+    );
+    assert_eq!(with_url.stop(), Some(0));
 }
 
 /// Starts watching `project` against a DMP larger than a pipe holds, which the first trace
