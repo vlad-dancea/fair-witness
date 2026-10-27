@@ -135,9 +135,21 @@ fn is_cache(folder: &Path) -> bool {
     if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         return false;
     }
-    let Ok(tag) = File::open(path) else {
+    // In case a link or a pipe took its place since.
+    #[cfg(unix)]
+    let tag = {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        rustix::fs::open(&path, flags, Mode::empty()).map(File::from)
+    };
+    #[cfg(not(unix))]
+    let tag = File::open(&path);
+    let Ok(tag) = tag else {
         return false;
     };
+    if !tag.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
     let mut start = Vec::with_capacity(CACHE_TAG_SIGNATURE.len());
     tag.take(CACHE_TAG_SIGNATURE.len() as u64)
         .read_to_end(&mut start)
