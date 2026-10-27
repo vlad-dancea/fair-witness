@@ -17,6 +17,8 @@ use crate::net;
 
 /// How long listing the models may take.
 const LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long connecting to the API for a chat request may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
     #[derive(Deserialize)]
@@ -62,17 +64,19 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
     Ok(ids)
 }
 
-pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
+/// A client for the API at `url` that gives up on a request after `timeout`.
+pub fn openai_compatible(url: &str, api_key: Option<String>, timeout: Duration) -> Result<Client> {
     // As `web_url` reads it, so that addresses `same_url` takes for the same API get the same
     // requests.
     let url = &net::web_url(url)?;
-    // The client genai builds by default, but for this API.
-    let http = net::for_server(
-        WebConfig::default().apply_to_builder(HttpClient::builder()),
-        url,
-    )
-    .build()
-    .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
+    // The client genai builds by default, but for this API and with timeouts, of which genai sets
+    // none.
+    let web = WebConfig::default()
+        .with_connect_timeout(CONNECT_TIMEOUT)
+        .with_timeout(timeout);
+    let http = net::for_server(web.apply_to_builder(HttpClient::builder()), url)
+        .build()
+        .with_context(|| format!("could not set up a client for the AI API at {url}"))?;
     // genai joins its paths to the endpoint and keeps its query.
     let endpoint = Endpoint::from_owned(net::under(url, "")?);
     let auth = match api_key {
@@ -162,6 +166,15 @@ pub fn refused(error: &genai::Error) -> Option<String> {
         StatusCode::TOO_MANY_REQUESTS,
     ];
     (status.is_client_error() && !busy.contains(status)).then(|| message(body))
+}
+
+/// Whether the API took a request but did not answer it before the client's timeout.
+pub fn timed_out(error: &genai::Error) -> bool {
+    matches!(
+        error,
+        genai::Error::WebModelCall { webc_error: webc::Error::Reqwest(e), .. }
+            if e.is_timeout() && !e.is_connect()
+    )
 }
 
 /// Why a request failed, in one line and without the request and the full answer that genai's
@@ -283,7 +296,7 @@ const HTTP_DATES: [&str; 3] = [
 
 /// Reads the wait from the `Retry-After` header, in seconds or as a date, or else from a body
 /// such as Aqueduct's, whose message ends in "(Retry after 4s)".
-fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
+pub(crate) fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
     let from_header = header.and_then(|value| {
         let value = value.trim();
         if let Ok(seconds) = value.parse() {
@@ -381,7 +394,7 @@ mod tests {
     async fn sends_an_authorization_header_only_with_a_key() {
         let (url, server) = fake_model(vec![one_token(), one_token()]);
         for api_key in [Some("sk-test".to_string()), None] {
-            openai_compatible(&url, api_key)
+            openai_compatible(&url, api_key, Duration::from_secs(10))
                 .unwrap()
                 .exec_chat(
                     "small",
@@ -432,7 +445,7 @@ mod tests {
             assert!(net::same_url(one, other), "{one} and {other}");
             list_models(one, None).await.unwrap();
             for (url, api_key) in [(one, Some("sk-test".to_string())), (other, None)] {
-                openai_compatible(url, api_key)
+                openai_compatible(url, api_key, Duration::from_secs(10))
                     .unwrap()
                     .exec_chat(
                         "small",
