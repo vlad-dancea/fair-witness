@@ -22,6 +22,10 @@ const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// How long a request to the login server may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The fields of a request to the login server that hold a secret, which an error it answers
+/// with must not repeat.
+const SECRETS: [&str; 4] = ["password", "refresh_token", "device_code", "token"];
+
 #[derive(Deserialize)]
 pub struct Tokens {
     pub access_token: String,
@@ -49,6 +53,22 @@ struct DeviceAuthorization {
 struct OAuthError {
     error: String,
     error_description: Option<String>,
+}
+
+impl OAuthError {
+    /// This error without the secrets in `form`, in case the login server repeats one.
+    fn hiding_secrets_in(mut self, form: &[(&str, &str)]) -> Self {
+        let secrets = form
+            .iter()
+            .filter(|(name, value)| SECRETS.contains(name) && !value.is_empty());
+        for (_, secret) in secrets {
+            self.error = self.error.replace(secret, "[hidden]");
+            self.error_description = self
+                .error_description
+                .map(|description| description.replace(secret, "[hidden]"));
+        }
+        self
+    }
 }
 
 impl fmt::Display for OAuthError {
@@ -111,7 +131,11 @@ async fn post(
     }
     // A proxy in front of the login server answers with a page of its own, such as for 502 Bad
     // Gateway, which holds no OAuth error.
-    let error = response.json().await.ok();
+    let error = response
+        .json::<OAuthError>()
+        .await
+        .ok()
+        .map(|error| error.hiding_secrets_in(form));
     Ok(Err(Refusal {
         endpoint: endpoint.to_string(),
         status,
@@ -554,6 +578,43 @@ mod tests {
             ))
         );
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn hides_the_tokens_a_login_server_repeats() {
+        let repeating = |token: &str| {
+            answer(
+                "400 Bad Request",
+                json!({
+                    "error": format!("invalid_grant {token}"),
+                    "error_description": format!("Token {token} is not active"),
+                }),
+            )
+        };
+        let (url, _) = fake_model(vec![
+            repeating("refresh-secret"),
+            repeating("revoked-secret"),
+        ]);
+        let oidc = login_server(&url);
+
+        let failed = [
+            oidc.refresh("refresh-secret").await.err(),
+            oidc.revoke("revoked-secret").await.err(),
+        ];
+
+        assert_eq!(
+            failed.map(|e| e.map(|e| format!("{e:#}"))),
+            [
+                Some(format!(
+                    "session could not be refreshed: {url}/token answered 400 Bad Request: Token \
+                     [hidden] is not active (invalid_grant [hidden])"
+                )),
+                Some(format!(
+                    "{url}/revoke answered 400 Bad Request: Token [hidden] is not active \
+                     (invalid_grant [hidden])"
+                )),
+            ]
+        );
     }
 
     #[tokio::test]
