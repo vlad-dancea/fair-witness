@@ -139,6 +139,9 @@ pub struct Screen {
     reviewing: Option<(usize, Instant)>,
     settings: Option<ModelSettings>,
     panel: Option<ModelPanel>,
+    /// Whether the session ended, which the header says, since the line in the log that says why
+    /// can be scrolled away.
+    stopped: bool,
     quit: bool,
 }
 
@@ -158,6 +161,7 @@ impl Screen {
             reviewing: None,
             settings,
             panel: None,
+            stopped: false,
             quit: false,
         }
     }
@@ -200,6 +204,7 @@ impl Screen {
                     }
                     None => {
                         watching = false;
+                        self.stopped = true;
                         self.reviewing = None;
                         self.push_line(Line::from("Stopped watching.".red()).into());
                     }
@@ -350,6 +355,7 @@ impl Screen {
             }
             // The review in progress was dropped, and the spinner goes with it.
             Event::WatchStopped { error } => {
+                self.stopped = true;
                 self.reviewing = None;
                 self.push_line(Line::from(error.red()).into());
             }
@@ -431,8 +437,12 @@ impl Screen {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        let watching = match self.stopped {
+            true => "Stopped watching ".red(),
+            false => "Watching ".into(),
+        };
         let mut header_lines = vec![Line::from(vec![
-            "Watching ".into(),
+            watching,
             self.root.display().to_string().bold(),
         ])];
         header_lines.extend(self.status.iter().cloned().map(Line::from));
@@ -1030,6 +1040,12 @@ mod tests {
                 "created: results.csv                  #1",
                 "the project folder was moved or deleted",
             ]
+        );
+        // Also when the line is scrolled away.
+        let drawn = drawn(&mut screen, 80, 12);
+        assert!(
+            drawn.contains("│Stopped watching /home/researcher/sleep-study"),
+            "{drawn}"
         );
     }
 }
