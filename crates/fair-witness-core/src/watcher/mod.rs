@@ -345,54 +345,26 @@ impl FolderWatcher {
                 self.take_subtree(folder);
             }
         }
+        // The debouncer puts a remove marked "override" before the create of a path or a rename
+        // onto it when the path has events of its own, as `sed -i`'s has after it reads the file,
+        // and keeps both in one batch. The create or rename says on its own that the file was
+        // replaced, as it does without such events, so the remove counts only when nothing came
+        // to the path after it, as when the new file moved on within the debounce.
+        let arrivals: HashMap<PathBuf, usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| Some((arrived_at(event)?, index)))
+            .collect();
         let mut changes = Vec::new();
         let moves = Moves::of(&events);
-        let mut replaced = Vec::new();
-        for event in &events {
-            // The debouncer adds such a remove when a file is renamed over a path that has
-            // events of its own, as `sed -i` does after reading the file.
-            if event.kind.is_remove() && event.info() == Some("override") {
-                replaced.extend(event.paths.iter().cloned());
+        for (index, event) in events.iter().enumerate() {
+            let replaced = event.kind.is_remove()
+                && event.info() == Some("override")
+                && event.paths.first().and_then(|path| arrivals.get(path)) > Some(&index);
+            if replaced {
+                continue;
             }
             self.apply(event, &moves, &mut changes);
-        }
-        // A replaced path comes back as created, or as where a rename went, when the create or
-        // rename of it follows the remove, so it changed rather than went. When the new file
-        // moved on, or the folder it is in did, before it came back, what comes there later is
-        // another file, and the path stays deleted.
-        for path in replaced {
-            let Some(deleted) = changes
-                .iter()
-                .position(|change| *change == Change::Deleted(path.clone()))
-            else {
-                continue;
-            };
-            let back = changes
-                .iter()
-                .enumerate()
-                .skip(deleted + 1)
-                .find_map(|(index, change)| match change {
-                    Change::Created(created) if *created == path => Some(Some((index, true))),
-                    Change::Renamed { to, .. } if *to == path => Some(Some((index, false))),
-                    Change::Renamed { from: gone, .. } | Change::Deleted(gone)
-                        if path.starts_with(gone) =>
-                    {
-                        Some(None)
-                    }
-                    _ => None,
-                })
-                .flatten();
-            match back {
-                Some((created, true)) => {
-                    changes[created] = Change::Changed(path.clone());
-                    changes.remove(deleted);
-                }
-                Some((renamed, false)) => {
-                    changes.insert(renamed + 1, Change::Changed(path.clone()));
-                    changes.remove(deleted);
-                }
-                None => {}
-            }
         }
         // A folder whose tag is gone or lost its signature holds files that
         // were never reported, so they count as created, like the files of a
@@ -2587,14 +2559,20 @@ mod tests {
     async fn reports_a_replaced_file_where_its_folder_went() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        write(root, "data/b.csv", "b");
-        write(root, "data/a.csv~", "a");
+        for name in ["read.csv", "unread.csv"] {
+            write(root, &format!("data/{name}"), "old");
+            write(root, &format!("data/{name}~"), "new");
+        }
         let mut watcher = watch(root);
 
-        // A backup is renamed over a file the watcher knows, after something read it, and the
-        // folder gets another name, all within a debounce.
-        fs::read(root.join("data/b.csv")).unwrap();
-        fs::rename(root.join("data/a.csv~"), root.join("data/b.csv")).unwrap();
+        // A backup is renamed over a file the watcher knows, once after something read it and
+        // once without, and the folder gets another name, all within a debounce. Either way the
+        // file changed where it was, and the folder's rename takes it along.
+        fs::read(root.join("data/read.csv")).unwrap();
+        for name in ["read.csv", "unread.csv"] {
+            let file = root.join("data").join(name);
+            fs::rename(file.with_file_name(format!("{name}~")), file).unwrap();
+        }
         fs::rename(root.join("data"), root.join("renamed")).unwrap();
 
         let mut changes = drain(&mut watcher).await;
@@ -2603,8 +2581,8 @@ mod tests {
         assert_eq!(
             changes,
             [
-                Change::Created(path("renamed/b.csv")),
-                Change::Deleted(path("data/b.csv")),
+                Change::Changed(path("data/read.csv")),
+                Change::Changed(path("data/unread.csv")),
                 Change::Renamed {
                     from: path("data"),
                     to: path("renamed"),
@@ -2739,6 +2717,44 @@ mod tests {
                 Change::Renamed {
                     from: path("draft.csv"),
                     to: path("final.csv"),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_a_rename_of_a_file_found_before_its_create_came() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+        let event = |kind, names: &[&str]| {
+            let event = names.iter().fold(notify::Event::new(kind), |event, name| {
+                event.add_path(root.join(name))
+            });
+            DebouncedEvent::new(event, Instant::now())
+        };
+        let create = EventKind::Create(notify::event::CreateKind::Any);
+
+        // Walking the new folder finds the file. It is renamed after its create was handed on
+        // and before the watcher handles it, so the create names a path that is gone, and the
+        // rename's event comes later.
+        write(root, "data/a.csv", "a");
+        let mut changes = watcher.handle(vec![event(create, &["data"])]);
+        fs::rename(root.join("data/a.csv"), root.join("data/b.csv")).unwrap();
+        changes.extend(watcher.handle(vec![event(create, &["data/a.csv"])]));
+        let rename = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+        changes.extend(watcher.handle(vec![event(rename, &["data/a.csv", "data/b.csv"])]));
+
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Created(path("data")),
+                Change::Created(path("data/a.csv")),
+                Change::Changed(path("data/a.csv")),
+                Change::Renamed {
+                    from: path("data/a.csv"),
+                    to: path("data/b.csv"),
                 },
             ]
         );
