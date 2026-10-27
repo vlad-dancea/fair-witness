@@ -93,6 +93,16 @@ impl Refusal {
     fn is(&self, code: &str) -> bool {
         self.error.as_ref().is_some_and(|error| error.error == code)
     }
+
+    /// Whether the same request may succeed later, as after a server error, or when a proxy or
+    /// rate limiter in front of the login server asks to wait.
+    fn may_pass(&self) -> bool {
+        self.status.is_server_error()
+            || matches!(
+                self.status,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            )
+    }
 }
 
 impl fmt::Display for Refusal {
@@ -297,7 +307,7 @@ impl Oidc {
         while Instant::now() + wait < deadline {
             tokio::time::sleep(wait).await;
             // The person may have confirmed the code already, so a request that fails on the way
-            // or meets a server error must not end the login while the code is valid.
+            // or may pass must not end the login while the code is valid.
             failure = match self.token_request(&params).await {
                 Ok(Ok(tokens)) => return Ok(tokens),
                 Ok(Err(e)) if e.is("authorization_pending") => None,
@@ -305,7 +315,7 @@ impl Oidc {
                     interval += Duration::from_secs(5);
                     None
                 }
-                Ok(Err(e)) if e.status.is_server_error() => Some(anyhow!("{e}")),
+                Ok(Err(e)) if e.may_pass() => Some(anyhow!("{e}")),
                 Ok(Err(e)) => bail!("login failed: {e}"),
                 Err(e) => Some(e),
             };
@@ -515,6 +525,11 @@ mod tests {
             ),
             page("502 Bad Gateway", BAD_GATEWAY),
             answer(
+                "400 Bad Request",
+                json!({ "error": "authorization_pending" }),
+            ),
+            answer("429 Too Many Requests", json!({})),
+            answer(
                 "200 OK",
                 json!({ "access_token": "access", "refresh_token": "refresh" }),
             ),
@@ -541,6 +556,10 @@ mod tests {
                 ),
                 format!(
                     "Checking the login failed, trying again: {url}/token answered 502 Bad Gateway"
+                ),
+                format!(
+                    "Checking the login failed, trying again: {url}/token answered 429 Too Many \
+                     Requests"
                 ),
             ]
         );
