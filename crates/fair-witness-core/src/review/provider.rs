@@ -29,6 +29,9 @@ pub async fn list_models(url: &str, api_key: Option<&str>) -> Result<Vec<String>
         id: String,
     }
 
+    // As `web_url` reads it, so that addresses `same_url` takes for the same API get the same
+    // requests.
+    let url = &net::web_url(url)?;
     // Unlike DAMAP's client, it follows any redirect: an API that takes no key may be on another
     // machine over plain HTTP, and reqwest drops the key on a redirect to another host or scheme.
     let http = net::for_server(
@@ -65,6 +68,9 @@ fn base_url(url: &str) -> String {
 }
 
 pub fn openai_compatible(url: &str, api_key: Option<String>) -> Result<Client> {
+    // As `web_url` reads it, so that addresses `same_url` takes for the same API get the same
+    // requests.
+    let url = &net::web_url(url)?;
     // The client genai builds by default, but for this API.
     let http = net::for_server(
         WebConfig::default().apply_to_builder(HttpClient::builder()),
@@ -412,6 +418,44 @@ mod tests {
             [
                 ("POST /v1/chat/completions HTTP/1.1", true),
                 ("POST /v1/chat/completions HTTP/1.1", false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_the_same_requests_to_addresses_read_alike() {
+        let models = json!({ "object": "list", "data": [] });
+        let (url, server) = fake_model(vec![models, one_token(), one_token()]);
+        let alike = [
+            format!("{url}//."),
+            format!("{}/", url.replace("http", "HTTP")),
+        ];
+        assert!(alike.iter().all(|other| net::same_url(other, &url)));
+
+        list_models(&alike[0], None).await.unwrap();
+        for (other, api_key) in [(&alike[0], Some("sk-test".to_string())), (&alike[1], None)] {
+            openai_compatible(other, api_key)
+                .unwrap()
+                .exec_chat(
+                    "small",
+                    ChatRequest::new(vec![ChatMessage::user("Hi")]),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let requests = server.join().unwrap();
+        let lines: Vec<&str> = requests
+            .iter()
+            .map(|(head, _)| head.lines().next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /v1/models HTTP/1.1",
+                "POST /v1/chat/completions HTTP/1.1",
+                "POST /v1/chat/completions HTTP/1.1"
             ]
         );
     }

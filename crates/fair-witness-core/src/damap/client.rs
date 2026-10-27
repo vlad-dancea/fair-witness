@@ -52,9 +52,11 @@ pub struct Damap {
 
 impl Damap {
     /// DAMAP at `url`, unless it uses plain HTTP to another machine, where anyone along the way
-    /// could read the login.
+    /// could read the login. `url` is read as `web_url` reads it, so that addresses `same_url`
+    /// takes for the same DAMAP get the same requests.
     pub fn new(url: &str) -> Result<Self> {
-        if in_the_clear(url) {
+        let url = net::web_url(url)?;
+        if in_the_clear(&url) {
             bail!(
                 "{url} uses plain HTTP to another machine, which would send the DAMAP login \
                  unencrypted\nUse DAMAP's https:// address, or a DAMAP on this machine, such as \
@@ -62,8 +64,8 @@ impl Damap {
             );
         }
         Ok(Self {
-            http: net::client(url, TIMEOUT)?,
-            url: url.trim_end_matches('/').to_string(),
+            http: net::client(&url, TIMEOUT)?,
+            url,
             access_token: None,
         })
     }
