@@ -19,7 +19,7 @@ The fake model answers each review with the scenario's tool calls and then its e
 
 Before the first run, the runner creates a new folder in `target/scenarios/` with a `results.json`. As each run ends, it writes the run's events there, one per line as `fair-witness run --headless` printed them, and adds the run to `results.json`, so the runs that ended are on disk at any time. The events are in `fake/<scenario>-<run>.jsonl`, and `results.json` names the file of each run. `--repeats` runs each scenario more than once, such as to catch a change set that splits only sometimes.
 
-The `status` in `results.json` is `finished` once every run has ended. Ctrl+C, SIGTERM or SIGHUP stops the scripts that are running and ends the runner with exit code 128 plus the signal's number, such as 130 for Ctrl+C. Then `status` is `interrupted`, and `results.json` holds the runs that ended before the signal, without the ones it cut short. A runner that crashed or was killed with SIGKILL leaves `running`, with the runs that ended before.
+The `status` in `results.json` is `finished` once every run has ended. Ctrl+C, SIGTERM or SIGHUP stops the scripts that are running and ends the runner with exit code 128 plus the signal's number, such as 130 for Ctrl+C. Then `status` is `interrupted`, and `results.json` holds the runs that ended before the signal, without the ones it cut short. A runner that could not write a run's results, crashed or was killed with SIGKILL leaves `running`, with the runs it saved before. A run that ends in the very instant of a signal counts as one the signal cut short.
 
 As many scenarios run at once as there are CPUs, but at most 8, since each holds an inotify instance and Linux allows a user 128 by default. `--jobs` changes the number.
 
