@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use fair_witness_core::auth::Prompts;
-use fair_witness_core::damap::{self, Damap};
+use fair_witness_core::auth::Notices;
+use fair_witness_core::damap::{self, Login};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
@@ -114,17 +114,17 @@ struct Dmp {
 
 pub async fn run(here: &Path, args: Args) -> Result<(), Failure> {
     if !args.headless {
-        let start = start(here, args).await.map_err(Failure::Setup)?;
-        return show_events(start).await.map_err(Failure::Runtime);
+        let start = start(here, args).await.map_err(Failure::NotStarted)?;
+        return show_events(start).await.map_err(Failure::Failed);
     }
     // Listening before startup, which can wait on DAMAP for a while, lets a script stop it then.
-    let stopped = stop_requested().map_err(Failure::Setup)?;
+    let stopped = stop_requested().map_err(Failure::NotStarted)?;
     tokio::pin!(stopped);
     let start = tokio::select! {
-        start = start(here, args) => start.map_err(Failure::Setup)?,
+        start = start(here, args) => start.map_err(Failure::NotStarted)?,
         () = &mut stopped => return Ok(()),
     };
-    print_events(start, stopped).await.map_err(Failure::Runtime)
+    print_events(start, stopped).await.map_err(Failure::Failed)
 }
 
 async fn start(here: &Path, args: Args) -> Result<Start> {
@@ -332,11 +332,14 @@ async fn download_dmp(
 ) -> Result<Dmp> {
     let config = project.config()?.context(NOT_SET_UP)?.damap;
     let downloaded = async {
-        let damap = if headless {
-            saved_session(project).await?
+        let (damap, instance) = damap::reach(&config.frontend_url).await?;
+        let login = if headless {
+            Login::SavedOnly(&ErrorOutput)
         } else {
-            damap::resume(project, &TerminalPrompts).await?
+            Login::Ask(&TerminalPrompts)
         };
+        let saved = project.credentials()?.damap;
+        let damap = damap::log_in(project, damap, &instance, saved.as_ref(), login).await?;
         let name = damap
             .list_dmps()
             .await?
@@ -379,39 +382,12 @@ async fn download_dmp(
     }
 }
 
-/// Logs in to DAMAP with the saved session only, since nobody can log in during a headless run.
-async fn saved_session(project: &Project) -> Result<Damap> {
-    let config = project.config()?.context(NOT_SET_UP)?;
-    let (damap, instance) = damap::reach(&config.damap.frontend_url).await?;
-    let oidc = damap::discover(&damap, &instance, &ErrorOutput).await?;
-    let login = project
-        .credentials()?
-        .damap
-        .context("not logged in to DAMAP; log in with `fair-witness setup`")?;
-    let refresh_token = login
-        .refresh_token_for(damap.url(), oidc.issuer())
-        .map_err(|e| anyhow!("{e}; log in with `fair-witness setup`"))?;
-    let tokens = oidc
-        .refresh(refresh_token)
-        .await
-        .context("the DAMAP login has expired; log in again with `fair-witness setup`")?;
-    damap::save_session(project, damap, &oidc, tokens, &ErrorOutput)
-}
-
 /// Writes the login's notices to stderr, keeping stdout for events.
 struct ErrorOutput;
 
-impl Prompts for ErrorOutput {
+impl Notices for ErrorOutput {
     fn notice(&self, message: &str) {
         eprintln!("{message}");
-    }
-
-    fn confirm_code(&self, link: &str, code: &str) {
-        eprintln!("To log in, open {link} and confirm the code {code}");
-    }
-
-    fn username_and_password(&self) -> Result<(String, String)> {
-        bail!("cannot ask for a DAMAP login without a terminal; log in with `fair-witness setup`")
     }
 }
 

@@ -633,6 +633,83 @@ fn sends_the_saved_login_to_no_other_damap_or_login_server() {
 }
 
 #[test]
+fn logs_in_with_the_saved_session_and_leaves_config_toml_as_it_was() {
+    let root = tempfile::tempdir().unwrap();
+    let project = Project::new(root.path().to_path_buf());
+    let (token_server, _) = fake_model(vec![json!({
+        "access_token": "access",
+        "refresh_token": "refreshed",
+    })]);
+    let (login_server, _) = fake_model(vec![json!({
+        "token_endpoint": format!("{token_server}/token"),
+    })]);
+    let (damap, damap_requests) = fake_model(vec![
+        json!({ "issuer": login_server, "clientID": "damap", "scope": "openid" }),
+        json!([{ "id": 3, "title": "Soil samples" }]),
+        serde_json::from_str::<Value>(DMP).unwrap(),
+    ]);
+    let (endpoint, _) = fake_model(vec![one_token()]);
+    project
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: damap.clone(),
+                dmp_id: Some(3),
+            },
+            ai: None,
+        })
+        .unwrap();
+    project
+        .save_credentials(&Credentials {
+            damap: Some(DamapLogin {
+                url: damap.clone(),
+                login_server: Some(login_server.clone()),
+                refresh_token: "saved".to_string(),
+            }),
+            ai: None,
+        })
+        .unwrap();
+    let path = root.path().join(".fair-witness/config.toml");
+    let config = format!(
+        "# Shared with the lab\n{}",
+        std::fs::read_to_string(&path).unwrap()
+    );
+    std::fs::write(&path, &config).unwrap();
+
+    let run = Run::start(root.path(), &["--ai-url", &endpoint, "--model", "test"]);
+
+    assert_eq!(
+        run.stderr_until("Comparing"),
+        [
+            format!("Connected to DAMAP at {damap}"),
+            format!("Watching {}", root.path().display()),
+            "Comparing changes with project #3 - Soil samples.".to_string(),
+        ]
+    );
+    assert_eq!(run.stop(), Some(0));
+    let authorization: Vec<Option<String>> = damap_requests
+        .join()
+        .unwrap()
+        .iter()
+        .map(|(head, _)| {
+            head.lines()
+                .find_map(|line| line.strip_prefix("authorization: "))
+                .map(str::to_string)
+        })
+        .collect();
+    let bearer = Some("Bearer access".to_string());
+    assert_eq!(authorization, [None, bearer.clone(), bearer]);
+    assert_eq!(
+        project.credentials().unwrap().damap,
+        Some(DamapLogin {
+            url: damap,
+            login_server: Some(login_server),
+            refresh_token: "refreshed".to_string(),
+        })
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
+}
+
+#[test]
 fn sends_the_saved_api_key_to_no_other_api() {
     let (root, dmp_file) = unset_folder_with_a_dmp();
     let project = Project::new(root.path().to_path_buf());
