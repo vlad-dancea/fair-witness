@@ -51,18 +51,43 @@ pub fn one_token() -> Value {
 
 /// What the fake model answers to one request.
 pub struct Reply {
-    status: &'static str,
+    /// `None` to hang up without answering.
+    status: Option<&'static str>,
     headers: String,
-    body: Value,
+    content_type: &'static str,
+    body: String,
 }
 
 impl From<Value> for Reply {
     fn from(body: Value) -> Self {
-        Self {
-            status: "200 OK",
-            headers: String::new(),
-            body,
-        }
+        answer("200 OK", body)
+    }
+}
+
+/// An answer with `status`, such as `400 Bad Request`, and the JSON `body`.
+pub fn answer(status: &'static str, body: Value) -> Reply {
+    Reply {
+        status: Some(status),
+        headers: String::new(),
+        content_type: "application/json",
+        body: body.to_string(),
+    }
+}
+
+/// A web page with `status`, as a proxy in front of a server answers when it cannot reach it.
+pub fn page(status: &'static str, html: &str) -> Reply {
+    Reply {
+        content_type: "text/html",
+        body: html.to_string(),
+        ..answer(status, Value::Null)
+    }
+}
+
+/// Closes the connection after reading the request, without answering.
+pub fn hang_up() -> Reply {
+    Reply {
+        status: None,
+        ..answer("200 OK", Value::Null)
     }
 }
 
@@ -70,9 +95,11 @@ impl From<Value> for Reply {
 /// `Retry-After` header if given.
 pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
     Reply {
-        status: "429 Too Many Requests",
         headers: retry_after.map_or(String::new(), |wait| format!("Retry-After: {wait}\r\n")),
-        body: json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+        ..answer(
+            "429 Too Many Requests",
+            json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+        )
     }
 }
 
@@ -94,9 +121,8 @@ pub const EFFORT_REFUSED: &str = "aqueduct.BadRequestError: OpenAIException - Er
 /// A 307 Temporary Redirect to `location`, which asks for the same request there, body and all.
 pub fn redirect(location: &str) -> Reply {
     Reply {
-        status: "307 Temporary Redirect",
         headers: format!("Location: {location}\r\n"),
-        body: Value::Null,
+        ..answer("307 Temporary Redirect", Value::Null)
     }
 }
 
@@ -107,11 +133,10 @@ pub fn bad_request(message: &str) -> Reply {
 
 /// An answer with `status`, such as `503 Service Unavailable`, and `message` in the body.
 pub fn failure(status: &'static str, message: &str) -> Reply {
-    Reply {
+    answer(
         status,
-        headers: String::new(),
-        body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
-    }
+        json!({ "error": { "message": message, "type": "invalid_request_error" } }),
+    )
 }
 
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
@@ -150,14 +175,17 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             };
             requests.push((head, body));
 
-            let body = reply.body.to_string();
+            let Some(status) = reply.status else {
+                continue;
+            };
             write!(
                 reader.get_mut(),
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                reply.status,
+                "HTTP/1.1 {status}\r\nContent-Type: {}\r\n{}\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.content_type,
                 reply.headers,
-                body.len()
+                reply.body.len(),
+                reply.body
             )
             .unwrap();
         }

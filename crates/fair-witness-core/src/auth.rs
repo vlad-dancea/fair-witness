@@ -1,8 +1,10 @@
+use std::fmt;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::net::{self, in_the_clear};
 
@@ -48,11 +50,36 @@ struct OAuthError {
     error_description: Option<String>,
 }
 
-impl std::fmt::Display for OAuthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for OAuthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error_description {
             Some(description) => write!(f, "{description} ({})", self.error),
             None => write!(f, "{}", self.error),
+        }
+    }
+}
+
+/// An error status from an endpoint of the login server, with the OAuth error in its body if it
+/// held one.
+struct Refusal {
+    endpoint: String,
+    status: StatusCode,
+    error: Option<OAuthError>,
+}
+
+impl Refusal {
+    /// Whether the login server refused with the OAuth error `code`.
+    fn is(&self, code: &str) -> bool {
+        self.error.as_ref().is_some_and(|error| error.error == code)
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} answered {}", self.endpoint, self.status)?;
+        match &self.error {
+            Some(error) => write!(f, ": {error}"),
+            None => Ok(()),
         }
     }
 }
@@ -63,6 +90,43 @@ fn unencrypted(url: &str) -> String {
         "DAMAP's login server at {url} uses plain HTTP to another machine, which would send the \
          login unencrypted\nAsk the people who run this DAMAP to serve its login over https://"
     )
+}
+
+/// Posts `form` to `endpoint` of the login server, and fails when it could not be reached.
+async fn post(
+    http: &Client,
+    endpoint: &str,
+    form: &[(&str, &str)],
+) -> Result<Result<Response, Refusal>> {
+    let response = http
+        .post(endpoint)
+        .form(form)
+        .send()
+        .await
+        .context("could not reach the login server")?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(Ok(response));
+    }
+    // A proxy in front of the login server answers with a page of its own, such as for 502 Bad
+    // Gateway, which holds no OAuth error.
+    let error = response.json().await.ok();
+    Ok(Err(Refusal {
+        endpoint: endpoint.to_string(),
+        status,
+        error,
+    }))
+}
+
+/// Reads what `endpoint` answered in `response` as `T`.
+async fn read<T: DeserializeOwned>(endpoint: &str, response: Response) -> Result<T> {
+    let status = response.status();
+    response
+        .json()
+        .await
+        // The message names the endpoint already.
+        .map_err(reqwest::Error::without_url)
+        .with_context(|| format!("{endpoint} answered {status} with something unexpected"))
 }
 
 pub struct Oidc {
@@ -121,7 +185,7 @@ impl Oidc {
             ("refresh_token", refresh_token),
         ])
         .await?
-        .map_err(|e| anyhow::anyhow!("session could not be refreshed: {e}"))
+        .map_err(|e| anyhow!("session could not be refreshed: {e}"))
     }
 
     pub async fn login(&self, prompts: &dyn Prompts) -> Result<Tokens> {
@@ -130,7 +194,7 @@ impl Oidc {
                 Ok(authorization) => {
                     return self.finish_device_flow(authorization, prompts).await;
                 }
-                Err(e) if e.error == "unauthorized_client" => {
+                Err(e) if e.is("unauthorized_client") => {
                     prompts.notice(&format!(
                         "Browser login is not enabled for Keycloak client \"{}\"; \
                          using username and password instead.",
@@ -146,20 +210,14 @@ impl Oidc {
     async fn start_device_flow(
         &self,
         endpoint: &str,
-    ) -> Result<Result<DeviceAuthorization, OAuthError>> {
-        let response = net::client(endpoint, TIMEOUT)?
-            .post(endpoint)
-            .form(&[
-                ("client_id", self.client_id.as_str()),
-                ("scope", self.scope.as_str()),
-            ])
-            .send()
-            .await
-            .context("could not start the login")?;
-        if response.status().is_success() {
-            Ok(Ok(response.json().await?))
-        } else {
-            Ok(Err(response.json().await?))
+    ) -> Result<Result<DeviceAuthorization, Refusal>> {
+        let form = [
+            ("client_id", self.client_id.as_str()),
+            ("scope", self.scope.as_str()),
+        ];
+        match post(&net::client(endpoint, TIMEOUT)?, endpoint, &form).await? {
+            Ok(response) => Ok(Ok(read(endpoint, response).await?)),
+            Err(refusal) => Ok(Err(refusal)),
         }
     }
 
@@ -180,22 +238,42 @@ impl Oidc {
 
         let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
         let mut interval = Duration::from_secs(authorization.interval.unwrap_or(5));
+        let mut wait = interval;
+        let mut failure = None;
+        let params = [
+            ("grant_type", DEVICE_CODE_GRANT),
+            ("device_code", authorization.device_code.as_str()),
+        ];
         while Instant::now() < deadline {
-            tokio::time::sleep(interval).await;
-            let result = self
-                .token_request(&[
-                    ("grant_type", DEVICE_CODE_GRANT),
-                    ("device_code", &authorization.device_code),
-                ])
-                .await?;
-            match result {
-                Ok(tokens) => return Ok(tokens),
-                Err(e) if e.error == "authorization_pending" => {}
-                Err(e) if e.error == "slow_down" => interval += Duration::from_secs(5),
-                Err(e) => bail!("login failed: {e}"),
-            }
+            tokio::time::sleep(wait).await;
+            // The person may have confirmed the code already, so a request that fails on the way
+            // or meets a server error must not end the login while the code is valid.
+            failure = match self.token_request(&params).await {
+                Ok(Ok(tokens)) => return Ok(tokens),
+                Ok(Err(e)) if e.is("authorization_pending") => None,
+                Ok(Err(e)) if e.is("slow_down") => {
+                    interval += Duration::from_secs(5);
+                    None
+                }
+                Ok(Err(e)) if e.status.is_server_error() => Some(anyhow!("{e}")),
+                Ok(Err(e)) => bail!("login failed: {e}"),
+                Err(e) => Some(e),
+            };
+            wait = match &failure {
+                Some(e) => {
+                    prompts.notice(&format!("Checking the login failed, trying again: {e:#}"));
+                    // RFC 8628 asks to poll less often after a failed request, and the second
+                    // keeps a server that asks for no interval from getting a flood of them.
+                    (wait * 2).max(Duration::from_secs(1))
+                }
+                None => interval,
+            };
         }
-        bail!("login timed out; please try again")
+        let timed_out = "login timed out; please try again";
+        Err(match failure {
+            Some(e) => e.context(timed_out),
+            None => anyhow!(timed_out),
+        })
     }
 
     async fn password_login(&self, prompts: &dyn Prompts) -> Result<Tokens> {
@@ -206,39 +284,30 @@ impl Oidc {
             ("password", &password),
         ])
         .await?
-        .map_err(|e| anyhow::anyhow!("login failed: {e}"))
+        .map_err(|e| anyhow!("login failed: {e}"))
     }
 
-    async fn token_request(&self, params: &[(&str, &str)]) -> Result<Result<Tokens, OAuthError>> {
+    async fn token_request(&self, params: &[(&str, &str)]) -> Result<Result<Tokens, Refusal>> {
         let mut form = vec![
             ("client_id", self.client_id.as_str()),
             ("scope", self.scope.as_str()),
         ];
         form.extend_from_slice(params);
-        let response = self
-            .token_http
-            .post(&self.token_endpoint)
-            .form(&form)
-            .send()
-            .await
-            .context("could not reach the login server")?;
+        let answer = post(&self.token_http, &self.token_endpoint, &form).await?;
         // Only the grant type, since the other parameters are secrets.
         let grant = params.iter().find(|(name, _)| *name == "grant_type");
+        let status = match &answer {
+            Ok(response) => response.status(),
+            Err(refusal) => refusal.status,
+        };
         tracing::debug!(
             grant = grant.map(|(_, value)| *value),
-            status = %response.status(),
+            %status,
             "the login server answered a token request"
         );
-        if response.status().is_success() {
-            Ok(Ok(response
-                .json()
-                .await
-                .context("unexpected token response")?))
-        } else {
-            Ok(Err(response
-                .json()
-                .await
-                .context("unexpected error from the login server")?))
+        match answer {
+            Ok(response) => Ok(Ok(read(&self.token_endpoint, response).await?)),
+            Err(refusal) => Ok(Err(refusal)),
         }
     }
 }
@@ -250,14 +319,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::testing::fake_model;
+    use crate::testing::{answer, fake_model, hang_up, page};
 
-    /// Keeps the links it is asked to open in the browser.
+    /// Keeps the links it is asked to open in the browser, and the notices.
     #[derive(Default)]
-    struct Browser(RefCell<Vec<String>>);
+    struct Browser(RefCell<Vec<String>>, RefCell<Vec<String>>);
 
     impl Prompts for Browser {
-        fn notice(&self, _: &str) {}
+        fn notice(&self, message: &str) {
+            self.1.borrow_mut().push(message.to_string());
+        }
 
         fn confirm_code(&self, link: &str, _: &str) {
             self.0.borrow_mut().push(link.to_string());
@@ -325,5 +396,109 @@ mod tests {
         assert!(browser.0.borrow().is_empty());
         assert_eq!(discovery.join().unwrap().len(), 1);
         assert_eq!(device.join().unwrap().len(), 1);
+    }
+
+    const BAD_GATEWAY: &str = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+
+    /// The login server at `url`, with all its endpoints there.
+    fn login_server(url: &str) -> Oidc {
+        Oidc {
+            token_http: net::client(url, TIMEOUT).unwrap(),
+            client_id: "damap".to_string(),
+            scope: "openid".to_string(),
+            token_endpoint: format!("{url}/token"),
+            device_endpoint: Some(format!("{url}/device")),
+        }
+    }
+
+    #[tokio::test]
+    async fn names_the_endpoint_and_status_of_an_error_page() {
+        let (url, server) = fake_model(vec![
+            page("502 Bad Gateway", BAD_GATEWAY),
+            page("502 Bad Gateway", BAD_GATEWAY),
+            page("200 OK", BAD_GATEWAY),
+        ]);
+        let oidc = login_server(&url);
+
+        let failed = [
+            oidc.login(&Browser::default()).await.err(),
+            oidc.refresh("secret").await.err(),
+            oidc.refresh("secret").await.err(),
+        ];
+
+        assert_eq!(
+            failed.map(|e| e.map(|e| format!("{e:#}"))),
+            [
+                Some(format!(
+                    "login failed: {url}/device answered 502 Bad Gateway"
+                )),
+                Some(format!(
+                    "session could not be refreshed: {url}/token answered 502 Bad Gateway"
+                )),
+                Some(format!(
+                    "{url}/token answered 200 OK with something unexpected: error decoding \
+                     response body: expected value at line 1 column 1"
+                )),
+            ]
+        );
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn keeps_polling_through_failed_requests() {
+        let (url, server) = fake_model(vec![
+            answer(
+                "200 OK",
+                json!({
+                    "device_code": "secret",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://login.example.org/device",
+                    "expires_in": 60,
+                    "interval": 0,
+                }),
+            ),
+            hang_up(),
+            answer(
+                "400 Bad Request",
+                json!({ "error": "authorization_pending" }),
+            ),
+            page("502 Bad Gateway", BAD_GATEWAY),
+            answer(
+                "200 OK",
+                json!({ "access_token": "access", "refresh_token": "refresh" }),
+            ),
+        ]);
+        let browser = Browser::default();
+
+        let tokens = login_server(&url).login(&browser).await.unwrap();
+
+        assert_eq!(
+            (
+                tokens.access_token.as_str(),
+                tokens.refresh_token.as_deref()
+            ),
+            ("access", Some("refresh"))
+        );
+        assert_eq!(*browser.0.borrow(), ["https://login.example.org/device"]);
+        assert_eq!(
+            *browser.1.borrow(),
+            [
+                format!(
+                    "Checking the login failed, trying again: could not reach the login server: \
+                     error sending request for url ({url}/token): client error (SendRequest): \
+                     connection closed before message completed"
+                ),
+                format!(
+                    "Checking the login failed, trying again: {url}/token answered 502 Bad Gateway"
+                ),
+            ]
+        );
+        for (head, form) in server.join().unwrap().split_off(1) {
+            assert!(head.starts_with("POST /v1/token "), "{head}");
+            assert!(
+                form.as_str().unwrap().contains("device_code=secret"),
+                "{form}"
+            );
+        }
     }
 }
