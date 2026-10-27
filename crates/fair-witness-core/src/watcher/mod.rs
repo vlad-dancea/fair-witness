@@ -142,7 +142,7 @@ pub enum WatchError {
     /// The project folder was moved or deleted, so nothing is watched any more.
     Gone,
     /// The project folder could not be watched again after the system dropped events, for the
-    /// reason given, so nothing is watched any more.
+    /// reason given, so nothing is watched any more. The changes found before come first.
     Stopped(String),
 }
 
@@ -166,6 +166,8 @@ pub struct FolderWatcher {
     filter: Filter,
     /// What the last batch showed went wrong, which `next` reports before anything else.
     pending: Vec<String>,
+    /// Why watching stopped, which `next` reports once it has handed on the set it holds.
+    stopped: Option<String>,
 }
 
 impl FolderWatcher {
@@ -195,6 +197,7 @@ impl FolderWatcher {
             known,
             filter,
             pending: Vec::new(),
+            stopped: None,
         })
     }
 
@@ -458,15 +461,15 @@ impl FolderWatcher {
     /// Looks through the folder again after the system dropped events, and gives back what
     /// differs from the paths the watcher knows: what was created or deleted, and the files it
     /// knows that were written since `since`, which the dropped events may have been about.
-    /// The system said so at `noticed`. Fails when the folder cannot be watched again.
-    fn rescan(&mut self, since: Instant, noticed: Instant) -> Result<Vec<Change>, String> {
+    /// The system said so at `noticed`. When the folder cannot be watched again, watching stops.
+    fn rescan(&mut self, since: Instant, noticed: Instant) -> Vec<Change> {
         let mut changes = self.look_again(since);
         // notify opens every folder on the thread that reads the events when it starts watching,
         // which can overflow the queue by itself in a large project. Another watcher would do
         // the same, also while a file that is still written makes every look find a change.
         let own = noticed <= self.watched + self.debounce;
         if own || RecommendedWatcher::kind() != WatcherKind::Inotify {
-            return Ok(changes);
+            return changes;
         }
         // inotify watches a folder only once its create comes, so a folder made while events
         // were dropped is not watched, also one made again where the watcher knows one, and a
@@ -478,19 +481,23 @@ impl FolderWatcher {
         self.debouncer = None;
         // Watching stops then, as it does when it cannot start, and is not tried again, since
         // notify leaves a thread running when it cannot make the watcher.
-        let fresh = start(&self.root, self.debounce, self.sender.clone()).map_err(|e| {
-            let (folder, cause) = explain(e);
-            format!(
-                "could not watch {} again after the system dropped events, so the project \
-                 folder is no longer watched: {cause}",
-                folder.as_deref().unwrap_or(&self.root).display()
-            )
-        })?;
-        self.debouncer = Some(fresh);
-        self.watched = Instant::now();
-        let found = self.look_again(since);
-        extend_set(&mut changes, found);
-        Ok(changes)
+        match start(&self.root, self.debounce, self.sender.clone()) {
+            Ok(fresh) => {
+                self.debouncer = Some(fresh);
+                self.watched = Instant::now();
+                let found = self.look_again(since);
+                extend_set(&mut changes, found);
+            }
+            Err(e) => {
+                let (folder, cause) = explain(e);
+                self.stopped = Some(format!(
+                    "could not watch {} again after the system dropped events, so the project \
+                     folder is no longer watched: {cause}",
+                    folder.as_deref().unwrap_or(&self.root).display()
+                ));
+            }
+        }
+        changes
     }
 
     /// Walks the folder and gives back what differs from the paths the watcher knows, as
@@ -570,6 +577,13 @@ impl FolderWatcher {
         loop {
             if !self.pending.is_empty() {
                 return Some(Err(WatchError::Failed(mem::take(&mut self.pending))));
+            }
+            // No more events come, so the set is complete.
+            if let Some(stopped) = &self.stopped {
+                return Some(match self.held.take() {
+                    Some(held) => Ok(held.changes),
+                    None => Err(WatchError::Stopped(stopped.clone())),
+                });
             }
             // By the clock, since batches of other files can keep coming while a file is copied.
             self.look_if_due();
@@ -654,13 +668,7 @@ impl FolderWatcher {
                     .as_ref()
                     .map_or(first, |held| held.first.min(first));
                 let since = start.checked_sub(self.debounce).unwrap_or(start);
-                let found = match self.rescan(since, noticed) {
-                    Ok(found) => found,
-                    Err(e) => {
-                        self.held = None;
-                        return Some(Err(WatchError::Stopped(e)));
-                    }
-                };
+                let found = self.rescan(since, noticed);
                 if found.is_empty() {
                     // Nothing the watcher reports changed, as when the dropped events were reads,
                     // which notify's opening every folder to watch it at the start can be.
@@ -1654,7 +1662,7 @@ mod tests {
         let found = watcher.rescan(Instant::now(), watcher.watched);
         fs::set_permissions(&raw, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert_eq!(found, Ok(Vec::new()));
+        assert_eq!(found, []);
         assert!(watcher.known.contains(&raw.join("a.csv")));
     }
 
@@ -1674,19 +1682,32 @@ mod tests {
 
         // inotify cannot watch a folder the user cannot read.
         fs::set_permissions(&raw, fs::Permissions::from_mode(0o000)).unwrap();
+        write(root, "notes.md", "a");
         let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
         let later = watcher.watched + DEBOUNCE * 2;
         tokio::time::sleep_until(later.into()).await;
         let batch = vec![DebouncedEvent::new(dropped, later)];
         batches.send((Instant::now(), Ok(batch))).unwrap();
-        let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        let mut reported = Vec::new();
+        for _ in 0..3 {
+            let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+            reported.push(next.expect("nothing in time").unwrap());
+        }
         fs::set_permissions(&raw, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let Ok(Some(Err(WatchError::Stopped(error)))) = next else {
-            panic!("{next:?}");
+        // What the look found still comes, with the warning before it.
+        let [
+            Err(WatchError::Failed(warning)),
+            Ok(set),
+            Err(WatchError::Stopped(error)),
+        ] = &reported[..]
+        else {
+            panic!("{reported:?}");
         };
+        assert_eq!(warning, &[MISSED]);
+        assert_eq!(set, &[Change::Created(PathBuf::from("notes.md"))]);
         assert_eq!(
-            error,
+            *error,
             format!(
                 "could not watch {} again after the system dropped events, so the project folder \
                  is no longer watched: Permission denied (os error 13)",
@@ -1763,11 +1784,11 @@ mod tests {
         let started = watcher.watched;
         assert_eq!(
             watcher.rescan(Instant::now(), started),
-            Ok(vec![Change::Created(PathBuf::from("notes.md"))])
+            [Change::Created(PathBuf::from("notes.md"))]
         );
         assert_eq!(watcher.watched, started);
         let later = started + DEBOUNCE * 2;
-        assert_eq!(watcher.rescan(Instant::now(), later), Ok(Vec::new()));
+        assert_eq!(watcher.rescan(Instant::now(), later), []);
         assert!(watcher.watched > started);
         fs::write(root.join("raw/a.csv"), "b").unwrap();
         assert_eq!(
@@ -1798,12 +1819,12 @@ mod tests {
         let path = PathBuf::from;
         assert_eq!(
             watcher.rescan(Instant::now(), Instant::now() + DEBOUNCE * 2),
-            Ok(vec![
+            [
                 Change::Deleted(path("old/a.csv")),
                 Change::Created(path("old/b.csv")),
                 Change::Created(path("raw")),
                 Change::Created(path("raw/a.csv")),
-            ])
+            ]
         );
         assert_eq!(watcher.pending, Vec::<String>::new());
         fs::write(root.join("raw/a.csv"), "b").unwrap();
