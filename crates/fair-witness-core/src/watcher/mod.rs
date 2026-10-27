@@ -13,7 +13,7 @@ use anyhow::Result;
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer_opt,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -141,9 +141,19 @@ impl FolderWatcher {
         let filter = Filter::new(root)?;
         let (tx, events) = mpsc::unbounded_channel();
         let debounce = debounce.max(SHORTEST_DEBOUNCE);
-        let mut debouncer = new_debouncer(debounce, None, move |result| {
-            let _ = tx.send((Instant::now(), result));
-        })?;
+        // A link can lead to a share with more folders than the system lets a user watch, and
+        // what changes there is not the project's, which `walk` and the model's tools also stay
+        // out of.
+        let config = notify::Config::default().with_follow_symlinks(false);
+        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+            debounce,
+            None,
+            move |result| {
+                let _ = tx.send((Instant::now(), result));
+            },
+            RecommendedCache::new(),
+            config,
+        )?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
         let mut known = BTreeSet::new();
         walk(root, &filter, &mut |path| {
@@ -1116,6 +1126,28 @@ mod tests {
             "{changes:?}"
         );
         assert!(created(&changes).is_empty(), "{changes:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_changes_behind_a_link_to_a_folder_outside_the_project() {
+        let share = tempfile::tempdir().unwrap();
+        let campaign = share.path().join("campaign");
+        fs::create_dir_all(campaign.join("day-01")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::os::unix::fs::symlink(&campaign, root.join("raw")).unwrap();
+        let mut watcher = watch(root);
+
+        // In a folder that was there when watching started, and in one made since.
+        fs::write(campaign.join("day-01/samples.csv"), "a").unwrap();
+        fs::create_dir(campaign.join("day-02")).unwrap();
+        fs::write(root.join("notes.md"), "Day 2 is on the share.").unwrap();
+
+        assert_eq!(
+            drain(&mut watcher).await,
+            [Change::Created(PathBuf::from("notes.md"))]
+        );
     }
 
     #[cfg(unix)]
