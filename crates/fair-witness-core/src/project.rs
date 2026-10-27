@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -13,7 +13,10 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
-const MADMP_PARTIAL_FILE: &str = "madmp.json.partial";
+/// Ends the name of a file being written, which is renamed over the file it replaces. The
+/// ownCloud and Nextcloud clients skip these by default, so a client told to skip
+/// `credentials.toml` never uploads half of it either.
+const PARTIAL_SUFFIX: &str = ".part";
 const LOG_DIR: &str = "log";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
@@ -187,7 +190,7 @@ impl Project {
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
-        write_toml(&self.ensure_dir()?.join(CONFIG_FILE), config, false)
+        write_toml(&self.ensure_dir()?, CONFIG_FILE, config, false)
     }
 
     pub fn credentials(&self) -> Result<Credentials> {
@@ -195,11 +198,7 @@ impl Project {
     }
 
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
-        write_toml(
-            &self.ensure_dir()?.join(CREDENTIALS_FILE),
-            credentials,
-            true,
-        )
+        write_toml(&self.ensure_dir()?, CREDENTIALS_FILE, credentials, true)
     }
 
     /// The copy of DMP `dmp_id` from the DAMAP at `damap_url` that an earlier `run` saved, if
@@ -233,19 +232,10 @@ impl Project {
             dmp_id,
             madmp: madmp.clone(),
         };
-        // Written beside the copy and renamed over it, so a failed write keeps the old copy.
-        let path = dir.join(MADMP_FILE);
-        let partial = dir.join(MADMP_PARTIAL_FILE);
-        let written = fs::write(&partial, serde_json::to_string_pretty(&saved)?)
-            .with_context(|| format!("could not write {}", partial.display()))
-            .and_then(|()| {
-                fs::rename(&partial, &path)
-                    .with_context(|| format!("could not write {}", path.display()))
-            });
-        if written.is_err() {
-            let _ = fs::remove_file(&partial);
-        }
-        written
+        let text = serde_json::to_string_pretty(&saved)
+            .with_context(|| format!("could not write {}", dir.join(MADMP_FILE).display()))?;
+        // The DMP names its contributors with their e-mail addresses.
+        write_file(&dir, MADMP_FILE, text.as_bytes(), true)
     }
 
     /// Names the log of a run that starts now, creating its folder and its empty events file.
@@ -312,12 +302,12 @@ fn write_ignore(dir: &Path) -> Result<()> {
 }
 
 fn write_gitignore(dir: &Path) -> Result<()> {
-    let path = dir.join(".gitignore");
-    fs::write(
-        &path,
-        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n{MADMP_PARTIAL_FILE}\n{LOG_DIR}/\n"),
+    write_file(
+        dir,
+        ".gitignore",
+        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n*{PARTIAL_SUFFIX}\n{LOG_DIR}/\n").as_bytes(),
+        false,
     )
-    .with_context(|| format!("could not write {}", path.display()))
 }
 
 fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -363,18 +353,50 @@ fn private_options() -> fs::OpenOptions {
     options
 }
 
-fn write_toml<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
-    let mut options = if private {
-        private_options()
-    } else {
-        fs::OpenOptions::new()
-    };
-    options.write(true).create(true).truncate(true);
+fn write_toml<T: Serialize>(dir: &Path, name: &str, value: &T, private: bool) -> Result<()> {
+    let text = toml::to_string(value)
+        .with_context(|| format!("could not write {}", dir.join(name).display()))?;
+    write_file(dir, name, text.as_bytes(), private)
+}
 
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("could not write {}", path.display()))?;
-    file.write_all(toml::to_string(value)?.as_bytes())?;
+/// Replaces the file `name` in `dir` with `contents`, so that it holds the old contents or the
+/// new ones even when writing fails or the computer stops. Afterwards a private file is readable
+/// only by the user, whoever could read the one it replaced.
+fn write_file(dir: &Path, name: &str, contents: &[u8], private: bool) -> Result<()> {
+    replace_file(dir, name, private, |file| file.write_all(contents))
+}
+
+fn replace_file(
+    dir: &Path,
+    name: &str,
+    private: bool,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> Result<()> {
+    let path = dir.join(name);
+    let context = || format!("could not write {}", path.display());
+    // The contents go to a new file that is renamed over the old one. The rename also replaces a
+    // symlink instead of writing through it, and leaves the mode the new file was created with.
+    let prefix = format!("{name}.");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(PARTIAL_SUFFIX);
+    if !private {
+        // tempfile creates files for the user alone, so the umask has to decide again.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+    }
+    // Dropped before the rename, the new file is deleted.
+    let mut partial = builder.tempfile_in(dir).with_context(context)?;
+    write(partial.as_file_mut()).with_context(context)?;
+    // Without the sync, the rename can reach the disk before the contents, and a crash leaves the
+    // file empty.
+    partial.as_file().sync_all().with_context(context)?;
+    partial
+        .persist(&path)
+        .map_err(|e| e.error)
+        .with_context(context)?;
     Ok(())
 }
 
@@ -424,29 +446,6 @@ mod tests {
         );
         assert_eq!(project.madmp("https://a.example.org", 4).unwrap(), None);
         assert_eq!(project.madmp("https://b.example.org", 3).unwrap(), None);
-    }
-
-    #[test]
-    fn keeps_the_saved_dmp_when_saving_another_fails() {
-        let root = tempfile::tempdir().unwrap();
-        let project = Project::new(root.path().to_path_buf());
-        let url = "https://a.example.org";
-        project
-            .save_madmp(url, 3, &serde_json::json!({ "title": "three" }))
-            .unwrap();
-        // A folder where the new copy is written first makes writing it fail.
-        fs::create_dir(root.path().join(DIR_NAME).join(MADMP_PARTIAL_FILE)).unwrap();
-
-        assert!(
-            project
-                .save_madmp(url, 4, &serde_json::json!({ "title": "four" }))
-                .is_err()
-        );
-
-        assert_eq!(
-            project.madmp(url, 3).unwrap().as_deref(),
-            Some("{\n  \"title\": \"three\"\n}")
-        );
     }
 
     #[test]
@@ -581,9 +580,20 @@ mod tests {
     }
 
     #[test]
-    fn keeps_the_credentials_private() {
+    fn keeps_the_credentials_and_the_dmp_private() {
         let root = tempfile::tempdir().unwrap();
         let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        let dir = root.path().join(DIR_NAME);
+        // As a sync client or `chmod -R g+rX` leaves them.
+        for name in [CREDENTIALS_FILE, MADMP_FILE] {
+            fs::write(dir.join(name), "").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
         assert!(project.credentials().unwrap().refresh_token.is_none());
 
         project
@@ -592,20 +602,85 @@ mod tests {
                 api_key: Some("sk-test".to_string()),
             })
             .unwrap();
+        project
+            .save_madmp("https://a.example.org", 3, &serde_json::json!({}))
+            .unwrap();
 
         let credentials = project.credentials().unwrap();
         assert_eq!(credentials.refresh_token.as_deref(), Some("refresh"));
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
-            fs::read_to_string(root.path().join(".fair-witness/.gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\nmadmp.json.partial\nlog/\n"
+            fs::read_to_string(dir.join(".gitignore")).unwrap(),
+            "credentials.toml\nmadmp.json\n*.part\nlog/\n"
         );
         #[cfg(unix)]
-        {
+        for name in [CREDENTIALS_FILE, MADMP_FILE] {
             use std::os::unix::fs::PermissionsExt;
-            let path = root.path().join(".fair-witness/credentials.toml");
-            let mode = fs::metadata(path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
+            let mode = fs::metadata(dir.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaces_a_symlink_instead_of_writing_through_it() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        let data = root.path().join("data.csv");
+        fs::write(&data, "").unwrap();
+        let path = root.path().join(DIR_NAME).join(CREDENTIALS_FILE);
+        std::os::unix::fs::symlink(&data, &path).unwrap();
+
+        project
+            .save_credentials(&Credentials {
+                refresh_token: None,
+                api_key: Some("sk-test".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&data).unwrap(), "");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "api_key = \"sk-test\"\n"
+        );
+    }
+
+    #[test]
+    fn keeps_the_old_file_when_writing_the_new_one_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project
+            .save_credentials(&Credentials {
+                refresh_token: Some("refresh".to_string()),
+                api_key: Some("sk-test".to_string()),
+            })
+            .unwrap();
+        let dir = root.path().join(DIR_NAME);
+        let path = dir.join(CREDENTIALS_FILE);
+        let saved = fs::read_to_string(&path).unwrap();
+
+        // As when the disk fills up halfway through.
+        let error = replace_file(&dir, CREDENTIALS_FILE, true, |file| {
+            file.write_all(b"refresh_tok")?;
+            Err(io::Error::other("no space left on device"))
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "could not write {}: no space left on device",
+                path.display()
+            )
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, [".gitignore", CREDENTIALS_FILE, IGNORE_FILE]);
     }
 }

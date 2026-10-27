@@ -88,13 +88,14 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
-- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does.
+- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does. It names the DMP's contributors with their e-mail addresses, so on macOS and Linux it is readable only by you.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
+- `<file>.<random>.part`: what was left when fair-witness stopped while saving `<file>`. Every file here is written under such a name first and then renamed over the old one, so a save that fails keeps the old file whole. You can delete these.
 - `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took. To keep it short, the system prompt, the DMP and the model are written once, before the first review, and again only when they change. `<start time>-diagnostics.log` has what happened outside the reviews, such as requests to DAMAP, folders that could not be read and notifications that failed. The `FAIR_WITNESS_LOG` environment variable sets how much it holds: `info` by default, `debug` for every request, `trace` for everything and `warn` for problems only. It takes the syntax of `RUST_LOG`, such as `warn,fair_witness_core=debug`. At every level, it leaves out the folder watcher's events below `warn`, one for each file event, and everything the AI client logs, because the client quotes the AI API's responses and those can repeat the API key. The events log has what the model answered.
 
 The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
 
-A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json` and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
+A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json`, the `.part` files and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ### What is ignored
 
