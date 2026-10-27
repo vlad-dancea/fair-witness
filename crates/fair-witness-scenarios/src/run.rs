@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use fair_witness_core::project::{AiConfig, Effort};
-use fair_witness_core::review::{Checked, ModelChoice, Reviewer};
+use fair_witness_core::review::{ChoiceCheck, ModelChoice, ModelStep};
 use fair_witness_core::secret::hide;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
@@ -123,7 +123,7 @@ pub fn check(models: &[Model], settings: &Settings) -> Result<Vec<Refused>> {
         .context("could not start checking the models")?;
     let key = settings.api_key.as_deref();
     // One reviewer for each API, which remembers the models it asked to allow an effort for.
-    let mut reviewers: HashMap<&str, Reviewer> = HashMap::new();
+    let mut reviewers: HashMap<&str, ModelStep> = HashMap::new();
     let mut refused = Vec::new();
     for model in models {
         let Model::Real { url, name, effort } = model else {
@@ -137,21 +137,21 @@ pub fn check(models: &[Model], settings: &Settings) -> Result<Vec<Refused>> {
                     model: name.clone(),
                     effort: effort.clone(),
                 };
-                entry.insert(Reviewer::new(&ai, settings.api_key.clone())?)
+                entry.insert(ModelStep::new(&ai, settings.api_key.clone())?)
             }
         };
         let choice = ModelChoice {
             model: name.clone(),
             effort: effort.clone(),
         };
-        match runtime.block_on(reviewer.check(&choice)) {
-            Checked::Accepted => {}
-            Checked::Refused(error) => refused.push(Refused {
+        match runtime.block_on(reviewer.try_choice(&choice)) {
+            ChoiceCheck::Accepted => {}
+            ChoiceCheck::Refused(error) => refused.push(Refused {
                 model: name.clone(),
                 effort: effort.clone(),
                 error: hide(error, key),
             }),
-            Checked::Unknown(why) => eprintln!(
+            ChoiceCheck::Unknown(why) => eprintln!(
                 "Could not check {name} {}, so it runs anyway: {}",
                 effort.name(),
                 hide(why, key)

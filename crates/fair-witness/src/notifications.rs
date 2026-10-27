@@ -54,7 +54,7 @@ mod tests {
     use std::time::Duration;
 
     use fair_witness_core::project::{AiConfig, Effort, Project};
-    use fair_witness_core::review::{Reviewer, Trace};
+    use fair_witness_core::review::{ModelStep, Trace};
     use fair_witness_core::session::Session;
     use fair_witness_core::testing::{failure, fake_model};
 
@@ -73,7 +73,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        let reviewer = Reviewer::new(&ai, Some("sk-test".to_string())).unwrap();
+        let reviewer = ModelStep::new(&ai, Some("sk-test".to_string())).unwrap();
         let mut records = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
             .reviewing("{}".to_string(), vec![Arc::new(reviewer)])

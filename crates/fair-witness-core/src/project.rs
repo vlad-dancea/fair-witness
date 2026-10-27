@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::net::same_url;
+
 pub const DIR_NAME: &str = ".fair-witness";
 pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
 pub const IGNORE_FILE: &str = "ignore";
@@ -143,12 +145,73 @@ pub struct RunLog {
     pub diagnostics: PathBuf,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+/// The secrets in `credentials.toml`, each with the server it was saved for, so that an edit to
+/// `config.toml` cannot send one to another server.
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
+    pub damap: Option<DamapLogin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    pub ai: Option<ApiKey>,
+}
+
+/// A DAMAP session, with the DAMAP and the login server it was issued by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DamapLogin {
+    pub url: String,
+    /// The issuer DAMAP named, or `None` for a login saved before it was recorded, which goes to
+    /// the issuer DAMAP names then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_server: Option<String>,
+    pub refresh_token: String,
+}
+
+impl DamapLogin {
+    /// The refresh token, unless the DAMAP at `url` or its login server `login_server` is
+    /// another one than it was issued by.
+    pub fn refresh_token_for(&self, url: &str, login_server: &str) -> Result<&str> {
+        if !same_url(&self.url, url) {
+            bail!("the saved DAMAP login is for {}, not {url}", self.url);
+        }
+        if let Some(saved) = &self.login_server
+            && !same_url(saved, login_server)
+        {
+            bail!(
+                "the saved DAMAP login is from the login server at {saved}, but {url} now logs \
+                 in at {login_server}"
+            );
+        }
+        Ok(&self.refresh_token)
+    }
+}
+
+/// An API key, with the API it is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub url: String,
+    #[serde(rename = "api_key")]
+    pub key: String,
+}
+
+impl ApiKey {
+    /// The key, if it is for the API at `url`.
+    pub fn for_api(&self, url: &str) -> Option<&str> {
+        same_url(&self.url, url).then_some(&self.key)
+    }
+}
+
+/// `credentials.toml` as it is read, also as earlier versions wrote it.
+#[derive(Deserialize)]
+struct SavedCredentials {
+    #[serde(default)]
+    damap: Option<DamapLogin>,
+    #[serde(default)]
+    ai: Option<ApiKey>,
+    /// Saved without the server it is for by earlier versions.
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 /// A copy of a DMP with where it came from, since DAMAP's maDMP holds neither.
@@ -197,7 +260,37 @@ impl Project {
     }
 
     pub fn credentials(&self) -> Result<Credentials> {
-        Ok(read_toml(&self.dir().join(CREDENTIALS_FILE))?.unwrap_or_default())
+        let Some(saved) = read_toml::<SavedCredentials>(&self.dir().join(CREDENTIALS_FILE))? else {
+            return Ok(Credentials::default());
+        };
+        let mut credentials = Credentials {
+            damap: saved.damap,
+            ai: saved.ai,
+        };
+        if saved.refresh_token.is_none() && saved.api_key.is_none() {
+            return Ok(credentials);
+        }
+        // Earlier versions saved the secrets for the servers in config.toml. Saved with them
+        // once, they stay with them when config.toml changes later.
+        let config = self.config()?;
+        if let (None, Some(refresh_token), Some(config)) =
+            (&credentials.damap, saved.refresh_token, &config)
+        {
+            credentials.damap = Some(DamapLogin {
+                url: config.damap.frontend_url.clone(),
+                login_server: None,
+                refresh_token,
+            });
+        }
+        if let (None, Some(key), Some(ai)) = (
+            &credentials.ai,
+            saved.api_key,
+            config.and_then(|config| config.ai),
+        ) {
+            credentials.ai = Some(ApiKey { url: ai.url, key });
+        }
+        self.save_credentials(&credentials)?;
+        Ok(credentials)
     }
 
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
@@ -595,6 +688,130 @@ mod tests {
         );
     }
 
+    /// A login to the DAMAP at damap.example.org and a key for the API at api.example.org.
+    fn secrets() -> Credentials {
+        Credentials {
+            damap: Some(DamapLogin {
+                url: "https://damap.example.org".to_string(),
+                login_server: Some("https://login.example.org/realms/damap".to_string()),
+                refresh_token: "refresh".to_string(),
+            }),
+            ai: Some(ApiKey {
+                url: "https://api.example.org/v1".to_string(),
+                key: "sk-test".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn gives_each_secret_only_to_the_servers_it_was_saved_for() {
+        let Credentials {
+            damap: Some(login),
+            ai: Some(key),
+        } = secrets()
+        else {
+            unreachable!()
+        };
+        let from_before = DamapLogin {
+            login_server: None,
+            ..login.clone()
+        };
+        let login_server = "https://login.example.org/realms/damap";
+
+        assert_eq!(
+            [
+                login.refresh_token_for("damap.example.org/", &format!("{login_server}/")),
+                login.refresh_token_for("https://other.example.org", login_server),
+                login.refresh_token_for(
+                    "https://damap.example.org",
+                    "https://login.other.org/realms/damap"
+                ),
+                from_before.refresh_token_for(
+                    "https://damap.example.org",
+                    "https://login.other.org/realms/damap"
+                ),
+            ]
+            .map(|token| token.map_err(|e| e.to_string())),
+            [
+                Ok("refresh"),
+                Err(
+                    "the saved DAMAP login is for https://damap.example.org, not \
+                     https://other.example.org"
+                        .to_string()
+                ),
+                Err("the saved DAMAP login is from the login server at \
+                     https://login.example.org/realms/damap, but https://damap.example.org now \
+                     logs in at https://login.other.org/realms/damap"
+                    .to_string()),
+                Ok("refresh"),
+            ]
+        );
+        assert_eq!(
+            [
+                key.for_api("API.example.org/v1/"),
+                key.for_api("https://api.example.org/v2"),
+            ],
+            [Some("sk-test"), None]
+        );
+    }
+
+    #[test]
+    fn saves_the_secrets_of_earlier_versions_with_the_servers_in_the_config_once() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let path = root.path().join(DIR_NAME).join(CREDENTIALS_FILE);
+        let config = |damap: &str, ai: Option<&str>| {
+            project
+                .save_config(&Config {
+                    damap: DamapConfig {
+                        frontend_url: damap.to_string(),
+                        dmp_id: None,
+                    },
+                    ai: ai.map(|url| AiConfig {
+                        url: url.to_string(),
+                        model: "small".to_string(),
+                        effort: Effort::default(),
+                    }),
+                })
+                .unwrap();
+        };
+        config(
+            "https://damap.example.org",
+            Some("https://api.example.org/v1"),
+        );
+        fs::write(
+            &path,
+            "refresh_token = \"refresh\"\napi_key = \"sk-test\"\n",
+        )
+        .unwrap();
+
+        let read = project.credentials().unwrap();
+        config(
+            "https://other.example.org",
+            Some("https://other.example.org/v1"),
+        );
+
+        let from_before = Credentials {
+            damap: Some(DamapLogin {
+                login_server: None,
+                ..secrets().damap.unwrap()
+            }),
+            ..secrets()
+        };
+        assert_eq!(read, from_before);
+        assert_eq!(project.credentials().unwrap(), from_before);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[damap]\nurl = \"https://damap.example.org\"\nrefresh_token = \"refresh\"\n\n\
+             [ai]\nurl = \"https://api.example.org/v1\"\napi_key = \"sk-test\"\n"
+        );
+        // As when `setup` stopped after it saved the key and before it saved the API.
+        config("https://damap.example.org", None);
+        fs::write(&path, "api_key = \"sk-test\"\n").unwrap();
+        assert_eq!(project.credentials().unwrap(), Credentials::default());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+    }
+
     #[test]
     fn keeps_the_credentials_and_the_dmp_private() {
         let root = tempfile::tempdir().unwrap();
@@ -610,7 +827,7 @@ mod tests {
                 fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o644)).unwrap();
             }
         }
-        assert!(project.credentials().unwrap().refresh_token.is_none());
+        assert_eq!(project.credentials().unwrap(), Credentials::default());
         // As an earlier version wrote it.
         fs::write(
             dir.join(".gitignore"),
@@ -618,12 +835,7 @@ mod tests {
         )
         .unwrap();
 
-        project
-            .save_credentials(&Credentials {
-                refresh_token: Some("refresh".to_string()),
-                api_key: Some("sk-test".to_string()),
-            })
-            .unwrap();
+        project.save_credentials(&secrets()).unwrap();
 
         assert_eq!(
             fs::read_to_string(dir.join(".gitignore")).unwrap(),
@@ -632,9 +844,7 @@ mod tests {
         project
             .save_madmp("https://a.example.org", 3, &serde_json::json!({}))
             .unwrap();
-        let credentials = project.credentials().unwrap();
-        assert_eq!(credentials.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(project.credentials().unwrap(), secrets());
         #[cfg(unix)]
         for name in [CREDENTIALS_FILE, MADMP_FILE] {
             use std::os::unix::fs::PermissionsExt;
@@ -656,8 +866,8 @@ mod tests {
 
         project
             .save_credentials(&Credentials {
-                refresh_token: None,
-                api_key: Some("sk-test".to_string()),
+                damap: None,
+                ..secrets()
             })
             .unwrap();
 
@@ -665,7 +875,7 @@ mod tests {
         assert!(fs::symlink_metadata(&path).unwrap().is_file());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "api_key = \"sk-test\"\n"
+            "[ai]\nurl = \"https://api.example.org/v1\"\napi_key = \"sk-test\"\n"
         );
     }
 
@@ -673,12 +883,7 @@ mod tests {
     fn keeps_the_old_file_when_writing_the_new_one_fails() {
         let root = tempfile::tempdir().unwrap();
         let project = Project::new(root.path().to_path_buf());
-        project
-            .save_credentials(&Credentials {
-                refresh_token: Some("refresh".to_string()),
-                api_key: Some("sk-test".to_string()),
-            })
-            .unwrap();
+        project.save_credentials(&secrets()).unwrap();
         let dir = root.path().join(DIR_NAME);
         let path = dir.join(CREDENTIALS_FILE);
         let saved = fs::read_to_string(&path).unwrap();

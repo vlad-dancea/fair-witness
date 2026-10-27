@@ -723,7 +723,7 @@ mod tests {
     use std::time::Duration;
 
     use fair_witness_core::project::{AiConfig, Effort, Project};
-    use fair_witness_core::review::Reviewer;
+    use fair_witness_core::review::ModelStep;
     use fair_witness_core::session::Session;
     use fair_witness_core::testing::{fake_model, tool_call};
     use jiff::Timestamp;
@@ -956,7 +956,7 @@ mod tests {
             .debounce(Duration::from_millis(50))
             .reviewing(
                 "{}".to_string(),
-                vec![Arc::new(Reviewer::new(&ai, None).unwrap())],
+                vec![Arc::new(ModelStep::new(&ai, None).unwrap())],
             )
             .logging_to(log.clone())
             .start()

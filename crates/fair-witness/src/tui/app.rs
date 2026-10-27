@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugLog;
-use super::model_panel::{self, ModelPanel, ModelSettings, Outcome};
+use super::model_panel::{self, ModelPanel, ModelSettings, PanelOutcome};
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.
@@ -248,11 +248,11 @@ impl Screen {
         }
     }
 
-    fn handle_outcome(&mut self, outcome: Outcome) {
+    fn handle_outcome(&mut self, outcome: PanelOutcome) {
         match outcome {
-            Outcome::Open => {}
-            Outcome::Closed => self.panel = None,
-            Outcome::Chosen(choice, unchecked) => {
+            PanelOutcome::Open => {}
+            PanelOutcome::Closed => self.panel = None,
+            PanelOutcome::Chosen(choice, unchecked) => {
                 self.panel = None;
                 self.use_model(choice, unchecked);
             }
@@ -607,7 +607,7 @@ mod tests {
     use std::sync::Arc;
 
     use fair_witness_core::project::{AiConfig, Project};
-    use fair_witness_core::review::{Reviewer, Trace, Verdict};
+    use fair_witness_core::review::{ModelStep, Trace, Verdict};
     use fair_witness_core::watcher::Change;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -624,7 +624,7 @@ mod tests {
         };
         let settings = ModelSettings {
             project: Project::new(root.to_path_buf()),
-            reviewer: Arc::new(Reviewer::new(&ai, None).unwrap()),
+            reviewer: Arc::new(ModelStep::new(&ai, None).unwrap()),
             url: ai.url,
             api_key: None,
         };

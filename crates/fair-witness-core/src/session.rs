@@ -69,11 +69,11 @@ pub struct Record {
 pub struct Session {
     project: Project,
     debounce: Duration,
-    review: Option<Review>,
+    review: Option<ReviewSettings>,
     log: Option<PathBuf>,
 }
 
-struct Review {
+struct ReviewSettings {
     dmp: String,
     steps: Vec<Arc<dyn Step>>,
 }
@@ -97,7 +97,7 @@ impl Session {
     /// Reviews each change set against `dmp`, running `steps` in order until one decides.
     pub fn reviewing(self, dmp: String, steps: Vec<Arc<dyn Step>>) -> Self {
         Self {
-            review: Some(Review { dmp, steps }),
+            review: Some(ReviewSettings { dmp, steps }),
             ..self
         }
     }
@@ -164,15 +164,18 @@ impl Session {
         events: &Events,
     ) {
         while let Some((set, changes)) = queued.recv().await {
-            if let Some(review) = &self.review {
-                events.send(self.review(review, set, &changes, filter, events).await);
+            if let Some(settings) = &self.review {
+                events.send(
+                    self.review_set(settings, set, &changes, filter, events)
+                        .await,
+                );
             }
         }
     }
 
-    async fn review(
+    async fn review_set(
         &self,
-        review: &Review,
+        settings: &ReviewSettings,
         set: usize,
         changes: &[Change],
         filter: &Filter,
@@ -181,7 +184,16 @@ impl Session {
         events.send(Event::Reviewing { set });
         let trace = |trace| events.send(Event::Trace { set, trace });
         let root = self.project.root();
-        match review::review(&review.steps, root, filter, &review.dmp, changes, &trace).await {
+        match review::run_steps(
+            &settings.steps,
+            root,
+            filter,
+            &settings.dmp,
+            changes,
+            &trace,
+        )
+        .await
+        {
             Ok(verdict) => Event::Verdict { set, verdict },
             Err(e) => Event::ReviewFailed {
                 set,
@@ -320,7 +332,7 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::{Input, Reviewer, StepFuture};
+    use crate::review::{Input, ModelStep, StepFuture};
     use crate::testing::{Reply, fake_model, held, no_answer, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -366,7 +378,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        Arc::new(Reviewer::new(&config, None).unwrap())
+        Arc::new(ModelStep::new(&config, None).unwrap())
     }
 
     fn describe(event: &Event) -> String {
@@ -432,7 +444,7 @@ mod tests {
     struct Panics;
 
     impl Step for Panics {
-        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+        fn decide<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
             Box::pin(async { panic!("a step of the review panicked, as this test wants") })
         }
     }
@@ -466,7 +478,7 @@ mod tests {
     struct Stalls;
 
     impl Step for Stalls {
-        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+        fn decide<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
             Box::pin(std::future::pending())
         }
     }
@@ -679,7 +691,7 @@ mod tests {
             )
             .into(),
         ]);
-        let reviewer = Reviewer::with_timeouts(
+        let reviewer = ModelStep::with_timeouts(
             &AiConfig {
                 url: endpoint,
                 model: "test".to_string(),
