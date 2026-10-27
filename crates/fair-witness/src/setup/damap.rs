@@ -1,41 +1,11 @@
 use anyhow::Result;
-use dialoguer::{Confirm, Input, Password};
-use fair_witness_core::auth::{Notices, Prompts};
+use dialoguer::Input;
+use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{Damap, InstanceConfig, Login, log_in, reach};
 use fair_witness_core::net::{same_url, web_url};
 use fair_witness_core::project::{Config, DamapConfig, Project};
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
-
-/// Asks for what the login needs on the terminal.
-pub struct TerminalPrompts;
-
-impl Notices for TerminalPrompts {
-    fn notice(&self, message: &str) {
-        println!("{message}");
-    }
-}
-
-impl Prompts for TerminalPrompts {
-    fn confirm_code(&self, link: &str, code: &str) {
-        println!("To log in, open {link}");
-        println!("and confirm the code {code}");
-        let _ = open::that(link);
-    }
-
-    fn username_and_password(&self) -> Result<(String, String)> {
-        let username = Input::new().with_prompt("Username").interact_text()?;
-        let password = Password::new().with_prompt("Password").interact()?;
-        Ok((username, password))
-    }
-
-    fn stay_logged_in(&self) -> Result<bool> {
-        Ok(Confirm::new()
-            .with_prompt("Stay logged in?")
-            .default(true)
-            .interact()?)
-    }
-}
 
 /// Logs `project` in to the DAMAP at `url`, or the one asked for, offering the DAMAP and login
 /// of the project `around` it. Gives back the settings for `setup` to save once it has them all:
@@ -114,6 +84,7 @@ async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfi
 mod tests {
     use std::fs;
 
+    use fair_witness_core::auth::Notices;
     use fair_witness_core::model::{Effort, ModelChoice};
     use fair_witness_core::project::AiConfig;
     use fair_witness_core::testing::fake_model;

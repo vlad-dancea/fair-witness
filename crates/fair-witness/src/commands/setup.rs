@@ -1,9 +1,10 @@
 use anyhow::Result;
 use fair_witness_core::project::{DIR_NAME, IGNORE_FILE, Project};
 
-use crate::setup::damap::{self, TerminalPrompts};
+use crate::setup::damap;
 use crate::setup::dmp;
 use crate::setup::model::{self, ModelArgs};
+use crate::terminal::TerminalPrompts;
 
 /// Sets up `project`, offering the DAMAP URL and login of the project around it, if any.
 pub async fn run(

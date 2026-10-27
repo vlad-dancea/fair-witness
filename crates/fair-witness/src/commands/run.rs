@@ -17,9 +17,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::Instant;
 
 use super::Failure;
-use crate::setup::damap::TerminalPrompts;
+use crate::settings::ModelSettings;
+use crate::terminal::TerminalPrompts;
 use crate::tui::app::{Screen, Update};
-use crate::tui::model_panel::ModelSettings;
 use crate::{diagnostics, notifications};
 
 const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";

@@ -173,10 +173,11 @@ disagrees with it.
   OpenAI-compatible API, compiled for the core's tests and for crates that enable the
   `testing` feature, as the binary's tests do.
 - `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,
-  `setup/` the questions `setup` asks, `tui/` the ratatui interface and `notifications.rs` the
-  desktop notifications. `run` hands a session's events to the screen and the notifications.
-  Only `commands/` reads the working directory, once at startup, and passes the `Project` it
-  finds to the rest.
+  `setup/` the questions `setup` asks, `tui/` the ratatui interface, `settings.rs` the model
+  `run` reviews with and how a new choice is saved, `terminal.rs` the questions of the DAMAP
+  login and `notifications.rs` the desktop notifications. `run` hands a session's events to
+  the screen and the notifications. Only `commands/` reads the working directory, once at
+  startup, and passes the `Project` it finds to the rest.
 - `fair-witness-scenarios` is a development tool that dist does not release. It runs each
   scenario in `scenarios/` against `fair-witness run --headless` with the fake model from
   `testing.rs` or, with `--model`, a real model, whose accuracy it measures. Only the

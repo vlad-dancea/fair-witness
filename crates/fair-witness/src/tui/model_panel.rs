@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use fair_witness_core::model::{Effort, ModelChoice};
-use fair_witness_core::project::Project;
 use fair_witness_core::review::{self, ChoiceCheck, ModelStep};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -15,19 +14,7 @@ use ratatui::widgets::{
 use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
 use tokio::task::JoinHandle;
 
-pub struct ModelSettings {
-    pub project: Project,
-    pub reviewer: Arc<ModelStep>,
-    pub url: String,
-    pub api_key: Option<String>,
-}
-
-impl ModelSettings {
-    pub fn apply(&self, choice: ModelChoice) -> Result<()> {
-        self.reviewer.set_choice(choice.clone());
-        self.project.save_model_choice(&self.url, &choice)
-    }
-}
+use crate::settings::ModelSettings;
 
 enum Models {
     Loading(Receiver<Result<Vec<String>>>),
@@ -417,7 +404,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use fair_witness_core::project::AiConfig;
+    use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::testing::{
         EFFORT_REFUSED, Reply, bad_request, fake_model, one_token, too_many_requests,
     };

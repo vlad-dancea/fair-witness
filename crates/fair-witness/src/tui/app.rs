@@ -16,7 +16,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugLog;
-use super::model_panel::{ModelPanel, ModelSettings, PanelOutcome};
+use super::model_panel::{ModelPanel, PanelOutcome};
+use crate::settings::ModelSettings;
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.
