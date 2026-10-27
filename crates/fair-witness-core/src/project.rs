@@ -201,7 +201,11 @@ impl Project {
     }
 
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
-        write_toml(&self.ensure_dir()?, CREDENTIALS_FILE, credentials, true)
+        let dir = self.ensure_dir()?;
+        // Folders set up by earlier versions have a .gitignore that misses the file the
+        // credentials are written to first.
+        write_gitignore(&dir)?;
+        write_toml(&dir, CREDENTIALS_FILE, credentials, true)
     }
 
     /// The copy of DMP `dmp_id` from the DAMAP at `damap_url` that an earlier `run` saved, if
@@ -607,6 +611,12 @@ mod tests {
             }
         }
         assert!(project.credentials().unwrap().refresh_token.is_none());
+        // As an earlier version wrote it.
+        fs::write(
+            dir.join(".gitignore"),
+            "credentials.toml\nmadmp.json\nmadmp.json.partial\nlog/\n",
+        )
+        .unwrap();
 
         project
             .save_credentials(&Credentials {
@@ -614,17 +624,17 @@ mod tests {
                 api_key: Some("sk-test".to_string()),
             })
             .unwrap();
-        project
-            .save_madmp("https://a.example.org", 3, &serde_json::json!({}))
-            .unwrap();
 
-        let credentials = project.credentials().unwrap();
-        assert_eq!(credentials.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(dir.join(".gitignore")).unwrap(),
             "credentials.toml\nmadmp.json\n*.part\nmadmp.json.partial\nlog/\n"
         );
+        project
+            .save_madmp("https://a.example.org", 3, &serde_json::json!({}))
+            .unwrap();
+        let credentials = project.credentials().unwrap();
+        assert_eq!(credentials.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         #[cfg(unix)]
         for name in [CREDENTIALS_FILE, MADMP_FILE] {
             use std::os::unix::fs::PermissionsExt;
