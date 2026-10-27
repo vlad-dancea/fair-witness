@@ -10,15 +10,17 @@ use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use notify_debouncer_full::file_id::{self, FileId};
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
-use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::notify::{
+    self, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _, WatcherKind,
+};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer_opt,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use filter::CACHE_TAG;
 pub use filter::Filter;
@@ -35,6 +37,12 @@ const LOOKS: u32 = 4;
 /// The debouncer checks for quiet every quarter of the wait, so a wait of zero would have it
 /// spin.
 const SHORTEST_DEBOUNCE: Duration = Duration::from_millis(10);
+/// What the watcher reports when the system dropped events, before the change set that holds
+/// what it found by looking through the folder again.
+const MISSED: &str = "too many changes came at once and the system dropped some of their \
+                      events, so the folder was looked through again, and the next change set \
+                      lists what was created, deleted or written meanwhile; a change undone in \
+                      between is not seen";
 
 /// A change in the watched folder, with paths relative to its root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,16 +136,26 @@ impl Change {
 /// What the watcher reports instead of a change set.
 #[derive(Debug)]
 pub enum WatchError {
-    /// Watching failed for some paths, and goes on.
-    Failed(Vec<notify::Error>),
+    /// Watching failed for some folders, or the system dropped events, and goes on. Each
+    /// message says what goes unseen.
+    Failed(Vec<String>),
     /// The project folder was moved or deleted, so nothing is watched any more.
     Gone,
+    /// The project folder could not be watched again after the system dropped events, for the
+    /// reason given, so nothing is watched any more. The changes found before come first.
+    Stopped(String),
 }
 
+type Batch = (Instant, DebounceEventResult);
+
 pub struct FolderWatcher {
-    _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    /// None only once it could not be started again.
+    debouncer: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    /// When `debouncer` had watched every folder.
+    watched: Instant,
     /// The debouncer's batches, each with when it handed the batch on.
-    events: UnboundedReceiver<(Instant, DebounceEventResult)>,
+    events: UnboundedReceiver<Batch>,
+    sender: UnboundedSender<Batch>,
     debounce: Duration,
     held: Option<Held>,
     root: PathBuf,
@@ -146,6 +164,10 @@ pub struct FolderWatcher {
     root_id: FileId,
     known: BTreeSet<PathBuf>,
     filter: Filter,
+    /// What the last batch showed went wrong, which `next` reports before anything else.
+    pending: Vec<String>,
+    /// Why watching stopped, which `next` reports once it has handed on the set it holds.
+    stopped: Option<String>,
 }
 
 impl FolderWatcher {
@@ -153,37 +175,29 @@ impl FolderWatcher {
     /// for 10 milliseconds when that is shorter.
     pub fn new(root: &Path, debounce: Duration) -> Result<Self> {
         let filter = Filter::new(root)?;
-        let (tx, events) = mpsc::unbounded_channel();
+        let (sender, events) = mpsc::unbounded_channel();
         let debounce = debounce.max(SHORTEST_DEBOUNCE);
         let root_id = file_id::get_file_id(root)
             .with_context(|| format!("could not read {}", root.display()))?;
-        // A link can lead to a share with more folders than the system lets a user watch, and
-        // what changes there is not the project's, which `walk` and the model's tools also stay
-        // out of.
-        let config = notify::Config::default().with_follow_symlinks(false);
-        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
-            debounce,
-            None,
-            move |result| {
-                let _ = tx.send((Instant::now(), result));
-            },
-            RecommendedCache::new(),
-            config,
-        )?;
-        debouncer.watch(root, RecursiveMode::Recursive)?;
+        let debouncer = start(root, debounce, sender.clone()).map_err(|e| not_started(e, root))?;
+        let watched = Instant::now();
         let mut known = BTreeSet::new();
         walk(root, &filter, &mut |path| {
             known.insert(path);
         });
         Ok(Self {
-            _debouncer: debouncer,
+            debouncer: Some(debouncer),
+            watched,
             events,
+            sender,
             debounce,
             held: None,
             root: root.to_path_buf(),
             root_id,
             known,
             filter,
+            pending: Vec::new(),
+            stopped: None,
         })
     }
 
@@ -444,6 +458,98 @@ impl FolderWatcher {
         take_under(&mut self.known, path)
     }
 
+    /// Looks through the folder again after the system dropped events, and gives back what
+    /// differs from the paths the watcher knows: what was created or deleted, and the files it
+    /// knows that were written since `since`, which the dropped events may have been about.
+    /// The system said so at `noticed`. When the folder cannot be watched again, watching stops.
+    fn rescan(&mut self, since: Instant, noticed: Instant) -> Vec<Change> {
+        let mut changes = self.look_again(since);
+        // notify opens every folder on the thread that reads the events when it starts watching,
+        // which can overflow the queue by itself in a large project. Another watcher would do
+        // the same, also while a file that is still written makes every look find a change.
+        let own = noticed <= self.watched + self.debounce;
+        if own || RecommendedWatcher::kind() != WatcherKind::Inotify {
+            return changes;
+        }
+        // inotify watches a folder only once its create comes, so a folder made while events
+        // were dropped is not watched, also one made again where the watcher knows one, and a
+        // dropped rename leaves notify's list of watches wrong, so that a later event can remove
+        // a watch still in use. A new watcher, with an inotify instance of its own, puts that
+        // right. The old one goes first, since both count against the same limits, and what it
+        // still holds happened before the look above. Looking once more finds what was made in
+        // a folder before its new watch.
+        self.debouncer = None;
+        // Watching stops then, as it does when it cannot start, and is not tried again, since
+        // notify leaves a thread running when it cannot make the watcher.
+        match start(&self.root, self.debounce, self.sender.clone()) {
+            Ok(fresh) => {
+                self.debouncer = Some(fresh);
+                self.watched = Instant::now();
+                let found = self.look_again(since);
+                extend_set(&mut changes, found);
+            }
+            Err(e) => {
+                let (folder, cause) = explain(e);
+                self.stopped = Some(format!(
+                    "could not watch {} again after the system dropped events, so the project \
+                     folder is no longer watched: {cause}",
+                    folder.as_deref().unwrap_or(&self.root).display()
+                ));
+            }
+        }
+        changes
+    }
+
+    /// Walks the folder and gives back what differs from the paths the watcher knows, as
+    /// `rescan` says, and knows the paths it found from then on.
+    fn look_again(&mut self, since: Instant) -> Vec<Change> {
+        let mut found = BTreeSet::new();
+        walk(&self.root, &self.filter, &mut |path| {
+            found.insert(path);
+        });
+        let mut changes = Vec::new();
+        let mut kept = Vec::new();
+        // Paths come in order, each folder right before what is in it, so a deleted folder is
+        // reported once, as `forget` does.
+        let mut deleted: Option<&PathBuf> = None;
+        for path in self.known.difference(&found) {
+            if deleted.is_some_and(|folder| path.starts_with(folder)) {
+                continue;
+            }
+            match fs::symlink_metadata(path) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    if !self.filter.skips(path, false) {
+                        changes.push(Change::Deleted(path.clone()));
+                    }
+                    deleted = Some(path);
+                }
+                // In a folder tagged as a cache since, which `handle` forgets without a word.
+                Ok(metadata) if self.filter.skips(path, metadata.is_dir()) => {}
+                // The walk could not look into a folder above it, which does not make it gone.
+                _ => kept.push(path.clone()),
+            }
+        }
+        changes.extend(found.difference(&self.known).cloned().map(Change::Created));
+        changes.extend(
+            self.known
+                .intersection(&found)
+                .filter(|path| written_at(path).is_some_and(|written| written >= since))
+                .cloned()
+                .map(Change::Changed),
+        );
+        found.extend(kept);
+        self.known = found;
+        changes
+            .into_iter()
+            .map(|change| change.relative_to(&self.root))
+            .collect()
+    }
+
     /// Whether the project folder was moved or deleted, which the events say when it was the
     /// folder itself. When a folder above it moved, no event says so, but the folder is no
     /// longer where the later events name it, or another one is. A folder that cannot be looked
@@ -469,6 +575,16 @@ impl FolderWatcher {
     /// change is 30 debounces old.
     pub async fn next(&mut self) -> Option<Result<Vec<Change>, WatchError>> {
         loop {
+            if !self.pending.is_empty() {
+                return Some(Err(WatchError::Failed(mem::take(&mut self.pending))));
+            }
+            // No more events come, so the set is complete.
+            if let Some(stopped) = &self.stopped {
+                return Some(match self.held.take() {
+                    Some(held) => Ok(held.changes),
+                    None => Err(WatchError::Stopped(stopped.clone())),
+                });
+            }
             // By the clock, since batches of other files can keep coming while a file is copied.
             self.look_if_due();
             let held = self.held.as_ref();
@@ -503,7 +619,10 @@ impl FolderWatcher {
             };
             let (sent, events) = match received {
                 Some((sent, Ok(events))) => (sent, events),
-                Some((_, Err(errors))) => return Some(Err(WatchError::Failed(errors))),
+                Some((_, Err(errors))) => {
+                    let errors = errors.into_iter().map(unwatched).collect();
+                    return Some(Err(WatchError::Failed(errors)));
+                }
                 // The set is complete, or the debouncer stopped. A folder can go without an event
                 // while the set is held, and the set goes with it then, as below.
                 None if self.gone(&[]) => {
@@ -519,18 +638,54 @@ impl FolderWatcher {
                 self.held = None;
                 return Some(Err(WatchError::Gone));
             }
+            // The system dropped events, which notify says with an event of its own that names
+            // no path and makes no change, so the folder has to be looked through again.
+            let rescan = events
+                .iter()
+                .filter(|event| event.need_rescan())
+                .map(|event| event.time)
+                .max();
             // Only events that can make a change count, so that reading a file bridges no
             // pause, and a batch that made none, such as in a folder the filter leaves out, keeps
-            // no set open.
+            // no set open. The events that were dropped made changes, though.
             let times = events
                 .iter()
-                .filter(|event| can_change(&event.kind))
+                .filter(|event| can_change(&event.kind) || event.need_rescan())
                 .map(|event| event.time);
             let (Some(first), Some(last)) = (times.clone().min(), times.max()) else {
                 continue;
             };
-            let arrived: Vec<PathBuf> = events.iter().filter_map(arrived_at).collect();
-            let changes = self.handle(events);
+            let mut arrived: Vec<PathBuf> = events.iter().filter_map(arrived_at).collect();
+            let mut changes = self.handle(events);
+            if let Some(noticed) = rescan {
+                // The dropped events came after the set held now began, or with this batch when
+                // none is held, so the files written since then count as changed, which can list
+                // a file of the held set again in the next. Events wait in the system's queue
+                // until notify reads them, longest when it overflows or is busy, so a dropped
+                // write can be older still, and a debounce more allows for some of that.
+                let start = self
+                    .held
+                    .as_ref()
+                    .map_or(first, |held| held.first.min(first));
+                let since = start.checked_sub(self.debounce).unwrap_or(start);
+                let found = self.rescan(since, noticed);
+                if found.is_empty() {
+                    // Nothing the watcher reports changed, as when the dropped events were reads,
+                    // which notify's opening every folder to watch it at the start can be.
+                    tracing::info!("the system dropped events, and none of them made a change");
+                } else {
+                    self.pending.insert(0, MISSED.to_string());
+                }
+                // What the dropped events wrote counts as written while they were held, as for
+                // a create, so that a copy the walk found still running keeps its set open.
+                arrived.extend(
+                    found
+                        .iter()
+                        .filter(|change| !matches!(change, Change::Deleted(_)))
+                        .map(|change| self.root.join(change.path())),
+                );
+                extend_set(&mut changes, found);
+            }
             if changes.is_empty() {
                 continue;
             }
@@ -780,6 +935,85 @@ impl Seen {
     fn written_since(&self, before: &Seen) -> bool {
         self.modified > before.modified
             && (self.size != before.size || self.accessed != Some(self.modified))
+    }
+}
+
+/// A debouncer that watches `root` and sends each batch to `sender` with when it handed it on.
+fn start(
+    root: &Path,
+    debounce: Duration,
+    sender: UnboundedSender<Batch>,
+) -> notify::Result<Debouncer<RecommendedWatcher, RecommendedCache>> {
+    // A link can lead to a share with more folders than the system lets a user watch, and what
+    // changes there is not the project's, which `walk` and the model's tools also stay out of.
+    let config = notify::Config::default().with_follow_symlinks(false);
+    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+        debounce,
+        None,
+        move |result| {
+            let _ = sender.send((Instant::now(), result));
+        },
+        RecommendedCache::new(),
+        config,
+    )?;
+    debouncer.watch(root, RecursiveMode::Recursive)?;
+    Ok(debouncer)
+}
+
+/// The folder `error` is about, if it names one, and what went wrong, with the setting and the
+/// command that raise the limit when the system's limit on inotify was reached.
+fn explain(mut error: notify::Error) -> (Option<PathBuf>, String) {
+    let folder = error.paths.first().cloned();
+    // notify's message would name the paths again.
+    error.paths.clear();
+    let limit = match &error.kind {
+        notify::ErrorKind::MaxFilesWatch => Some(("max_user_watches", "watched folders", 524_288)),
+        // Each program that watches folders opens at least one inotify instance, which also
+        // counts as an open file, and fair-witness opens few others.
+        #[cfg(target_os = "linux")]
+        notify::ErrorKind::Io(e)
+            if rustix::io::Errno::from_io_error(e) == Some(rustix::io::Errno::MFILE) =>
+        {
+            Some(("max_user_instances", "inotify instances", 1024))
+        }
+        _ => None,
+    };
+    let Some((setting, what, fallback)) = limit else {
+        return (folder, error.to_string());
+    };
+    // Linux 5.11 and later size the limit on watches by the memory, so a fixed number could
+    // lower it.
+    let current = fs::read_to_string(format!("/proc/sys/fs/inotify/{setting}"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let (limit, raised) = match current {
+        Some(current) => (format!("{current} {what}"), current.saturating_mul(2)),
+        None => (what.to_string(), fallback),
+    };
+    let cause = format!(
+        "the limit of {limit} per user (fs.inotify.{setting}) is reached. Raise it with \
+         `sudo sysctl fs.inotify.{setting}={raised}` and start `fair-witness run` again"
+    );
+    (folder, cause)
+}
+
+/// Why watching `root` could not start.
+fn not_started(error: notify::Error, root: &Path) -> anyhow::Error {
+    let (folder, cause) = explain(error);
+    anyhow!(
+        "could not watch {}: {cause}",
+        folder.as_deref().unwrap_or(root).display()
+    )
+}
+
+/// What a watch error says while watching goes on, which leaves the folder it names unwatched.
+fn unwatched(error: notify::Error) -> String {
+    match explain(error) {
+        (Some(folder), cause) => format!(
+            "could not watch {}, so changes in it go unseen: {cause}",
+            folder.display()
+        ),
+        (None, cause) => cause,
     }
 }
 
@@ -1303,6 +1537,353 @@ mod tests {
         fs::set_permissions(&lab, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(!matches!(next, Ok(Some(Err(WatchError::Gone)))), "{next:?}");
+    }
+
+    #[tokio::test]
+    async fn looks_through_the_folder_again_when_the_system_dropped_events() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for path in [
+            "data/kept.csv",
+            "data/edited.csv",
+            "data/old/a.csv",
+            "cache/a.csv",
+        ] {
+            write(root, path, "a");
+        }
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        // So that the files are older than the set the dropped events belong to.
+        tokio::time::sleep(DEBOUNCE * 4).await;
+
+        // What the dropped events were about. A folder tagged as a cache is left out, as when
+        // the tag's event comes, and nothing in it was deleted.
+        write(root, "cache/CACHEDIR.TAG", CARGO_TAG);
+        fs::remove_dir_all(root.join("data/old")).unwrap();
+        write(root, "data/new/b.csv", "b");
+        fs::write(root.join("data/edited.csv"), "b").unwrap();
+        let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let batch = vec![DebouncedEvent::new(dropped, Instant::now())];
+        batches.send((Instant::now(), Ok(batch))).unwrap();
+
+        let mut next = async || {
+            let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+            next.expect("nothing in time").unwrap()
+        };
+        let warning = next().await;
+        assert!(
+            matches!(&warning, Err(WatchError::Failed(errors)) if errors == &[MISSED]),
+            "{warning:?}"
+        );
+        let path = PathBuf::from;
+        assert_eq!(
+            next().await.unwrap(),
+            [
+                Change::Deleted(path("data/old")),
+                Change::Created(path("data/new")),
+                Change::Created(path("data/new/b.csv")),
+                Change::Changed(path("data/edited.csv")),
+            ]
+        );
+        let known: BTreeSet<PathBuf> = ["data", "data/edited.csv", "data/kept.csv", "data/new"]
+            .into_iter()
+            .chain(["data/new/b.csv"])
+            .map(|path| root.join(path))
+            .chain([root.to_path_buf()])
+            .collect();
+        assert_eq!(watcher.known, known);
+
+        // When nothing differs, as when the dropped events were reads, there is nothing to say.
+        let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let batch = vec![DebouncedEvent::new(dropped, Instant::now())];
+        batches.send((Instant::now(), Ok(batch))).unwrap();
+        let next = tokio::time::timeout(QUIET, watcher.next()).await;
+        assert!(next.is_err(), "{next:?}");
+    }
+
+    /// A copy whose create was dropped still keeps its set open while it is written, as one
+    /// whose create came does.
+    #[tokio::test]
+    async fn keeps_a_copy_found_by_looking_again_in_one_set_while_it_is_written() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let debounce = Duration::from_millis(200);
+        let mut watcher = FolderWatcher::new(root, debounce).unwrap();
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        let writer = std::thread::spawn({
+            let path = root.join("interview.mp4");
+            move || {
+                let mut video = fs::File::create(path).unwrap();
+                let started = Instant::now();
+                while started.elapsed() < debounce * 5 {
+                    video.write_all(&[0; 4096]).unwrap();
+                    std::thread::sleep(debounce / 10);
+                }
+            }
+        });
+        tokio::time::sleep(debounce).await;
+        // The debouncer hands the notice on a debounce after it came.
+        let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let batch = vec![DebouncedEvent::new(dropped, Instant::now() - debounce)];
+        batches.send((Instant::now(), Ok(batch))).unwrap();
+
+        let mut sets = Vec::new();
+        while let Ok(Some(next)) = tokio::time::timeout(debounce * 10, watcher.next()).await {
+            match next {
+                Ok(set) => sets.push((set, writer.is_finished())),
+                Err(WatchError::Failed(errors)) => assert_eq!(errors, [MISSED]),
+                Err(stopped) => panic!("{stopped:?}"),
+            }
+        }
+        writer.join().unwrap();
+
+        assert_eq!(
+            sets,
+            [(vec![Change::Created(PathBuf::from("interview.mp4"))], true)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keeps_the_files_of_a_folder_it_cannot_look_into_when_it_looks_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "raw/a.csv", "a");
+        let mut watcher = watch(root);
+        let raw = root.join("raw");
+
+        fs::set_permissions(&raw, fs::Permissions::from_mode(0o000)).unwrap();
+        let found = watcher.rescan(Instant::now(), watcher.watched);
+        fs::set_permissions(&raw, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(found, []);
+        assert!(watcher.known.contains(&raw.join("a.csv")));
+    }
+
+    // Only on inotify does the watcher start anew.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stops_once_it_cannot_watch_the_folder_again_after_dropped_events() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "raw/a.csv", "a");
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        let raw = root.join("raw");
+
+        // inotify cannot watch a folder the user cannot read.
+        fs::set_permissions(&raw, fs::Permissions::from_mode(0o000)).unwrap();
+        write(root, "notes.md", "a");
+        let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let later = watcher.watched + DEBOUNCE * 2;
+        tokio::time::sleep_until(later.into()).await;
+        let batch = vec![DebouncedEvent::new(dropped, later)];
+        batches.send((Instant::now(), Ok(batch))).unwrap();
+        let mut reported = Vec::new();
+        for _ in 0..3 {
+            let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+            reported.push(next.expect("nothing in time").unwrap());
+        }
+        fs::set_permissions(&raw, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // What the look found still comes, with the warning before it.
+        let [
+            Err(WatchError::Failed(warning)),
+            Ok(set),
+            Err(WatchError::Stopped(error)),
+        ] = &reported[..]
+        else {
+            panic!("{reported:?}");
+        };
+        assert_eq!(warning, &[MISSED]);
+        assert_eq!(set, &[Change::Created(PathBuf::from("notes.md"))]);
+        assert_eq!(
+            *error,
+            format!(
+                "could not watch {} again after the system dropped events, so the project folder \
+                 is no longer watched: Permission denied (os error 13)",
+                raw.display()
+            )
+        );
+        assert!(watcher.debouncer.is_none());
+    }
+
+    #[tokio::test]
+    async fn counts_files_written_since_the_held_set_began_when_the_system_dropped_events() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["a.csv", "b.csv"] {
+            write(root, name, "a");
+        }
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        tokio::time::sleep(DEBOUNCE * 4).await;
+
+        let began = Instant::now();
+        // A write whose event was dropped.
+        fs::write(root.join("b.csv"), "b").unwrap();
+        tokio::time::sleep(DEBOUNCE * 2).await;
+        // The notice comes more than a debounce after the held set's last event, as when notify
+        // was busy, so its batch does not join the set.
+        let edit =
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.csv"));
+        let dropped = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        for event in [
+            DebouncedEvent::new(edit, began),
+            DebouncedEvent::new(dropped, Instant::now()),
+        ] {
+            batches.send((Instant::now(), Ok(vec![event]))).unwrap();
+        }
+
+        let mut next = async || {
+            let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+            next.expect("nothing in time").unwrap()
+        };
+        assert_eq!(
+            next().await.unwrap(),
+            [Change::Changed(PathBuf::from("a.csv"))]
+        );
+        let warning = next().await;
+        assert!(
+            matches!(&warning, Err(WatchError::Failed(errors)) if errors == &[MISSED]),
+            "{warning:?}"
+        );
+        assert_eq!(
+            next().await.unwrap(),
+            [Change::Changed(PathBuf::from("b.csv"))]
+        );
+    }
+
+    // Only inotify watches each folder, so only there can one go unwatched.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn watches_anew_when_the_dropped_events_changed_nothing_it_sees() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "raw/a.csv", "a");
+        let mut watcher = watch(root);
+        // As if the folder had been deleted and restored with its old names and times while the
+        // events were dropped, which leaves it unwatched.
+        let debouncer = watcher.debouncer.as_mut().unwrap();
+        debouncer.unwatch(root).unwrap();
+        debouncer.watch(root, RecursiveMode::NonRecursive).unwrap();
+        write(root, "notes.md", "a");
+
+        // As when notify's own first look at every folder overflowed the queue, also when the
+        // look finds a change.
+        let started = watcher.watched;
+        assert_eq!(
+            watcher.rescan(Instant::now(), started),
+            [Change::Created(PathBuf::from("notes.md"))]
+        );
+        assert_eq!(watcher.watched, started);
+        let later = started + DEBOUNCE * 2;
+        assert_eq!(watcher.rescan(Instant::now(), later), []);
+        assert!(watcher.watched > started);
+        fs::write(root.join("raw/a.csv"), "b").unwrap();
+        assert_eq!(
+            drain(&mut watcher).await,
+            [Change::Changed(PathBuf::from("raw/a.csv"))]
+        );
+    }
+
+    // Only inotify watches each folder, so only there can a new one go unwatched.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn watches_the_folders_made_while_the_system_dropped_events() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "old/a.csv", "a");
+        let mut watcher = watch(root);
+        // As if the events of these changes had been dropped, and with them those that would
+        // have had the new folders watched.
+        let debouncer = watcher.debouncer.as_mut().unwrap();
+        debouncer.unwatch(root).unwrap();
+        write(root, "raw/a.csv", "a");
+        // A folder made again where the watcher knows one.
+        fs::remove_dir_all(root.join("old")).unwrap();
+        write(root, "old/b.csv", "b");
+        let debouncer = watcher.debouncer.as_mut().unwrap();
+        debouncer.watch(root, RecursiveMode::NonRecursive).unwrap();
+
+        let path = PathBuf::from;
+        assert_eq!(
+            watcher.rescan(Instant::now(), Instant::now() + DEBOUNCE * 2),
+            [
+                Change::Deleted(path("old/a.csv")),
+                Change::Created(path("old/b.csv")),
+                Change::Created(path("raw")),
+                Change::Created(path("raw/a.csv")),
+            ]
+        );
+        assert_eq!(watcher.pending, Vec::<String>::new());
+        fs::write(root.join("raw/a.csv"), "b").unwrap();
+        fs::write(root.join("old/b.csv"), "c").unwrap();
+        assert_eq!(
+            drain(&mut watcher).await,
+            [
+                Change::Changed(path("raw/a.csv")),
+                Change::Changed(path("old/b.csv")),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn names_the_folder_the_limit_and_the_command_when_the_system_allows_no_more_watches() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+        let raw = root.join("raw");
+        let full = notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(raw.clone());
+        batches.send((Instant::now(), Err(vec![full]))).unwrap();
+        let reached = |setting: &str, what: &str| {
+            let current: u64 = fs::read_to_string(format!("/proc/sys/fs/inotify/{setting}"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            format!(
+                "the limit of {current} {what} per user (fs.inotify.{setting}) is reached. Raise \
+                 it with `sudo sysctl fs.inotify.{setting}={}` and start `fair-witness run` again",
+                current * 2
+            )
+        };
+
+        let next = tokio::time::timeout(FIRST_BATCH, watcher.next()).await;
+        let Ok(Some(Err(WatchError::Failed(errors)))) = next else {
+            panic!("{next:?}");
+        };
+        assert_eq!(
+            errors,
+            [format!(
+                "could not watch {}, so changes in it go unseen: {}",
+                raw.display(),
+                reached("max_user_watches", "watched folders")
+            )]
+        );
+        // As starting to watch fails when the system allows no more inotify instances.
+        let too_many = notify::Error::io(io::Error::from_raw_os_error(24));
+        assert_eq!(
+            not_started(too_many, root).to_string(),
+            format!(
+                "could not watch {}: {}",
+                root.display(),
+                reached("max_user_instances", "inotify instances")
+            )
+        );
     }
 
     #[cfg(unix)]
