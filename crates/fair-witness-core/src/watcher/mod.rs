@@ -834,6 +834,7 @@ mod tests {
             ".DS_Store",
             "scratch/tmp.csv",
             ".fair-witness/madmp.json",
+            "data/.fair-witness/log/x",
         ] {
             let path = root.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();

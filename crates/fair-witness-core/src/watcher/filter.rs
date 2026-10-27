@@ -92,8 +92,12 @@ impl Filter {
             return false;
         }
         // fair-witness writes its own files there, so no rule can let it
-        // through.
-        if relative.starts_with(DIR_NAME) {
+        // through. A subfolder has one when someone ran `setup` in it or it
+        // came from another project.
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == DIR_NAME)
+        {
             return true;
         }
         // As in git, a file in an ignored folder stays ignored even if a rule
@@ -165,7 +169,8 @@ mod tests {
 
     #[test]
     fn reads_rules_like_git() {
-        let (root, filter) = filter("!venv/\n!.fair-witness/\nscratch/\n!scratch/keep.csv\n");
+        let (root, filter) =
+            filter("!venv/\n!.fair-witness/\n!data/.fair-witness/\nscratch/\n!scratch/keep.csv\n");
         let filter = filter.unwrap();
         let skipped = |path: &str| filter.skips(&root.path().join(path), false);
 
@@ -173,6 +178,7 @@ mod tests {
         assert!(skipped("#notes.txt#"));
         assert!(!skipped("venv/answers.csv"));
         assert!(skipped(".fair-witness/credentials.toml"));
+        assert!(skipped("data/.fair-witness/log/x"));
         assert!(skipped("scratch/keep.csv"));
     }
 
