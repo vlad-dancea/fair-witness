@@ -8,11 +8,13 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use genai::chat::Tool;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::escape;
 use crate::watcher::Filter;
 
+/// The most lines one call lists. A longer list is cut there and continues from an offset.
 const MAX_ENTRIES: usize = 200;
 const MAX_READ: u64 = 16 * 1024;
 /// As many links as Linux follows in one path, so that a loop of links ends.
@@ -23,6 +25,10 @@ pub struct Tools {
     /// The project folder, opened once, so that a link in its place later is not followed.
     folder: Folder,
     filter: Filter,
+    /// The change set under review, one line per change, which `list_changes` pages through.
+    /// It holds only what the watcher reported, which its filter judged, and reads nothing, so
+    /// it needs no walk.
+    changes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -30,9 +36,21 @@ struct PathArgs {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct ListArgs {
+    path: String,
+    offset: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct PageArgs {
+    offset: Option<usize>,
+}
+
 impl Tools {
-    /// Tools that read only inside `root` and only what `filter` keeps.
-    pub fn new(root: &Path, filter: Filter) -> Result<Self> {
+    /// Tools that read only inside `root` and only what `filter` keeps, about the change set
+    /// that `changes` lists.
+    pub fn new(root: &Path, filter: Filter, changes: Vec<String>) -> Result<Self> {
         let root = root
             .canonicalize()
             .with_context(|| format!("could not resolve {}", root.display()))?;
@@ -45,6 +63,7 @@ impl Tools {
             root,
             folder,
             filter,
+            changes,
         })
     }
 
@@ -62,14 +81,32 @@ impl Tools {
                 "required": ["path"]
             })
         };
+        let offset = json!({
+            "type": "integer",
+            "minimum": 0,
+            "description": format!(
+                "How many lines to skip, 0 when left out. A list cut off after {MAX_ENTRIES} \
+                 lines ends with the offset of the next page."
+            )
+        });
+        let mut list_dir = path_schema("Folder relative to the project root; `.` for the root.");
+        list_dir["properties"]["offset"] = offset.clone();
         vec![
+            Tool::new("list_changes")
+                .with_description(format!(
+                    "List the changes in this change set, one per line, {MAX_ENTRIES} at a \
+                     time. Use it when the first message counts paths instead of naming them."
+                ))
+                .with_schema(json!({
+                    "type": "object",
+                    "properties": { "offset": offset }
+                })),
             Tool::new("list_dir")
-                .with_description(
-                    "List a folder in the project: subfolders end in `/`, files show their size.",
-                )
-                .with_schema(path_schema(
-                    "Folder relative to the project root; `.` for the root.",
-                )),
+                .with_description(format!(
+                    "List a folder in the project, {MAX_ENTRIES} entries at a time: subfolders \
+                     end in `/`, files show their size."
+                ))
+                .with_schema(list_dir),
             Tool::new("read_file")
                 .with_description(format!(
                     "Read the start of a file in the project (up to {MAX_READ} bytes). \
@@ -80,12 +117,25 @@ impl Tools {
     }
 
     pub fn call(&self, name: &str, args: &Value) -> Result<String, String> {
-        let PathArgs { path } =
-            serde_json::from_value(args.clone()).map_err(|e| format!("invalid arguments: {e}"))?;
-        let found = self.find(&path)?;
         match name {
-            "list_dir" => self.list_dir(&path, found),
-            "read_file" => read_file(&path, found.entry),
+            "list_changes" => {
+                let PageArgs { offset } = arguments(args)?;
+                page(
+                    &self.changes,
+                    offset.unwrap_or_default(),
+                    name,
+                    "(no changes)",
+                )
+            }
+            "list_dir" => {
+                let ListArgs { path, offset } = arguments(args)?;
+                let found = self.find(&path)?;
+                self.list_dir(&path, found, offset.unwrap_or_default())
+            }
+            "read_file" => {
+                let PathArgs { path } = arguments(args)?;
+                read_file(&path, self.find(&path)?.entry)
+            }
             _ => Err(format!("unknown tool `{name}`")),
         }
     }
@@ -219,7 +269,7 @@ impl Tools {
         })
     }
 
-    fn list_dir(&self, path: &str, found: Found) -> Result<String, String> {
+    fn list_dir(&self, path: &str, found: Found, offset: usize) -> Result<String, String> {
         let Entry::Folder(folder) = found.entry else {
             return Err(format!("{path} is not a folder"));
         };
@@ -246,16 +296,39 @@ impl Tools {
             })
             .collect();
         lines.sort();
-        let total = lines.len();
-        lines.truncate(MAX_ENTRIES);
-        if total > MAX_ENTRIES {
-            lines.push(format!("… and {} more", total - MAX_ENTRIES));
-        }
-        if lines.is_empty() {
-            return Ok("(empty folder)".to_string());
-        }
-        Ok(lines.join("\n"))
+        page(&lines, offset, "list_dir", "(empty folder)")
     }
+}
+
+fn arguments<T: DeserializeOwned>(args: &Value) -> Result<T, String> {
+    T::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))
+}
+
+/// At most `MAX_ENTRIES` of `lines` from `offset` on, and when there are more, how to have
+/// `tool` show them. No lines at all read as `empty`.
+fn page(lines: &[String], offset: usize, tool: &str, empty: &str) -> Result<String, String> {
+    if lines.is_empty() && offset == 0 {
+        return Ok(empty.to_string());
+    }
+    let rest = match lines.get(offset..) {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => {
+            return Err(format!(
+                "offset {offset} is past the end: there are {} entries",
+                lines.len()
+            ));
+        }
+    };
+    let mut text = rest[..rest.len().min(MAX_ENTRIES)].join("\n");
+    if rest.len() > MAX_ENTRIES {
+        let _ = write!(
+            text,
+            "\n… and {} more: call {tool} again with offset {} for the next page",
+            rest.len() - MAX_ENTRIES,
+            offset + MAX_ENTRIES
+        );
+    }
+    Ok(text)
 }
 
 /// A path the tools walked.
@@ -522,7 +595,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, contents).unwrap();
         }
-        Tools::new(root, Filter::new(root).unwrap()).unwrap()
+        Tools::new(root, Filter::new(root).unwrap(), Vec::new()).unwrap()
     }
 
     fn call(tools: &Tools, name: &str, path: &str) -> Result<String, String> {
@@ -541,6 +614,49 @@ mod tests {
         assert_eq!(
             call(&tools, "list_dir", "data").unwrap(),
             "a.csv (12 bytes)"
+        );
+    }
+
+    #[test]
+    fn pages_through_a_large_folder() {
+        let (dir, tools) = project();
+        let raw = dir.path().join("data/raw");
+        fs::create_dir(&raw).unwrap();
+        for i in 0..299 {
+            fs::write(raw.join(format!("{i:03}.csv")), "id\n").unwrap();
+        }
+        fs::write(raw.join("zzz-patients.csv"), "name\n").unwrap();
+        let list = |offset: Value| {
+            tools.call("list_dir", &json!({ "path": "data/raw", "offset": offset }))
+        };
+
+        let first = list(Value::Null).unwrap();
+        let (first, cut) = first.rsplit_once('\n').unwrap();
+        assert_eq!(
+            cut,
+            "… and 100 more: call list_dir again with offset 200 for the next page"
+        );
+        let mut entries: Vec<String> = (0..299).map(|i| format!("{i:03}.csv (3 bytes)")).collect();
+        entries.push("zzz-patients.csv (5 bytes)".to_string());
+        assert_eq!(
+            format!("{first}\n{}", list(json!(200)).unwrap()),
+            entries.join("\n")
+        );
+        assert_eq!(
+            list(json!(300)),
+            Err("offset 300 is past the end: there are 300 entries".to_string())
+        );
+        fs::create_dir(dir.path().join("data/empty")).unwrap();
+        let empty = |offset| {
+            tools.call(
+                "list_dir",
+                &json!({ "path": "data/empty", "offset": offset }),
+            )
+        };
+        assert_eq!(empty(0), Ok("(empty folder)".to_string()));
+        assert_eq!(
+            empty(200),
+            Err("offset 200 is past the end: there are 0 entries".to_string())
         );
     }
 
@@ -642,7 +758,7 @@ mod tests {
         fs::create_dir(root.join("notes")).unwrap();
         symlink("data", root.join("results")).unwrap();
         symlink("../data/raw", root.join("notes/raw")).unwrap();
-        let tools = Tools::new(root, Filter::new(root).unwrap()).unwrap();
+        let tools = Tools::new(root, Filter::new(root).unwrap(), Vec::new()).unwrap();
 
         // The rule for the name holds in the folder the link leads to as for the file.
         assert_eq!(
@@ -693,7 +809,7 @@ mod tests {
         std::thread::spawn(move || {
             let read = call(&tools, "read_file", "data/stream");
             // As if a pipe had taken the project folder's place.
-            let made = Tools::new(&root, filter)
+            let made = Tools::new(&root, filter, Vec::new())
                 .map(|_| ())
                 .map_err(|e| e.to_string());
             sender.send((read, made))
@@ -734,7 +850,7 @@ mod tests {
         );
         let link_size = outside.path().join("secret.txt").as_os_str().len();
         assert_eq!(
-            tools.list_dir("data", folder).unwrap(),
+            tools.list_dir("data", folder, 0).unwrap(),
             format!("a.csv ({link_size} bytes)\nb.csv (12 bytes)")
         );
     }

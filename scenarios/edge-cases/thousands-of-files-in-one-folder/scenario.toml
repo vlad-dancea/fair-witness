@@ -1,6 +1,10 @@
-description = "A tool writes 3000 files into one new folder at once. The review names only the folder, and list_dir shows the first 200 files and how many more there are."
+description = "A tool writes 3000 files into one new folder at once. The review names only the folder, and the model pages through the changes with list_changes and through the folder with list_dir, 200 lines at a time."
 
 [[set]]
 contradicts = false
 explanation = "Soil measurements as CSV files are what the DMP plans."
-fake_tool_calls = [{ tool = "list_dir", arguments = { path = "sensors" } }]
+fake_tool_calls = [
+  { tool = "list_dir", arguments = { path = "sensors" } },
+  { tool = "list_dir", arguments = { path = "sensors", offset = 2800 } },
+  { tool = "list_changes", arguments = { offset = 2800 } },
+]

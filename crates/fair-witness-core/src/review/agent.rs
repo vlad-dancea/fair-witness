@@ -223,8 +223,18 @@ impl Reviewer {
         choice: &ModelChoice,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
-        let tools = Arc::new(Tools::new(input.root, input.filter.clone())?);
-        let about_changes = prompt::about_changes(input.root, input.changes, input.found);
+        // Once, so that the first message and `list_changes` agree on what is gone. Looking at
+        // every path of a large set can block, such as on a network drive, and on the runtime
+        // it would keep the review's timeout from firing.
+        let (root, changes) = (input.root.to_path_buf(), input.changes.to_vec());
+        let gone = tokio::task::spawn_blocking(move || prompt::gone(&root, &changes)).await?;
+        let about_changes = prompt::about_changes(input.changes, &gone, input.found);
+        let lines = input
+            .changes
+            .iter()
+            .map(|change| prompt::line(change, &gone))
+            .collect();
+        let tools = Arc::new(Tools::new(input.root, input.filter.clone(), lines)?);
         let definitions = definitions();
         trace(Trace::Setup {
             system: SYSTEM_PROMPT.to_string(),
@@ -671,7 +681,7 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "setup with list_dir, read_file, report_verdict",
+                "setup with list_changes, list_dir, read_file, report_verdict",
                 "model test",
                 "prompt created: data/patients.csv",
                 "request 1",
@@ -829,10 +839,61 @@ mod tests {
             prompt.ends_with(
                 "What changed in the project folder:\n\
                  created: 60 paths under data/raw/\n\n\
-                 There were too many changes to name each path. list_dir shows the paths \
-                 that still exist; deleted ones are gone."
+                 There were too many changes to name each path here. list_changes names \
+                 each of them, a page at a time."
             ),
             "{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_every_change_of_a_long_set_page_by_page() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("data/raw")).unwrap();
+        let changes: Vec<Change> = (0..300)
+            .map(|i| Change::Created(format!("data/raw/{i:03}.csv").into()))
+            .collect();
+        // All but the last, which is gone by the time of the review.
+        for change in &changes[..299] {
+            fs::write(root.path().join(change.path()), "id\n").unwrap();
+        }
+        let (endpoint, server) = fake_model(vec![
+            tool_call("list_changes", json!({})),
+            tool_call("list_changes", json!({ "offset": 200 })),
+            verdict(),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        reviewer(endpoint)
+            .review(&input(root.path(), "{}", &changes), &|trace| {
+                traces.lock().unwrap().push(trace);
+            })
+            .await
+            .unwrap();
+
+        server.join().unwrap();
+        let outputs: Vec<String> = traces
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .filter_map(|trace| match trace {
+                Trace::ToolResult { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        let mut lines: Vec<String> = (0..299)
+            .map(|i| format!("created: data/raw/{i:03}.csv"))
+            .collect();
+        lines.push("created: data/raw/299.csv (gone since, so it can no longer be read)".into());
+        assert_eq!(
+            outputs,
+            [
+                format!(
+                    "{}\n… and 100 more: call list_changes again with offset 200 for the next page",
+                    lines[..200].join("\n")
+                ),
+                lines[200..].join("\n"),
+            ]
         );
     }
 
@@ -1255,7 +1316,10 @@ mod tests {
             .iter()
             .map(|tool| &tool["function"]["name"])
             .collect();
-        assert_eq!(tools, ["list_dir", "read_file", "report_verdict"]);
+        assert_eq!(
+            tools,
+            ["list_changes", "list_dir", "read_file", "report_verdict"]
+        );
         assert_eq!(
             (
                 &body["tool_choice"],
