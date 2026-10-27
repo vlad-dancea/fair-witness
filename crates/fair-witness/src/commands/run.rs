@@ -1,17 +1,19 @@
 use std::env::{self, VarError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::{Checked, Reviewer};
 use fair_witness_core::session::{Event, Record, Session};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::time::Instant;
 
 use super::Failure;
 use crate::setup::damap::TerminalPrompts;
@@ -21,6 +23,12 @@ use crate::{diagnostics, notifications};
 
 const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";
 const STOP_WRITING_WITHIN: Duration = Duration::from_secs(2);
+/// How many lines may wait for a reader that is behind, so that one that stops reading does not
+/// fill the memory.
+const WAITING_LINES: usize = 1_000;
+/// How long the writer may have lines to write without running out before `run` gives up on
+/// stdout, also when the reader makes room for some now and then.
+const READ_WITHIN: Duration = Duration::from_secs(30);
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -425,7 +433,7 @@ fn stop_requested() -> Result<impl Future<Output = ()>> {
 async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result<()> {
     let Start {
         project,
-        mut records,
+        records,
         status,
         ..
     } = start;
@@ -433,34 +441,61 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
     for line in &status {
         eprintln!("{line}");
     }
+    write_events(records, io::stdout(), stopped, READ_WITHIN).await
+}
+
+/// Writes each record as a line of JSON to `out` until `stopped` resolves, and fails when the
+/// writer has lines to write for `read_within` without running out.
+async fn write_events(
+    mut records: UnboundedReceiver<Record>,
+    mut out: impl Write + Send + 'static,
+    stopped: impl Future<Output = ()>,
+    read_within: Duration,
+) -> Result<()> {
     // Writing on its own thread keeps a reader that stops reading from blocking the stop.
-    let (lines, to_write) = std::sync::mpsc::channel::<String>();
-    let writer = tokio::task::spawn_blocking(move || {
-        let mut stdout = io::stdout();
-        for line in to_write {
-            stdout.write_all(line.as_bytes())?;
-            stdout.flush()?;
+    let (lines, mut to_write) = mpsc::channel::<String>(WAITING_LINES);
+    // Since when the writer has lines to write, or none while it waits for one. A writer that
+    // does not run out of lines for `read_within` is stuck on a write or behind a reader too slow
+    // for the events, also when only a few wait. It marks the first line it takes after waiting,
+    // since lines can be waiting already when it starts.
+    let busy_since = Arc::new(Mutex::new(None));
+    let writer = tokio::task::spawn_blocking({
+        let busy_since = busy_since.clone();
+        move || {
+            let mut idle = true;
+            loop {
+                let line = match to_write.try_recv() {
+                    Ok(line) => line,
+                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {
+                        set(&busy_since, None);
+                        idle = true;
+                        let Some(line) = to_write.blocking_recv() else {
+                            break;
+                        };
+                        line
+                    }
+                };
+                if idle {
+                    set(&busy_since, Some(Instant::now()));
+                    idle = false;
+                }
+                out.write_all(line.as_bytes())?;
+                out.flush()?;
+            }
+            io::Result::Ok(())
         }
-        io::Result::Ok(())
     });
     tokio::pin!(stopped, writer);
     let mut watch_stopped = None;
     loop {
         tokio::select! {
-            () = &mut stopped => {
-                // Lets the writer finish the lines it has, so a reader gets no half line, but
-                // not for long, since a reader that stopped reading never lets it.
-                drop(lines);
-                // A writer that fails now has lost its reader, which wants no more lines.
-                return match tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await {
-                    Ok(_) => Ok(()),
-                    Err(_) => bail!("stopped before writing every event, since stdout was not read"),
-                };
-            }
+            () = &mut stopped => break,
             written = &mut writer => {
                 written?.context("could not write to stdout")?;
                 bail!("stopped writing to stdout");
             }
+            behind = fallen_behind(&busy_since, read_within) => return Err(behind),
             record = records.recv() => {
                 let Some(record) = record else {
                     // The last lines say why, so they go out before the error, as on a stop.
@@ -473,18 +508,206 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
                 }
                 let mut line = serde_json::to_string(&record)?;
                 line.push('\n');
-                // When the writer has failed, the next turn of the loop reports why.
-                let _ = lines.send(line);
+                // A full queue holds back the session's events, which then pile up in its channel
+                // instead, so this waits only as long as the writer may stay behind.
+                tokio::select! {
+                    // When the writer has failed, the next turn of the loop reports why.
+                    _ = lines.send(line) => {}
+                    behind = fallen_behind(&busy_since, read_within) => return Err(behind),
+                    () = &mut stopped => break,
+                }
             }
+        }
+    }
+    // Lets the writer finish the lines it has, so a reader gets no half line, but not for long,
+    // since a reader that stopped reading never lets it.
+    drop(lines);
+    // A writer that fails now has lost its reader, which wants no more lines.
+    match tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await {
+        Ok(_) => Ok(()),
+        Err(_) => bail!("stopped before writing every event, since stdout was not read"),
+    }
+}
+
+fn set(busy_since: &Mutex<Option<Instant>>, since: Option<Instant>) {
+    *busy_since.lock().unwrap_or_else(PoisonError::into_inner) = since;
+}
+
+/// Resolves once the writer has had lines to write for `read_within` without running out, with
+/// the error that ends the run.
+async fn fallen_behind(
+    busy_since: &Mutex<Option<Instant>>,
+    read_within: Duration,
+) -> anyhow::Error {
+    loop {
+        let since = *busy_since.lock().unwrap_or_else(PoisonError::into_inner);
+        match since {
+            Some(since) if since.elapsed() >= read_within => {
+                return anyhow!(
+                    "stopped, since stdout was not read fast enough for {read_within:?}"
+                );
+            }
+            Some(since) => tokio::time::sleep_until(since + read_within).await,
+            None => tokio::time::sleep(read_within).await,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::RecvTimeoutError;
+
     use fair_witness_core::project::{Credentials, DamapConfig};
+    use fair_witness_core::session::Event;
 
     use super::*;
+
+    /// Stdout that is read in bursts of `burst` writes with `pause` before each, until the test
+    /// ends.
+    struct Reader {
+        test_ended: std::sync::mpsc::Receiver<()>,
+        burst: usize,
+        pause: Duration,
+        writes: usize,
+    }
+
+    impl Reader {
+        fn new(test_ended: std::sync::mpsc::Receiver<()>, burst: usize, pause: Duration) -> Self {
+            Self {
+                test_ended,
+                burst,
+                pause,
+                writes: 0,
+            }
+        }
+    }
+
+    impl Write for Reader {
+        fn write(&mut self, written: &[u8]) -> io::Result<usize> {
+            if self.writes.is_multiple_of(self.burst)
+                && !matches!(
+                    self.test_ended.recv_timeout(self.pause),
+                    Err(RecvTimeoutError::Timeout)
+                )
+            {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            self.writes += 1;
+            Ok(written.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn send_events(sender: &mpsc::UnboundedSender<Record>, count: usize) {
+        let time = "2026-10-27T13:00:00Z".parse().unwrap();
+        for set in 1..=count {
+            let event = Event::Reviewing { set };
+            sender.send(Record { time, event }).unwrap();
+        }
+    }
+
+    /// More events than may wait for a writer that is behind.
+    fn too_many_events() -> (mpsc::UnboundedSender<Record>, UnboundedReceiver<Record>) {
+        let (sender, records) = mpsc::unbounded_channel();
+        send_events(&sender, WAITING_LINES * 2);
+        (sender, records)
+    }
+
+    #[tokio::test]
+    async fn stops_when_stdout_is_not_read_even_with_one_event_waiting() {
+        let (sender, records) = mpsc::unbounded_channel();
+        send_events(&sender, 1);
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+
+        let written = write_events(
+            records,
+            Reader::new(test_ended, 1, Duration::MAX),
+            std::future::pending(),
+            Duration::from_millis(200),
+        );
+        let written = tokio::time::timeout(Duration::from_secs(2), written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "stopped, since stdout was not read fast enough for 200ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_when_stdout_makes_room_now_and_then_but_never_catches_up() {
+        let (_sender, records) = too_many_events();
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+
+        let written = write_events(
+            records,
+            Reader::new(test_ended, 100, Duration::from_millis(200)),
+            std::future::pending(),
+            Duration::from_millis(300),
+        );
+        let written = tokio::time::timeout(Duration::from_secs(2), written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "stopped, since stdout was not read fast enough for 300ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn forgets_that_stdout_was_behind_once_it_caught_up() {
+        let (sender, records) = mpsc::unbounded_channel();
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // Each burst fills the queue while the reader pauses before its first line.
+        let burst = WAITING_LINES + 2;
+        let read_within = Duration::from_millis(300);
+        let written = tokio::spawn(write_events(
+            records,
+            Reader::new(test_ended, burst, Duration::from_millis(100)),
+            async move {
+                let _ = stopped.await;
+            },
+            read_within,
+        ));
+
+        send_events(&sender, burst);
+        tokio::time::sleep(read_within * 2).await;
+        send_events(&sender, burst);
+        tokio::time::sleep(read_within).await;
+        let _ = stop.send(());
+
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+        written.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stops_at_once_while_events_wait_for_room() {
+        let (_sender, records) = too_many_events();
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+
+        let written = write_events(
+            records,
+            Reader::new(test_ended, 1, Duration::MAX),
+            tokio::time::sleep(Duration::from_millis(100)),
+            Duration::from_secs(60),
+        );
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "stopped before writing every event, since stdout was not read"
+        );
+    }
 
     fn args(model: Option<&str>, effort: Option<&str>) -> Args {
         Args {
