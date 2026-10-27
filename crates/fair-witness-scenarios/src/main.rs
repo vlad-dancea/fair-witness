@@ -1,5 +1,6 @@
 //! Runs the researcher scenarios in `scenarios/` against headless fair-witness, with the fake
-//! model or real ones, prints how each went and writes the results and events as JSON.
+//! model or real ones, prints how each went and writes the results and events as JSON as each
+//! run ends.
 
 #[cfg(test)]
 mod fixtures;
@@ -12,11 +13,12 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io;
+use std::mem;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +42,11 @@ const MOST_JOBS: usize = 8;
 const REPEATS: usize = 5;
 /// TU Wien's AI gateway, which `fair-witness setup` offers first too.
 const AQUEDUCT: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
+
+/// How many runs that ended before a signal stopped the scripts are not saved yet, which the
+/// signal waits for.
+static UNSAVED: Mutex<usize> = Mutex::new(0);
+static SAVED: Condvar = Condvar::new();
 
 #[derive(Parser)]
 #[command(
@@ -135,19 +142,31 @@ struct Job<'a> {
 
 /// What a run of all the scenarios writes to `results.json`.
 #[derive(Serialize)]
-struct Results<'a> {
+struct Results {
     started: Timestamp,
+    status: Status,
     /// The API of the real models.
     #[serde(skip_serializing_if = "Option::is_none")]
-    ai_url: Option<&'a str>,
+    ai_url: Option<String>,
     repeats: usize,
     debounce_ms: Debounces,
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    accuracy: &'a [Accuracy],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accuracy: Vec<Accuracy>,
     /// The models and efforts the API refused, which did not run.
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    refused: &'a [Refused],
-    runs: &'a [Outcome],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    refused: Vec<Refused>,
+    /// The runs that have ended.
+    runs: Vec<Outcome>,
+}
+
+/// How far the runner got. A runner that crashed or was killed leaves `running` behind.
+#[derive(Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    Running,
+    /// A signal stopped the runner, so the runs that had not ended are missing.
+    Interrupted,
+    Finished,
 }
 
 /// How long fair-witness waited for the folder to be quiet in each kind of scenario.
@@ -172,8 +191,6 @@ fn main() -> ExitCode {
 /// Runs the chosen scenarios and says whether all of them went as expected.
 fn run() -> Result<bool> {
     let args = Args::parse();
-    #[cfg(unix)]
-    stop_scripts_on_signal()?;
     let binary = match &args.binary {
         Some(binary) => binary.clone(),
         None => built_binary()?,
@@ -238,33 +255,47 @@ fn run() -> Result<bool> {
         usize::from,
     );
 
-    let started = Timestamp::now();
-    let (outcomes, events): (Vec<Outcome>, Vec<Vec<Record>>) =
-        run_all(&jobs, &settings, at_once, !fake)
-            .into_iter()
-            .unzip();
-    let folder = new_folder(
-        &args.output,
-        &started.strftime("%Y%m%dT%H%M%SZ").to_string(),
-    )?;
-    let accuracy = if fake {
-        Vec::new()
-    } else {
-        report::accuracy(&outcomes)
-    };
     let results = Results {
-        started,
-        ai_url: (!fake).then_some(args.ai_url.as_str()),
+        started: Timestamp::now(),
+        status: Status::Running,
+        ai_url: (!fake).then(|| args.ai_url.clone()),
         repeats,
         debounce_ms: Debounces {
             edge_cases: args.debounce_ms,
             realistic: u64::try_from(fair_witness_core::watcher::DEBOUNCE.as_millis())
                 .unwrap_or(u64::MAX),
         },
-        accuracy: &accuracy,
-        refused: &refused,
-        runs: &outcomes,
+        accuracy: Vec::new(),
+        refused,
+        runs: Vec::new(),
     };
+    let output = Output::create(&args.output, results)?;
+    if !fake {
+        eprintln!(
+            "The results go to {} as the runs end.",
+            output.folder.display()
+        );
+    }
+    let output = Arc::new(Mutex::new(output));
+    #[cfg(unix)]
+    save_on_signal(Arc::clone(&output))?;
+    let ran = run_all(&jobs, &settings, at_once, !fake, &output);
+    if run::stopping() {
+        // The signal ends the runner, with its exit code, once the runs that ended are saved.
+        loop {
+            thread::park();
+        }
+    }
+    ran?;
+    let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+    output.end(Status::Finished)?;
+    // Taken, so that a signal does not wait for the report while stdout blocks. Nothing
+    // writes finished results again.
+    let folder = output.folder.clone();
+    let outcomes = mem::take(&mut output.results.runs);
+    let accuracy = mem::take(&mut output.results.accuracy);
+    let refused = mem::take(&mut output.results.refused);
+    drop(output);
     let one_each = jobs.len() == scenarios.len();
     if fake {
         print!("{}", tables::passed(&outcomes, one_each));
@@ -273,7 +304,6 @@ fn run() -> Result<bool> {
     }
     print!("{}", tables::refused(&refused));
     print!("{}", tables::problems(&outcomes, fake, one_each));
-    write_results(&folder, &results, &events)?;
     let passed = outcomes.iter().filter(|outcome| outcome.passed).count();
     let runs = if one_each { "scenarios" } else { "runs" };
     let went = if fake {
@@ -293,17 +323,42 @@ fn run() -> Result<bool> {
     Ok(passed == outcomes.len() && refused.is_empty())
 }
 
-/// Stops the scripts that are running when the runner is stopped, since they run in process
-/// groups of their own, which Ctrl+C in the terminal does not reach.
+/// When the runner is stopped, stops the scripts that are running, since they run in process
+/// groups of their own, which Ctrl+C in the terminal does not reach, and marks the results of
+/// the runs that ended as interrupted.
 #[cfg(unix)]
-fn stop_scripts_on_signal() -> Result<()> {
+fn save_on_signal(output: Arc<Mutex<Output>>) -> Result<()> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
     let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])
         .context("could not listen for signals")?;
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
+            // Before anything waits for the output, so that a disk that stalls cannot keep the
+            // scripts running. The runs they were in are not saved, as `count_unsaved` says.
             run::stop_scripts();
+            drop(
+                SAVED
+                    .wait_while(
+                        UNSAVED.lock().unwrap_or_else(PoisonError::into_inner),
+                        |unsaved| *unsaved > 0,
+                    )
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+            // Held until the exit, so that the runner does not mark its results finished.
+            let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+            // Says nothing unless saving failed, and then waits at most a second for stderr,
+            // since a stderr that blocks would keep the runner from exiting.
+            if output.results.status == Status::Running
+                && let Err(e) = output.end(Status::Interrupted)
+            {
+                let (said, heard) = std::sync::mpsc::channel();
+                thread::spawn(move || {
+                    eprintln!("\nerror: {e:#}");
+                    let _ = said.send(());
+                });
+                let _ = heard.recv_timeout(Duration::from_secs(1));
+            }
             std::process::exit(128 + signal);
         }
     });
@@ -441,17 +496,19 @@ fn taking_turns(models: &[Model]) -> Vec<(usize, &Model)> {
         .collect()
 }
 
-/// Runs `jobs` in their order, `at_once` at a time, and returns how each went with its events, in
-/// the order of their places. With `progress`, says on stderr when each one ends, since a real
-/// model takes a while.
+/// Runs `jobs` in their order, `at_once` at a time, and saves how each went with its events in
+/// `output` as it ends. With `progress`, says on stderr when each one ends, since a real model
+/// takes a while. Once a run cannot be saved, no other starts.
 fn run_all(
     jobs: &[Job],
     settings: &Settings,
     at_once: usize,
     progress: bool,
-) -> Vec<(Outcome, Vec<Record>)> {
+    output: &Mutex<Output>,
+) -> Result<()> {
     let next = AtomicUsize::new(0);
-    let done = Mutex::new(Vec::new());
+    let ended = AtomicUsize::new(0);
+    let failed = Mutex::new(None);
     thread::scope(|scope| {
         for _ in 0..at_once.min(jobs.len()) {
             scope.spawn(|| {
@@ -461,13 +518,13 @@ fn run_all(
                         return;
                     };
                     let ran = run::run(job.scenario, job.model, settings);
+                    if !count_unsaved() {
+                        return;
+                    }
                     let outcome = report::judge(job.scenario, job.model, job.repeat, &ran);
-                    let mut done = done.lock().unwrap();
-                    if progress {
-                        eprintln!(
-                            "{}/{} {}: {} of {} right{}",
-                            done.len() + 1,
-                            jobs.len(),
+                    let how = progress.then(|| {
+                        format!(
+                            "{}: {} of {} right{}",
                             tables::label(&outcome, false, false),
                             outcome.sets_correct(),
                             outcome.sets.len(),
@@ -476,16 +533,107 @@ fn run_all(
                             } else {
                                 ", with problems"
                             }
-                        );
+                        )
+                    });
+                    let saved = output.lock().unwrap_or_else(PoisonError::into_inner).save(
+                        job.place,
+                        outcome,
+                        &ran.records,
+                    );
+                    *UNSAVED.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                    SAVED.notify_all();
+                    if let Err(e) = saved {
+                        next.store(jobs.len(), Ordering::Relaxed);
+                        failed.lock().unwrap().get_or_insert(e);
                     }
-                    done.push((job.place, (outcome, ran.records)));
+                    // Said once the run is saved and the output unlocked, so that a stderr that
+                    // blocks neither keeps the run from being saved nor holds up a signal.
+                    if let Some(how) = how {
+                        let ended = ended.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!("{ended}/{} {how}", jobs.len());
+                    }
                 }
             });
         }
     });
-    let mut done = done.into_inner().unwrap();
-    done.sort_by_key(|(place, _)| *place);
-    done.into_iter().map(|(_, result)| result).collect()
+    match failed.into_inner().unwrap() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Counts a run that has just ended as unsaved, unless a signal has stopped the scripts, which
+/// may have cut it short.
+fn count_unsaved() -> bool {
+    let mut unsaved = UNSAVED.lock().unwrap_or_else(PoisonError::into_inner);
+    if run::stopping() {
+        return false;
+    }
+    *unsaved += 1;
+    true
+}
+
+/// The folder of a run of the runner, whose `results.json` holds the runs that have ended at
+/// any time, so that an interrupted or crashed runner keeps them.
+struct Output {
+    folder: PathBuf,
+    results: Results,
+    /// The place of each run in `results.runs`, which keeps them in the order of their places.
+    places: Vec<usize>,
+}
+
+impl Output {
+    /// Creates a new folder in `output`, named after when the runner started, with
+    /// `results.json` in it.
+    fn create(output: &Path, results: Results) -> Result<Self> {
+        let name = results.started.strftime("%Y%m%dT%H%M%SZ").to_string();
+        let output = Self {
+            folder: new_folder(output, &name)?,
+            results,
+            places: Vec::new(),
+        };
+        output.write()?;
+        Ok(output)
+    }
+
+    /// Writes the events of the run at `place`, one per line as fair-witness printed them, to
+    /// the file its outcome names, and adds the outcome to `results.json`.
+    fn save(&mut self, place: usize, outcome: Outcome, records: &[Record]) -> Result<()> {
+        let mut lines = String::new();
+        for record in records {
+            lines.push_str(&serde_json::to_string(record)?);
+            lines.push('\n');
+        }
+        let path = self.folder.join(&outcome.events);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("could not create {}", parent.display()))?;
+        }
+        fs::write(&path, lines).with_context(|| format!("could not write {}", path.display()))?;
+        let index = self.places.partition_point(|before| *before < place);
+        self.places.insert(index, place);
+        self.results.runs.insert(index, outcome);
+        // Only real models have an API, and only they are measured.
+        if self.results.ai_url.is_some() {
+            self.results.accuracy = report::accuracy(&self.results.runs);
+        }
+        self.write()
+    }
+
+    fn end(&mut self, status: Status) -> Result<()> {
+        self.results.status = status;
+        self.write()
+    }
+
+    /// Replaces `results.json` in one step, so that a runner stopped while writing it leaves the
+    /// one before.
+    fn write(&self) -> Result<()> {
+        let path = self.folder.join("results.json");
+        let part = self.folder.join("results.json.part");
+        fs::write(&part, serde_json::to_string_pretty(&self.results)? + "\n")
+            .with_context(|| format!("could not write {}", part.display()))?;
+        fs::rename(&part, &path).with_context(|| format!("could not write {}", path.display()))
+    }
 }
 
 /// Creates the folder `name` in `output`, or `name-2` and so on when another run that started
@@ -506,28 +654,6 @@ fn new_folder(output: &Path, name: &str) -> Result<PathBuf> {
         }
     }
     unreachable!("there is always a number left")
-}
-
-/// Writes `results.json` and the events of each run, one per line as fair-witness printed them,
-/// to the file its outcome names in `folder`.
-fn write_results(folder: &Path, results: &Results, events: &[Vec<Record>]) -> Result<()> {
-    let path = folder.join("results.json");
-    fs::write(&path, serde_json::to_string_pretty(results)? + "\n")
-        .with_context(|| format!("could not write {}", path.display()))?;
-    for (outcome, records) in results.runs.iter().zip(events) {
-        let mut lines = String::new();
-        for record in records {
-            lines.push_str(&serde_json::to_string(record)?);
-            lines.push('\n');
-        }
-        let path = folder.join(&outcome.events);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("could not create {}", parent.display()))?;
-        }
-        fs::write(&path, lines).with_context(|| format!("could not write {}", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

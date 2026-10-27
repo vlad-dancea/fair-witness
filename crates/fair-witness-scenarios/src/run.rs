@@ -341,6 +341,14 @@ pub fn stop_scripts() {
     }
 }
 
+/// Whether `stop_scripts` has run, so that a run that ends from here on may have been cut short.
+pub fn stopping() -> bool {
+    GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_none()
+}
+
 /// Kills the process group `group` and everything in it.
 fn kill_group(group: u32) {
     let _ = Command::new("kill")
