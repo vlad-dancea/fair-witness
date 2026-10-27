@@ -1003,36 +1003,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fails_without_the_request_when_the_reply_cannot_be_read() {
+    async fn fails_without_the_request_or_the_reply_when_the_reply_cannot_be_read() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("patients.csv"), "name\nAnna Muster\n").unwrap();
-        // A tool call from a small model whose arguments are not JSON.
-        let mut unreadable = tool_call("read_file", json!({}));
-        unreadable["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+        // Tool calls from a small model: one whose arguments are not JSON, and one that writes
+        // what it read where the function belongs.
+        let mut cut_off = tool_call("read_file", json!({}));
+        cut_off["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
             json!(r#"{"path": "notes"#);
-        let (endpoint, _server) = fake_model(vec![
-            tool_call("read_file", json!({ "path": "patients.csv" })),
-            unreadable,
-        ]);
+        let mut misplaced = tool_call("read_file", json!({}));
+        misplaced["choices"][0]["message"]["tool_calls"][0]["function"] = json!("Anna Muster");
 
-        let traces = Mutex::new(Vec::new());
-        let e = reviewer(endpoint)
-            .review(
-                &input(
-                    root.path(),
-                    r#"{"dmp": {"title": "Consent study"}}"#,
-                    &[Change::Created("patients.csv".into())],
-                ),
-                &|trace| traces.lock().unwrap().push(trace),
-            )
-            .await
-            .unwrap_err();
+        let mut failures = Vec::new();
+        for unreadable in [cut_off, misplaced] {
+            let (endpoint, _server) = fake_model(vec![
+                tool_call("read_file", json!({ "path": "patients.csv" })),
+                unreadable,
+            ]);
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer(endpoint)
+                .review(
+                    &input(
+                        root.path(),
+                        r#"{"dmp": {"title": "Consent study"}}"#,
+                        &[Change::Created("patients.csv".into())],
+                    ),
+                    &|trace| traces.lock().unwrap().push(trace),
+                )
+                .await
+                .unwrap_err();
+            let Some(Trace::Failed(why)) = traces.into_inner().unwrap().pop() else {
+                panic!("no failure traced last");
+            };
+            failures.push((format!("{e:#}"), why));
+        }
 
-        let why = "the model's reply could not be read: Serde JSON error: EOF while parsing a \
-                   string at line 1 column 15";
-        assert_eq!(format!("{e:#}"), format!("the model test failed: {why}"));
-        let traces = traces.into_inner().unwrap();
-        assert_eq!(traces.last(), Some(&Trace::Failed(why.to_string())));
+        let why = [
+            "the model's reply could not be read: Serde JSON error: EOF while parsing a string at \
+             line 1 column 15",
+            "the model's reply could not be read: Serde JSON error: invalid type: string \"…\", \
+             expected struct IterimFunction",
+        ];
+        assert_eq!(
+            failures,
+            why.map(|why| (format!("the model test failed: {why}"), why.to_string()))
+        );
     }
 
     #[tokio::test]

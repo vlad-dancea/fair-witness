@@ -199,11 +199,51 @@ pub fn why_failed(error: &genai::Error) -> String {
         },
         // genai's own text quotes the whole request, with the DMP and every tool result.
         genai::Error::ChatResponseGeneration { cause, .. } => {
-            format!("the model's reply could not be read: {cause}")
+            format!(
+                "the model's reply could not be read: {}",
+                without_values(cause)
+            )
         }
         e => e.to_string(),
     };
     why.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `cause` with the values it quotes left out, since the reply that serde could not read may
+/// repeat what the model read in files. serde quotes a string in double quotes, escaped as Rust
+/// does, and a number, a character or a field name in backticks.
+fn without_values(cause: &str) -> String {
+    let mut kept = String::with_capacity(cause.len());
+    let mut rest = cause;
+    while let Some(at) = rest.find(['"', '`']) {
+        let (before, quoted) = rest.split_at(at);
+        kept.push_str(before);
+        let quote = &quoted[..1];
+        let Some(len) = quoted_len(quoted) else {
+            // Without its end, the rest may all be the value.
+            kept.push_str(&format!("{quote}…"));
+            return kept;
+        };
+        kept.push_str(&format!("{quote}…{quote}"));
+        rest = &quoted[len..];
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// How long the quoted value at the start of `text` is, with its quotes.
+fn quoted_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    let (_, quote) = chars.next()?;
+    while let Some((at, c)) = chars.next() {
+        if c == quote {
+            return Some(at + c.len_utf8());
+        }
+        if c == '\\' && quote == '"' {
+            chars.next();
+        }
+    }
+    None
 }
 
 /// The message in an error body, which OpenAI and the APIs like it give as
