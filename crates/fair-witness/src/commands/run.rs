@@ -523,14 +523,17 @@ async fn write_events(
     // since a reader that stopped reading never lets it.
     drop(lines);
     // A writer that fails now has lost its reader, which wants no more lines.
-    let written = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await;
-    // The last lines say why the session ended, so they went out before the error.
-    if let Some(ended) = ended {
-        bail!(ended);
-    }
-    match written {
-        Ok(_) => Ok(()),
-        Err(_) => bail!("stopped before writing every event, since stdout was not read"),
+    let unwritten = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer)
+        .await
+        .is_err()
+        .then_some("stopped before writing every event, since stdout was not read");
+    // The last lines say why the session ended, unless stdout was not read, which a reader that
+    // misses them learns too.
+    match (ended, unwritten) {
+        (Some(ended), Some(unwritten)) => bail!("{ended}\nIt also {unwritten}"),
+        (Some(ended), None) => bail!(ended),
+        (None, Some(unwritten)) => bail!(unwritten),
+        (None, None) => Ok(()),
     }
 }
 
@@ -719,6 +722,37 @@ mod tests {
         assert_eq!(
             written.unwrap_err().to_string(),
             "the project folder was moved or deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn says_why_watching_stopped_and_that_stdout_missed_it() {
+        let (sender, records) = mpsc::unbounded_channel();
+        let time = "2026-10-27T13:00:00Z".parse().unwrap();
+        let error = "the project folder was moved or deleted".to_string();
+        sender
+            .send(Record {
+                time,
+                event: Event::WatchStopped { error },
+            })
+            .unwrap();
+        drop(sender);
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+
+        let written = write_events(
+            records,
+            Reader::new(test_ended, 1, Duration::MAX),
+            std::future::pending(),
+            Duration::from_secs(60),
+        );
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "the project folder was moved or deleted\nIt also stopped before writing every \
+             event, since stdout was not read"
         );
     }
 
