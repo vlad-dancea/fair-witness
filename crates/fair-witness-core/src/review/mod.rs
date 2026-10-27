@@ -7,7 +7,7 @@ mod tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use agent::{Checked, ModelChoice, Reviewer};
+pub use agent::{ChoiceCheck, ModelChoice, ModelStep};
 pub use prompt::first_message;
 pub use provider::list_models;
 pub(crate) use provider::retry_after;
@@ -47,7 +47,7 @@ pub enum Trace {
         turn: usize,
         retry: usize,
         wait_ms: u64,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
+        /// What the API answered, as `ModelStep::reportable` leaves it.
         body: String,
     },
     /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
@@ -55,7 +55,7 @@ pub enum Trace {
     /// carry from the start.
     EffortNotAllowed {
         turn: usize,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
+        /// What the API answered, as `ModelStep::reportable` leaves it.
         body: String,
     },
     Reply {
@@ -83,7 +83,7 @@ pub enum Trace {
         #[serde(default, skip_serializing_if = "is_false")]
         failed: bool,
     },
-    /// Why a request or the whole review failed, in one line as `Reviewer::reportable` leaves
+    /// Why a request or the whole review failed, in one line as `ModelStep::reportable` leaves
     /// it. A request whose reply could not be read goes again after it.
     Failed(String),
 }

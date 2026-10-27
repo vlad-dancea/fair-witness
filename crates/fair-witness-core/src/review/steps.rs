@@ -72,7 +72,7 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::Reviewer;
+    use crate::review::ModelStep;
     use crate::testing::{Reply, fake_model, tool_call};
 
     /// A step that gives the same outcome for every change set.
@@ -90,7 +90,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        Arc::new(Reviewer::new(&config, None).unwrap())
+        Arc::new(ModelStep::new(&config, None).unwrap())
     }
 
     fn verdict() -> Verdict {

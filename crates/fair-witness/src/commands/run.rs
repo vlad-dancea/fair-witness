@@ -9,7 +9,7 @@ use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
-use fair_witness_core::review::{Checked, Reviewer};
+use fair_witness_core::review::{ChoiceCheck, ModelStep};
 use fair_witness_core::session::{Record, Session};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -166,7 +166,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     };
     match (source, ai) {
         (Some(source), Some((ai, api_key))) => {
-            let reviewer = Arc::new(Reviewer::new(&ai, api_key.clone())?);
+            let reviewer = Arc::new(ModelStep::new(&ai, api_key.clone())?);
             // Before the DMP, so that a refusal comes before any DAMAP login.
             if !args.skip_model_check {
                 check_model(&reviewer, &ai.url, &mut status).await?;
@@ -208,16 +208,16 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
 /// Asks the API once whether it takes the model and effort, so that a choice it refuses stops
 /// `run` at once instead of failing every review. When the check cannot tell, `run` still starts,
 /// with a warning in `status`.
-async fn check_model(reviewer: &Reviewer, url: &str, status: &mut Vec<String>) -> Result<()> {
+async fn check_model(reviewer: &ModelStep, url: &str, status: &mut Vec<String>) -> Result<()> {
     let choice = reviewer.choice();
     let described = model_panel::describe(&choice);
-    match reviewer.check(&choice).await {
-        Checked::Accepted => Ok(()),
-        Checked::Refused(message) => bail!(
+    match reviewer.try_choice(&choice).await {
+        ChoiceCheck::Accepted => Ok(()),
+        ChoiceCheck::Refused(message) => bail!(
             "{url} refuses {described}: {message}\nPass another model with --model or another \
              effort with --effort, or choose a model with `fair-witness setup`"
         ),
-        Checked::Unknown(why) => {
+        ChoiceCheck::Unknown(why) => {
             let warning = format!(
                 "Warning: could not check {described}, so the reviews will show whether the API \
                  takes it: {why}"

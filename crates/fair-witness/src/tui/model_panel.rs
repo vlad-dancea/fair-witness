@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use fair_witness_core::project::{Effort, Project};
-use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
+use fair_witness_core::review::{self, ChoiceCheck, ModelChoice, ModelStep};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 pub struct ModelSettings {
     pub project: Project,
-    pub reviewer: Arc<Reviewer>,
+    pub reviewer: Arc<ModelStep>,
     pub url: String,
     pub api_key: Option<String>,
 }
@@ -73,7 +73,7 @@ enum Check {
     None,
     Running {
         choice: ModelChoice,
-        checked: Receiver<Checked>,
+        checked: Receiver<ChoiceCheck>,
         _task: CheckTask,
     },
     Refused {
@@ -93,7 +93,7 @@ impl Drop for CheckTask {
 }
 
 pub struct ModelPanel {
-    reviewer: Arc<Reviewer>,
+    reviewer: Arc<ModelStep>,
     current: ModelChoice,
     models: Models,
     filter: String,
@@ -171,7 +171,7 @@ impl ModelPanel {
         let reviewer = self.reviewer.clone();
         let asked = choice.clone();
         let task = tokio::spawn(async move {
-            let _ = sender.send(reviewer.check(&asked).await);
+            let _ = sender.send(reviewer.try_choice(&asked).await);
         });
         self.check = Check::Running {
             choice,
@@ -192,14 +192,14 @@ impl ModelPanel {
         let checked = match checked.try_recv() {
             Ok(checked) => checked,
             Err(TryRecvError::Empty) => return Outcome::Open,
-            Err(TryRecvError::Closed) => Checked::Unknown("the check stopped".to_string()),
+            Err(TryRecvError::Closed) => ChoiceCheck::Unknown("the check stopped".to_string()),
         };
         let choice = choice.clone();
         self.check = Check::None;
         match checked {
-            Checked::Accepted => Outcome::Chosen(choice, None),
-            Checked::Unknown(why) => Outcome::Chosen(choice, Some(why)),
-            Checked::Refused(message) => {
+            ChoiceCheck::Accepted => Outcome::Chosen(choice, None),
+            ChoiceCheck::Unknown(why) => Outcome::Chosen(choice, Some(why)),
+            ChoiceCheck::Refused(message) => {
                 self.check = Check::Refused { choice, message };
                 Outcome::Open
             }
@@ -470,7 +470,7 @@ mod tests {
         };
         let settings = ModelSettings {
             project: Project::new(PathBuf::from("/home/researcher/sleep-study")),
-            reviewer: Arc::new(Reviewer::new(&ai, None).unwrap()),
+            reviewer: Arc::new(ModelStep::new(&ai, None).unwrap()),
             url,
             api_key: None,
         };
@@ -640,7 +640,7 @@ mod tests {
             model: "qwen3:8b".to_string(),
             effort: "medium".parse().unwrap(),
         };
-        panel.reviewer = Arc::new(Reviewer::new(&ai, None).unwrap());
+        panel.reviewer = Arc::new(ModelStep::new(&ai, None).unwrap());
         for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
             panel.handle_key(key.into());
         }

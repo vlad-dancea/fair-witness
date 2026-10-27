@@ -298,7 +298,7 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::{Input, Reviewer, StepFuture};
+    use crate::review::{Input, ModelStep, StepFuture};
     use crate::testing::{Reply, fake_model, held, no_answer, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -344,7 +344,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        Arc::new(Reviewer::new(&config, None).unwrap())
+        Arc::new(ModelStep::new(&config, None).unwrap())
     }
 
     fn describe(event: &Event) -> String {
@@ -610,7 +610,7 @@ mod tests {
             )
             .into(),
         ]);
-        let reviewer = Reviewer::with_timeouts(
+        let reviewer = ModelStep::with_timeouts(
             &AiConfig {
                 url: endpoint,
                 model: "test".to_string(),

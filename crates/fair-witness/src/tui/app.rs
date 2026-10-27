@@ -592,7 +592,7 @@ mod tests {
     use std::sync::Arc;
 
     use fair_witness_core::project::{AiConfig, Project};
-    use fair_witness_core::review::{Reviewer, Trace, Verdict};
+    use fair_witness_core::review::{ModelStep, Trace, Verdict};
     use fair_witness_core::watcher::Change;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -609,7 +609,7 @@ mod tests {
         };
         let settings = ModelSettings {
             project: Project::new(root.to_path_buf()),
-            reviewer: Arc::new(Reviewer::new(&ai, None).unwrap()),
+            reviewer: Arc::new(ModelStep::new(&ai, None).unwrap()),
             url: ai.url,
             api_key: None,
         };
