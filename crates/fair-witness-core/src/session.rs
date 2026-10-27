@@ -17,7 +17,8 @@ use crate::watcher::{self, Change, Filter, FolderWatcher};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// A change set, numbered from 1 in the order seen.
+    /// A change set, numbered from 1 in the order seen. It comes as soon as the set ends, also
+    /// while an earlier set is reviewed, and its review waits for those before it.
     Changes {
         set: usize,
         changes: Vec<Change>,
@@ -105,49 +106,56 @@ impl Session {
     /// in progress then.
     pub fn start(self) -> Result<UnboundedReceiver<Record>> {
         let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
+        // The rules the watcher read when it started, so that the model may read exactly what
+        // the watcher reports.
+        let filter = watcher.filter().clone();
         let log = self
             .log
             .as_deref()
             .map(project::append_private)
             .transpose()?;
         let (sender, received) = mpsc::unbounded_channel();
-        let events = Events::new(sender, log);
+        let events = Arc::new(Events::new(sender, log));
+        let (queue, queued) = mpsc::unbounded_channel();
+        // The watcher runs in a task of its own, so that a long review holds up neither the
+        // watcher's timing of the next set nor its look at the files the next events name,
+        // which may be gone by the time the review ends.
+        tokio::spawn({
+            let events = events.clone();
+            async move {
+                tokio::select! {
+                    () = watch(watcher, &events, &queue) => {}
+                    () = events.sender.closed() => {}
+                    // The reviews are gone only after a panic, and then the session ends at
+                    // once rather than look as if it still reviewed.
+                    () = queue.closed() => {}
+                }
+            }
+        });
         tokio::spawn(async move {
             tokio::select! {
-                () = self.watch(watcher, &events) => {}
+                () = self.review_queued(queued, &filter, &events) => {}
                 () = events.sender.closed() => {}
             }
         });
         Ok(received)
     }
 
-    async fn watch(&self, mut watcher: FolderWatcher, events: &Events) {
-        // The rules the watcher read when it started, so that the model may read exactly what
-        // the watcher reports.
-        let filter = watcher.filter().clone();
-        let mut set = 0;
-        while let Some(batch) = watcher.next().await {
-            let changes = match batch {
-                Ok(changes) => changes,
-                Err(errors) => {
-                    let errors = errors.iter().map(ToString::to_string).collect();
-                    events.send(Event::WatchErrors { set, errors });
-                    continue;
-                }
-            };
-            set += 1;
-            events.send(Event::Changes {
-                set,
-                changes: changes.clone(),
-            });
+    // Reviews run one after another, in the order of their sets, so a review that newer changes
+    // make moot still finishes, and the sets that came meanwhile wait in `queued`.
+    async fn review_queued(
+        &self,
+        mut queued: UnboundedReceiver<(usize, Vec<Change>)>,
+        filter: &Filter,
+        events: &Events,
+    ) {
+        while let Some((set, changes)) = queued.recv().await {
             if let Some(review) = &self.review {
-                events.send(self.review(review, set, &changes, &filter, events).await);
+                events.send(self.review(review, set, &changes, filter, events).await);
             }
         }
     }
 
-    // Reviews run one after another, so a review that newer changes make moot still finishes.
-    // Racing it against the watcher in `watch` would let it be cancelled instead.
     async fn review(
         &self,
         review: &Review,
@@ -165,6 +173,33 @@ impl Session {
                 set,
                 error: format!("{e:#}"),
             },
+        }
+    }
+}
+
+/// Numbers each change set the watcher ends, reports it and queues it for review.
+async fn watch(
+    mut watcher: FolderWatcher,
+    events: &Events,
+    queue: &UnboundedSender<(usize, Vec<Change>)>,
+) {
+    let mut set = 0;
+    while let Some(batch) = watcher.next().await {
+        let changes = match batch {
+            Ok(changes) => changes,
+            Err(errors) => {
+                let errors = errors.iter().map(ToString::to_string).collect();
+                events.send(Event::WatchErrors { set, errors });
+                continue;
+            }
+        };
+        set += 1;
+        events.send(Event::Changes {
+            set,
+            changes: changes.clone(),
+        });
+        if queue.send((set, changes)).is_err() {
+            return;
         }
     }
 }
@@ -192,8 +227,10 @@ impl Events {
         if self.repeats(&event) {
             return;
         }
-        let record = Record { time: now(), event };
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        // Taken under the lock, so that the events of the watcher and of a review, which send
+        // from tasks of their own, are logged and passed on in the order of their times.
+        let record = Record { time: now(), event };
         if let Some(file) = log.as_mut() {
             let end = file.metadata().map(|metadata| metadata.len());
             let written = serde_json::to_vec(&record)
@@ -261,8 +298,8 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::Reviewer;
-    use crate::testing::{fake_model, no_answer, tool_call};
+    use crate::review::{Input, Reviewer, StepFuture};
+    use crate::testing::{Reply, fake_model, held, no_answer, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -283,6 +320,31 @@ mod tests {
                 return seen;
             }
         }
+    }
+
+    /// Reads events until the one that `describe` gives as `wanted`, and gives back what it read.
+    async fn until(events: &mut UnboundedReceiver<Record>, wanted: &str) -> Vec<Record> {
+        let mut seen = Vec::new();
+        loop {
+            let event = tokio::time::timeout(PATIENCE, events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no {wanted:?} in time"))
+                .expect("the session stopped");
+            let found = describe(&event.event) == wanted;
+            seen.push(event);
+            if found {
+                return seen;
+            }
+        }
+    }
+
+    fn reviewer(endpoint: String) -> Arc<dyn Step> {
+        let config = AiConfig {
+            url: endpoint,
+            model: "test".to_string(),
+            effort: Effort::default(),
+        };
+        Arc::new(Reviewer::new(&config, None).unwrap())
     }
 
     fn describe(event: &Event) -> String {
@@ -343,6 +405,108 @@ mod tests {
         );
     }
 
+    /// A step with a bug that makes it panic.
+    struct Panics;
+
+    impl Step for Panics {
+        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+            Box::pin(async { panic!("a step of the review panicked, as this test wants") })
+        }
+    }
+
+    #[tokio::test]
+    async fn ends_when_a_review_panics() {
+        let root = tempfile::tempdir().unwrap();
+        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![Arc::new(Panics)])
+            .start()
+            .unwrap();
+
+        // Nothing changes after the first set, so only the session's end can end the events.
+        fs::write(root.path().join("results.csv"), "a").unwrap();
+        let mut seen = Vec::new();
+        while let Some(record) = tokio::time::timeout(PATIENCE, events.recv())
+            .await
+            .expect("the session went on after its review panicked")
+        {
+            seen.push(describe(&record.event));
+        }
+
+        assert_eq!(
+            seen,
+            [r#"#1 changes [Created("results.csv")]"#, "#1 reviewing"]
+        );
+    }
+
+    #[tokio::test]
+    async fn collects_the_changes_made_during_a_review_in_sets_of_their_own() {
+        let root = tempfile::tempdir().unwrap();
+        let in_line = |explanation: &str| -> Reply {
+            let verdict = json!({ "contradicts": false, "explanation": explanation });
+            tool_call("report_verdict", verdict).into()
+        };
+        let (release, released) = std::sync::mpsc::channel();
+        let (endpoint, server) = fake_model(vec![
+            held(in_line("Results, as planned."), released),
+            in_line("New results, as planned."),
+            in_line("Nothing is left to check."),
+        ]);
+        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .start()
+            .unwrap();
+        let results = root.path().join("results.csv");
+
+        // The researcher edits the file and then deletes it while the model takes its time with
+        // the first set.
+        fs::write(&results, "a").unwrap();
+        let mut seen = until(&mut events, "#1 request 1").await;
+        fs::write(&results, "b").unwrap();
+        seen.extend(until(&mut events, r#"#2 changes [Changed("results.csv")]"#).await);
+        fs::remove_file(&results).unwrap();
+        seen.extend(until(&mut events, r#"#3 changes [Deleted("results.csv")]"#).await);
+        release.send(()).unwrap();
+        seen.extend(
+            until(
+                &mut events,
+                "#3 verdict: contradicts false (None): Nothing is left to check.",
+            )
+            .await,
+        );
+
+        assert_eq!(
+            seen.iter()
+                .map(|record| describe(&record.event))
+                .collect::<Vec<_>>(),
+            [
+                r#"#1 changes [Created("results.csv")]"#,
+                "#1 reviewing",
+                "#1 setup with DMP {}",
+                "#1 model test",
+                "#1 prompt created: results.csv",
+                "#1 request 1",
+                r#"#2 changes [Changed("results.csv")]"#,
+                r#"#3 changes [Deleted("results.csv")]"#,
+                "#1 reply 1: report_verdict",
+                "#1 verdict: contradicts false (None): Results, as planned.",
+                "#2 reviewing",
+                "#2 prompt changed: results.csv (gone since, so it can no longer be read)",
+                "#2 request 1",
+                "#2 reply 1: report_verdict",
+                "#2 verdict: contradicts false (None): New results, as planned.",
+                "#3 reviewing",
+                "#3 prompt deleted: results.csv",
+                "#3 request 1",
+                "#3 reply 1: report_verdict",
+                "#3 verdict: contradicts false (None): Nothing is left to check.",
+            ]
+        );
+        assert_eq!(server.join().unwrap().len(), 3);
+        assert!(seen.is_sorted_by_key(|record| record.time));
+    }
+
     #[tokio::test]
     async fn reviews_each_change_set_and_logs_its_numbered_events() {
         let root = tempfile::tempdir().unwrap();
@@ -361,20 +525,11 @@ mod tests {
                 }),
             ),
         ]);
-        let reviewer = Reviewer::new(
-            &AiConfig {
-                url: endpoint,
-                model: "test".to_string(),
-                effort: Effort::default(),
-            },
-            None,
-        )
-        .unwrap();
         let project = Project::new(root.path().to_path_buf());
         let log = project.run_log().unwrap().events;
         let mut events = Session::new(project)
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
             .logging_to(log.clone())
             .start()
             .unwrap();

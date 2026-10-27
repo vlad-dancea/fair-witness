@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::Receiver;
 use std::thread;
 
 use serde_json::{Value, json};
@@ -56,6 +57,8 @@ pub struct Reply {
     body: Value,
     /// Whether it keeps the connection open without answering.
     silent: bool,
+    /// Holds the reply back until it gets a message or its sender is dropped.
+    held: Option<Receiver<()>>,
 }
 
 impl From<Value> for Reply {
@@ -65,6 +68,7 @@ impl From<Value> for Reply {
             headers: String::new(),
             body,
             silent: false,
+            held: None,
         }
     }
 }
@@ -77,6 +81,15 @@ pub fn no_answer() -> Reply {
     }
 }
 
+/// `reply`, sent only once `release` gets a message or its sender is dropped, as a model
+/// that takes its time answers.
+pub fn held(reply: impl Into<Reply>, release: Receiver<()>) -> Reply {
+    Reply {
+        held: Some(release),
+        ..reply.into()
+    }
+}
+
 /// A refusal with 429 Too Many Requests and `message` in the body, as Aqueduct sends it, with a
 /// `Retry-After` header if given.
 pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
@@ -85,6 +98,7 @@ pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
         headers: retry_after.map_or(String::new(), |wait| format!("Retry-After: {wait}\r\n")),
         body: json!({ "error": { "message": message, "type": "rate_limit_error" } }),
         silent: false,
+        held: None,
     }
 }
 
@@ -110,6 +124,7 @@ pub fn redirect(location: &str) -> Reply {
         headers: format!("Location: {location}\r\n"),
         body: Value::Null,
         silent: false,
+        held: None,
     }
 }
 
@@ -125,6 +140,7 @@ pub fn failure(status: &'static str, message: &str) -> Reply {
         headers: String::new(),
         body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
         silent: false,
+        held: None,
     }
 }
 
@@ -169,6 +185,9 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             if reply.silent {
                 unanswered.push(reader);
                 continue;
+            }
+            if let Some(release) = &reply.held {
+                let _ = release.recv();
             }
             let body = reply.body.to_string();
             write!(

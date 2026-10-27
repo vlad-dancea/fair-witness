@@ -224,7 +224,7 @@ impl Reviewer {
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
         let tools = Arc::new(Tools::new(input.root, input.filter.clone())?);
-        let about_changes = prompt::about_changes(input.changes, input.found);
+        let about_changes = prompt::about_changes(input.root, input.changes, input.found);
         let definitions = definitions();
         trace(Trace::Setup {
             system: SYSTEM_PROMPT.to_string(),
