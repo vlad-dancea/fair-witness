@@ -325,12 +325,17 @@ fn save_on_signal(output: Arc<Mutex<Output>>) -> Result<()> {
             // if it had ended, and the runner does not mark its results finished.
             let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
             run::stop_scripts();
-            // Says nothing unless saving failed, since a stderr that blocks would keep the
-            // runner from exiting.
+            // Says nothing unless saving failed, and then waits at most a second for stderr,
+            // since a stderr that blocks would keep the runner from exiting.
             if output.results.status == Status::Running
                 && let Err(e) = output.end(Status::Interrupted)
             {
-                eprintln!("\nerror: {e:#}");
+                let (said, heard) = std::sync::mpsc::channel();
+                thread::spawn(move || {
+                    eprintln!("\nerror: {e:#}");
+                    let _ = said.send(());
+                });
+                let _ = heard.recv_timeout(Duration::from_secs(1));
             }
             std::process::exit(128 + signal);
         }
