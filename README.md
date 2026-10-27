@@ -88,19 +88,20 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
 - `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
-- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does.
+- `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does. It names the DMP's contributors with their e-mail addresses, so on macOS and Linux it is readable only by you.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
+- `<file>.<random>.part`: what was left when fair-witness stopped while saving `<file>`. `config.toml`, `credentials.toml`, `madmp.json` and the `.gitignore` are written under such a name first and then renamed over the old file, so a save that fails keeps the old file whole. You can delete these.
 - `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took. To keep it short, the system prompt, the DMP and the model are written once, before the first review, and again only when they change. `<start time>-diagnostics.log` has what happened outside the reviews, such as requests to DAMAP, folders that could not be read and notifications that failed. The `FAIR_WITNESS_LOG` environment variable sets how much it holds: `info` by default, `debug` for every request, `trace` for everything and `warn` for problems only. It takes the syntax of `RUST_LOG`, such as `warn,fair_witness_core=debug`. At every level, it leaves out the folder watcher's events below `warn`, one for each file event, and everything the AI client logs, because the client quotes the AI API's responses and those can repeat the API key. The events log has what the model answered.
 
 The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
 
-A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json` and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
+A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json`, the `.part` files and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ### What is ignored
 
-Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to:
+Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to them, and the AI cannot read them:
 
-- `.fair-witness/` itself
+- `.fair-witness/`, also in a subfolder, such as one that `setup` made there or that came with a colleague's folder
 - `.git`, so a commit does not count as a change
 - folders tools fill on their own: `.venv/`, `venv/`, `__pycache__/`, `node_modules/` and `.ipynb_checkpoints/`
 - folders a tool tagged as a cache with a [`CACHEDIR.TAG`](https://bford.info/cachedir/) file, as cargo tags `target/` and pytest, mypy and ruff tag their `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/`
@@ -111,7 +112,7 @@ Some files in a project are not research data, and checking them would only cost
 
 A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy and replace the API key with a new one. The DAMAP session in the copy stays valid until it expires.
 
-To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. `.fair-witness/` itself is always skipped:
+To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. A `.fair-witness/` folder is always skipped, wherever it is:
 
 ```gitignore
 # scratch output of the analysis scripts
@@ -190,7 +191,7 @@ created: data/patients.csv                                       #1
 
 Changes you make while the AI checks a set show up right away as sets of their own, and the AI checks them in turn, each verdict under its own set. A file that is gone by the time the AI gets to its set stays listed, and the AI is told that it can no longer be read.
 
-To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or into `.fair-witness/`.
+To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
 

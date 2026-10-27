@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::project::{self, Project};
 use crate::review::{self, Step, Trace, Verdict};
-use crate::watcher::{self, Change, FolderWatcher};
+use crate::watcher::{self, Change, Filter, FolderWatcher};
 
 /// Something that happened while watching, with the number of the change set it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +106,9 @@ impl Session {
     /// in progress then.
     pub fn start(self) -> Result<UnboundedReceiver<Record>> {
         let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
+        // The rules the watcher read when it started, so that the model may read exactly what
+        // the watcher reports.
+        let filter = watcher.filter().clone();
         let log = self
             .log
             .as_deref()
@@ -131,7 +134,7 @@ impl Session {
         });
         tokio::spawn(async move {
             tokio::select! {
-                () = self.review_queued(queued, &events) => {}
+                () = self.review_queued(queued, &filter, &events) => {}
                 () = events.sender.closed() => {}
             }
         });
@@ -143,11 +146,12 @@ impl Session {
     async fn review_queued(
         &self,
         mut queued: UnboundedReceiver<(usize, Vec<Change>)>,
+        filter: &Filter,
         events: &Events,
     ) {
         while let Some((set, changes)) = queued.recv().await {
             if let Some(review) = &self.review {
-                events.send(self.review(review, set, &changes, events).await);
+                events.send(self.review(review, set, &changes, filter, events).await);
             }
         }
     }
@@ -157,12 +161,13 @@ impl Session {
         review: &Review,
         set: usize,
         changes: &[Change],
+        filter: &Filter,
         events: &Events,
     ) -> Event {
         events.send(Event::Reviewing { set });
         let trace = |trace| events.send(Event::Trace { set, trace });
         let root = self.project.root();
-        match review::review(&review.steps, root, &review.dmp, changes, &trace).await {
+        match review::review(&review.steps, root, filter, &review.dmp, changes, &trace).await {
             Ok(verdict) => Event::Verdict { set, verdict },
             Err(e) => Event::ReviewFailed {
                 set,

@@ -1,4 +1,4 @@
-description = "A researcher touches one file, changes the permissions of another and writes into .fair-witness, next to creating a measurement file. Changes to times and permissions and anything in .fair-witness are left out, so the set holds only the new file."
+description = "A researcher touches one file, changes the permissions of another and writes into .fair-witness and into the .fair-witness of a subfolder, next to creating a measurement file. Changes to times and permissions and anything in a .fair-witness are left out, so the set holds only the new file."
 
 [[set]]
 changes = [{ created = "campaign-2026-10.csv" }]

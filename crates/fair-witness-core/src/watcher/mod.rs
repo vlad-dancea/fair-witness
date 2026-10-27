@@ -18,7 +18,8 @@ use notify_debouncer_full::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use filter::{CACHE_TAG, Filter};
+use filter::CACHE_TAG;
+pub use filter::Filter;
 pub use summary::{Listed, summarize};
 
 /// How long the folder stays quiet before its changes count as one change set, unless a
@@ -157,6 +158,11 @@ impl FolderWatcher {
             known,
             filter,
         })
+    }
+
+    /// What the watcher leaves out as not research data.
+    pub fn filter(&self) -> &Filter {
+        &self.filter
     }
 
     /// Applies `event`, whose batch makes the `moves`.
@@ -834,6 +840,7 @@ mod tests {
             ".DS_Store",
             "scratch/tmp.csv",
             ".fair-witness/madmp.json",
+            "data/.fair-witness/log/x",
         ] {
             let path = root.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
