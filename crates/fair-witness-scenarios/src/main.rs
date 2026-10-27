@@ -31,7 +31,7 @@ use fair_witness_core::session::Record;
 use jiff::Timestamp;
 use serde::Serialize;
 
-use report::{Accuracy, Outcome, Refused};
+use report::{Accuracy, Refused, RunOutcome};
 use run::{API_KEY, Model, Settings};
 use scenario::{Kind, Scenario};
 
@@ -156,7 +156,7 @@ struct Results {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     refused: Vec<Refused>,
     /// The runs that have ended.
-    runs: Vec<Outcome>,
+    runs: Vec<RunOutcome>,
 }
 
 /// How far the runner got. A runner that crashed or was killed leaves `running` behind.
@@ -598,7 +598,7 @@ impl Output {
 
     /// Writes the events of the run at `place`, one per line as fair-witness printed them, to
     /// the file its outcome names, and adds the outcome to `results.json`.
-    fn save(&mut self, place: usize, outcome: Outcome, records: &[Record]) -> Result<()> {
+    fn save(&mut self, place: usize, outcome: RunOutcome, records: &[Record]) -> Result<()> {
         let mut lines = String::new();
         for record in records {
             lines.push_str(&serde_json::to_string(record)?);

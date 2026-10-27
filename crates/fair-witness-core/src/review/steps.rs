@@ -21,18 +21,18 @@ pub struct Input<'a> {
 
 /// What a step makes of a change set.
 #[derive(Debug)]
-pub enum Outcome {
+pub enum StepOutcome {
     Decided(Verdict),
     /// Hands the change set on to the next step, with what this one found, if anything.
     Undecided(Option<String>),
 }
 
-pub type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<Outcome>> + Send + 'a>>;
+pub type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<StepOutcome>> + Send + 'a>>;
 
 /// One step of a review. A review runs its steps in order until one decides, and the model
 /// is the last.
 pub trait Step: Send + Sync {
-    fn check<'a>(
+    fn decide<'a>(
         &'a self,
         input: &'a Input<'a>,
         trace: &'a (dyn Fn(Trace) + Sync),
@@ -40,7 +40,7 @@ pub trait Step: Send + Sync {
 }
 
 /// Runs `steps` over `changes` until one decides.
-pub async fn review(
+pub async fn run_steps(
     steps: &[Arc<dyn Step>],
     root: &Path,
     filter: &Filter,
@@ -57,10 +57,10 @@ pub async fn review(
             changes,
             found: &found,
         };
-        match step.check(&input, trace).await? {
-            Outcome::Decided(verdict) => return Ok(verdict),
-            Outcome::Undecided(Some(finding)) => found.push(finding),
-            Outcome::Undecided(None) => {}
+        match step.decide(&input, trace).await? {
+            StepOutcome::Decided(verdict) => return Ok(verdict),
+            StepOutcome::Undecided(Some(finding)) => found.push(finding),
+            StepOutcome::Undecided(None) => {}
         }
     }
     bail!("no step of the review reached a verdict")
@@ -72,14 +72,14 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::Reviewer;
+    use crate::review::ModelStep;
     use crate::testing::{Reply, fake_model, tool_call};
 
     /// A step that gives the same outcome for every change set.
-    struct Fixed(fn() -> Outcome);
+    struct Fixed(fn() -> StepOutcome);
 
     impl Step for Fixed {
-        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+        fn decide<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
             Box::pin(async { Ok((self.0)()) })
         }
     }
@@ -90,7 +90,7 @@ mod tests {
             model: "test".to_string(),
             effort: Effort::default(),
         };
-        Arc::new(Reviewer::new(&config, None).unwrap())
+        Arc::new(ModelStep::new(&config, None).unwrap())
     }
 
     fn verdict() -> Verdict {
@@ -106,12 +106,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (endpoint, server) = fake_model(Vec::<Reply>::new());
         let steps = [
-            Arc::new(Fixed(|| Outcome::Decided(verdict()))),
+            Arc::new(Fixed(|| StepOutcome::Decided(verdict()))),
             model(endpoint),
         ];
 
         let filter = Filter::new(root.path()).unwrap();
-        let decided = review(&steps, root.path(), &filter, "{}", &[], &|_| {}).await;
+        let decided = run_steps(&steps, root.path(), &filter, "{}", &[], &|_| {}).await;
 
         assert_eq!(decided.unwrap(), verdict());
         assert!(server.join().unwrap().is_empty());
@@ -125,9 +125,9 @@ mod tests {
             json!({ "contradicts": false, "explanation": "Survey answers, as planned." }),
         )]);
         let steps = [
-            Arc::new(Fixed(|| Outcome::Undecided(None))),
+            Arc::new(Fixed(|| StepOutcome::Undecided(None))),
             Arc::new(Fixed(|| {
-                Outcome::Undecided(Some("survey.csv has a column of names.".to_string()))
+                StepOutcome::Undecided(Some("survey.csv has a column of names.".to_string()))
             })),
             model(endpoint),
         ];
@@ -135,7 +135,7 @@ mod tests {
         std::fs::write(root.path().join("survey.csv"), "name\nAnna Muster\n").unwrap();
         let changes = [Change::Created("survey.csv".into())];
         let filter = Filter::new(root.path()).unwrap();
-        review(&steps, root.path(), &filter, "{}", &changes, &|_| {})
+        run_steps(&steps, root.path(), &filter, "{}", &changes, &|_| {})
             .await
             .unwrap();
 

@@ -9,14 +9,15 @@ use genai::chat::{
     ToolChoice, ToolResponse,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
     asks_to_allow_effort, openai_compatible, refused, timed_out, too_many_requests, why_failed,
 };
-use super::steps::{Input, Outcome, Step, StepFuture};
+use super::steps::{Input, Step, StepFuture, StepOutcome};
 use super::tools::Tools;
+use super::{Trace, Verdict};
 use crate::project::{AiConfig, Effort};
 use crate::secret;
 
@@ -46,86 +47,7 @@ const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the 
 /// gateway may answer with a whole web page.
 const MAX_ANSWER: usize = 1_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Verdict {
-    pub contradicts: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dmp_field: Option<String>,
-    pub explanation: String,
-}
-
-/// What happened in a review, for the log and the debug pane. Fields without a value are left
-/// out of the log.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trace {
-    /// What the model is told before any change: the system prompt, the DMP and the tools it
-    /// may call. A session passes it on only when it differs from the last one.
-    Setup {
-        system: String,
-        dmp: String,
-        tools: Vec<String>,
-    },
-    /// The model the review asks. A session passes it on only when it differs from the last one.
-    Model(ModelChoice),
-    /// The first message of a review without the DMP, which `first_message` puts before it.
-    Prompt(String),
-    /// A later message from us, such as a reminder to hand in the verdict.
-    Sent(String),
-    /// The conversation so far goes to the model.
-    Request { turn: usize },
-    /// The API refused request `turn` with 429 Too Many Requests, so it goes again after
-    /// `wait_ms`, as retry number `retry`.
-    RateLimited {
-        turn: usize,
-        retry: usize,
-        wait_ms: u64,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
-        body: String,
-    },
-    /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
-    /// as LiteLLM does, so it goes again with the field, which later requests to the model
-    /// carry from the start.
-    EffortNotAllowed {
-        turn: usize,
-        /// What the API answered, as `Reviewer::reportable` leaves it.
-        body: String,
-    },
-    Reply {
-        turn: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        texts: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        calls: Vec<(String, Value)>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stop_reason: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_in: Option<i32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_out: Option<i32>,
-        /// How long the model took to reply.
-        elapsed_ms: u64,
-    },
-    ToolResult {
-        name: String,
-        output: String,
-        /// Whether the call failed, so that `output` is the error the model is told, which a
-        /// file can look like.
-        #[serde(default, skip_serializing_if = "is_false")]
-        failed: bool,
-    },
-    /// Why a request or the whole review failed, in one line as `Reviewer::reportable` leaves
-    /// it. A request whose reply could not be read goes again after it.
-    Failed(String),
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
-pub struct Reviewer {
+pub struct ModelStep {
     client: Client,
     choice: Mutex<ModelChoice>,
     /// The models the API asked to send `allowed_openai_params` with an effort for. LiteLLM
@@ -142,7 +64,7 @@ pub struct Reviewer {
 
 /// What the API made of a model and effort when a check asked it once, as a review would.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Checked {
+pub enum ChoiceCheck {
     Accepted,
     /// The API refused the request with a 4xx status other than 408 Request Timeout, 409
     /// Conflict and 429 Too Many Requests, and said this.
@@ -159,12 +81,12 @@ pub struct ModelChoice {
     pub effort: Effort,
 }
 
-impl Reviewer {
+impl ModelStep {
     pub fn new(config: &AiConfig, api_key: Option<String>) -> Result<Self> {
         Self::with_timeouts(config, api_key, REQUEST_TIMEOUT, REVIEW_TIMEOUT)
     }
 
-    /// A reviewer that gives up on a request after `request` and on a review after `review`.
+    /// A model step that gives up on a request after `request` and on a review after `review`.
     pub(crate) fn with_timeouts(
         config: &AiConfig,
         api_key: Option<String>,
@@ -195,11 +117,7 @@ impl Reviewer {
         *self.choice.lock().unwrap_or_else(PoisonError::into_inner) = choice;
     }
 
-    pub async fn review(
-        &self,
-        input: &Input<'_>,
-        trace: &(dyn Fn(Trace) + Sync),
-    ) -> Result<Verdict> {
+    pub async fn run(&self, input: &Input<'_>, trace: &(dyn Fn(Trace) + Sync)) -> Result<Verdict> {
         let choice = self.choice();
         let reviewed = self.converse(input, &choice, trace);
         match tokio::time::timeout(self.review_timeout, reviewed).await {
@@ -307,7 +225,7 @@ impl Reviewer {
     /// Asks the API once as a review would, with the system prompt, the tools and the effort of
     /// `choice` but at most one token of output, so that a model or effort it refuses shows when
     /// it is chosen instead of failing every review.
-    pub async fn check(&self, choice: &ModelChoice) -> Checked {
+    pub async fn try_choice(&self, choice: &ModelChoice) -> ChoiceCheck {
         let request = ChatRequest::new(vec![ChatMessage::user(CHECK_MESSAGE)])
             .with_system(SYSTEM_PROMPT)
             .with_tools(definitions());
@@ -323,7 +241,7 @@ impl Reviewer {
                 // without it can show a refusal of the model or effort. An API refuses before the
                 // model writes anything, so the second request costs tokens only when the limit
                 // was what it refused.
-                Checked::Refused(_) => checked(
+                ChoiceCheck::Refused(_) => checked(
                     self.send(&choice.model, &request, &options, 1, &|_| {})
                         .await,
                 ),
@@ -333,15 +251,15 @@ impl Reviewer {
         let checked = tokio::time::timeout(CHECK_WAIT, asked)
             .await
             .unwrap_or_else(|_| {
-                Checked::Unknown(format!(
+                ChoiceCheck::Unknown(format!(
                     "the API did not answer within {} s",
                     CHECK_WAIT.as_secs()
                 ))
             });
         match checked {
-            Checked::Accepted => Checked::Accepted,
-            Checked::Refused(message) => Checked::Refused(self.reportable(message)),
-            Checked::Unknown(why) => Checked::Unknown(self.reportable(why)),
+            ChoiceCheck::Accepted => ChoiceCheck::Accepted,
+            ChoiceCheck::Refused(message) => ChoiceCheck::Refused(self.reportable(message)),
+            ChoiceCheck::Unknown(why) => ChoiceCheck::Unknown(self.reportable(why)),
         }
     }
 
@@ -479,25 +397,25 @@ impl Reviewer {
     }
 }
 
-impl Step for Reviewer {
-    fn check<'a>(
+impl Step for ModelStep {
+    fn decide<'a>(
         &'a self,
         input: &'a Input<'a>,
         trace: &'a (dyn Fn(Trace) + Sync),
     ) -> StepFuture<'a> {
-        Box::pin(async move { Ok(Outcome::Decided(self.review(input, trace).await?)) })
+        Box::pin(async move { Ok(StepOutcome::Decided(self.run(input, trace).await?)) })
     }
 }
 
 /// What the answer to a check says of the model and effort.
-fn checked(answer: genai::Result<(ChatResponse, Duration)>) -> Checked {
+fn checked(answer: genai::Result<(ChatResponse, Duration)>) -> ChoiceCheck {
     match answer {
         // genai could not read a reply that came with a success status, which a reply cut off
         // after one token, such as in the middle of a tool call, need not be.
-        Ok(_) | Err(genai::Error::ChatResponseGeneration { .. }) => Checked::Accepted,
+        Ok(_) | Err(genai::Error::ChatResponseGeneration { .. }) => ChoiceCheck::Accepted,
         Err(e) => match refused(&e) {
-            Some(message) => Checked::Refused(message),
-            None => Checked::Unknown(why_failed(&e)),
+            Some(message) => ChoiceCheck::Refused(message),
+            None => ChoiceCheck::Unknown(why_failed(&e)),
         },
     }
 }
@@ -574,6 +492,8 @@ fn verdict_tool() -> Tool {
 mod tests {
     use std::fs;
 
+    use serde_json::Value;
+
     use super::*;
     use crate::testing::{
         EFFORT_NOT_ALLOWED, EFFORT_REFUSED, Reply, bad_request, failure, fake_model, one_token,
@@ -592,8 +512,8 @@ mod tests {
         }
     }
 
-    fn reviewer(url: String) -> Reviewer {
-        Reviewer::new(
+    fn reviewer(url: String) -> ModelStep {
+        ModelStep::new(
             &AiConfig {
                 url,
                 model: "test".to_string(),
@@ -624,7 +544,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let verdict = reviewer
-            .review(
+            .run(
                 &input(
                     root.path(),
                     r#"{"dmp": {"dataset": [{"personal_data": "no"}]}}"#,
@@ -699,7 +619,7 @@ mod tests {
         let mut bodies = Vec::new();
         for effort in ["default", "ultra"] {
             let (url, server) = fake_model(vec![verdict()]);
-            let reviewer = Reviewer::new(
+            let reviewer = ModelStep::new(
                 &AiConfig {
                     url,
                     model: "qwen3-max".to_string(),
@@ -709,7 +629,7 @@ mod tests {
             )
             .unwrap();
             reviewer
-                .review(&input(root.path(), "{}", &[]), &|_| {})
+                .run(&input(root.path(), "{}", &[]), &|_| {})
                 .await
                 .unwrap();
             let mut body = server.join().unwrap().remove(0).1;
@@ -732,7 +652,7 @@ mod tests {
     async fn sends_newer_gpt_models_only_the_fields_any_compatible_api_takes() {
         let root = tempfile::tempdir().unwrap();
         let (url, server) = fake_model(vec![verdict()]);
-        let reviewer = Reviewer::new(
+        let reviewer = ModelStep::new(
             &AiConfig {
                 url,
                 model: "gpt-5.6".to_string(),
@@ -743,7 +663,7 @@ mod tests {
         .unwrap();
 
         reviewer
-            .review(&input(root.path(), "{}", &[]), &|_| {})
+            .run(&input(root.path(), "{}", &[]), &|_| {})
             .await
             .unwrap();
 
@@ -777,7 +697,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         reviewer(endpoint)
-            .review(
+            .run(
                 &input(root.path(), "{}", &[Change::Created("log.txt".into())]),
                 &|trace| traces.lock().unwrap().push(trace),
             )
@@ -829,7 +749,7 @@ mod tests {
             .collect();
 
         reviewer(endpoint)
-            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .run(&input(root.path(), "{}", &changes), &|_| {})
             .await
             .unwrap();
 
@@ -865,7 +785,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         reviewer(endpoint)
-            .review(&input(root.path(), "{}", &changes), &|trace| {
+            .run(&input(root.path(), "{}", &changes), &|trace| {
                 traces.lock().unwrap().push(trace);
             })
             .await
@@ -914,7 +834,7 @@ mod tests {
         let traces = Mutex::new(Vec::new());
         let asked = Instant::now();
         let verdict = reviewer(endpoint)
-            .review(
+            .run(
                 &input(root.path(), "{}", &[Change::Created("log.txt".into())]),
                 &|trace| traces.lock().unwrap().push(trace),
             )
@@ -966,13 +886,13 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let verdict = reviewer
-            .review(&input(root.path(), "{}", &changes), &|trace| {
+            .run(&input(root.path(), "{}", &changes), &|trace| {
                 traces.lock().unwrap().push(trace)
             })
             .await
             .unwrap();
         reviewer
-            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .run(&input(root.path(), "{}", &changes), &|_| {})
             .await
             .unwrap();
         reviewer.set_choice(ModelChoice {
@@ -980,7 +900,7 @@ mod tests {
             effort: "low".parse().unwrap(),
         });
         reviewer
-            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .run(&input(root.path(), "{}", &changes), &|_| {})
             .await
             .unwrap();
         reviewer.set_choice(ModelChoice {
@@ -988,7 +908,7 @@ mod tests {
             effort: Effort::default(),
         });
         reviewer
-            .review(&input(root.path(), "{}", &changes), &|_| {})
+            .run(&input(root.path(), "{}", &changes), &|_| {})
             .await
             .unwrap();
 
@@ -1057,7 +977,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let e = reviewer(endpoint)
-            .review(&input(root.path(), "{}", &[]), &|trace| {
+            .run(&input(root.path(), "{}", &[]), &|trace| {
                 traces.lock().unwrap().push(trace)
             })
             .await
@@ -1086,7 +1006,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let e = reviewer(endpoint)
-            .review(&input(root.path(), "{}", &[]), &|trace| {
+            .run(&input(root.path(), "{}", &[]), &|trace| {
                 traces.lock().unwrap().push(trace)
             })
             .await
@@ -1122,7 +1042,7 @@ mod tests {
         )]);
 
         let e = reviewer(endpoint)
-            .review(&input(root.path(), "{}", &[]), &|_| {})
+            .run(&input(root.path(), "{}", &[]), &|_| {})
             .await
             .unwrap_err();
 
@@ -1153,7 +1073,7 @@ mod tests {
             let (endpoint, server) = fake_model(replies);
             let traces = Mutex::new(Vec::new());
             let e = reviewer(endpoint)
-                .review(
+                .run(
                     &input(
                         root.path(),
                         r#"{"dmp": {"title": "Consent study"}}"#,
@@ -1192,7 +1112,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let verdict = reviewer(endpoint)
-            .review(
+            .run(
                 &input(root.path(), "{}", &[Change::Created("data/a.csv".into())]),
                 &|trace| traces.lock().unwrap().push(trace),
             )
@@ -1227,7 +1147,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (endpoint, server) =
             fake_model(vec![too_many_requests(Some("2"), "Rate limit exceeded.")]);
-        let reviewer = Reviewer::with_timeouts(
+        let reviewer = ModelStep::with_timeouts(
             &AiConfig {
                 url: endpoint,
                 model: "test".to_string(),
@@ -1241,7 +1161,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         let e = reviewer
-            .review(&input(root.path(), "{}", &[]), &|trace| {
+            .run(&input(root.path(), "{}", &[]), &|trace| {
                 traces.lock().unwrap().push(trace)
             })
             .await
@@ -1268,7 +1188,7 @@ mod tests {
 
         let traces = Mutex::new(Vec::new());
         reviewer(endpoint)
-            .review(&input(root.path(), "{}", &[]), &|trace| {
+            .run(&input(root.path(), "{}", &[]), &|trace| {
                 traces.lock().unwrap().push(trace)
             })
             .await
@@ -1304,9 +1224,9 @@ mod tests {
         let (url, server) = fake_model(vec![one_token()]);
         let reviewer = reviewer(url);
 
-        let checked = reviewer.check(&reviewer.choice()).await;
+        let checked = reviewer.try_choice(&reviewer.choice()).await;
 
-        assert_eq!(checked, Checked::Accepted);
+        assert_eq!(checked, ChoiceCheck::Accepted);
         let requests = server.join().unwrap();
         let body = &requests[0].1;
         assert_eq!(body["messages"][0]["content"], SYSTEM_PROMPT);
@@ -1340,13 +1260,13 @@ mod tests {
         let reviewer = reviewer(url);
 
         let checked = reviewer
-            .check(&ModelChoice {
+            .try_choice(&ModelChoice {
                 model: "test".to_string(),
                 effort: "high".parse().unwrap(),
             })
             .await;
 
-        assert_eq!(checked, Checked::Refused(EFFORT_REFUSED.to_string()));
+        assert_eq!(checked, ChoiceCheck::Refused(EFFORT_REFUSED.to_string()));
         let requests = server.join().unwrap();
         let sent: Vec<(&Value, &Value, &Value)> = requests
             .iter()
@@ -1377,11 +1297,11 @@ mod tests {
         let (url, _server) = fake_model(vec![bad_request(refused), bad_request(refused)]);
         let reviewer = reviewer(url);
 
-        let checked = reviewer.check(&reviewer.choice()).await;
+        let checked = reviewer.try_choice(&reviewer.choice()).await;
 
         assert_eq!(
             checked,
-            Checked::Refused(
+            ChoiceCheck::Refused(
                 r"Incorrect API key provided: [API key], or {\u0022key\u0022: \u0022[API key]\u0022}."
                     .to_string()
             )
@@ -1399,9 +1319,9 @@ mod tests {
         ]);
         let reviewer = reviewer(url);
 
-        let checked = reviewer.check(&reviewer.choice()).await;
+        let checked = reviewer.try_choice(&reviewer.choice()).await;
 
-        assert_eq!(checked, Checked::Accepted);
+        assert_eq!(checked, ChoiceCheck::Accepted);
         let requests = server.join().unwrap();
         let limits: Vec<&Value> = requests
             .iter()
@@ -1419,7 +1339,7 @@ mod tests {
             .unwrap()
             .port();
         let unreachable = reviewer(format!("http://127.0.0.1:{port}/v1"));
-        let mut answers = vec![unreachable.check(&unreachable.choice()).await];
+        let mut answers = vec![unreachable.try_choice(&unreachable.choice()).await];
         for reply in [
             failure("408 Request Timeout", "The gateway timed out."),
             failure("409 Conflict", "No replica is free."),
@@ -1428,11 +1348,11 @@ mod tests {
         ] {
             let (url, _server) = fake_model(vec![reply]);
             let reviewer = reviewer(url);
-            answers.push(reviewer.check(&reviewer.choice()).await);
+            answers.push(reviewer.try_choice(&reviewer.choice()).await);
         }
 
         assert!(
-            matches!(&answers[0], Checked::Unknown(why) if why.starts_with(&format!(
+            matches!(&answers[0], ChoiceCheck::Unknown(why) if why.starts_with(&format!(
                 "could not reach the API: error sending request for url \
                  (http://127.0.0.1:{port}/v1/chat/completions)"
             ))),
@@ -1442,14 +1362,16 @@ mod tests {
         assert_eq!(
             answers[1..],
             [
-                Checked::Unknown(
+                ChoiceCheck::Unknown(
                     "the API answered 408 Request Timeout: The gateway timed out.".to_string()
                 ),
-                Checked::Unknown("the API answered 409 Conflict: No replica is free.".to_string()),
-                Checked::Unknown(
+                ChoiceCheck::Unknown(
+                    "the API answered 409 Conflict: No replica is free.".to_string()
+                ),
+                ChoiceCheck::Unknown(
                     "the API answered 429 Too Many Requests: Rate limit exceeded.".to_string()
                 ),
-                Checked::Unknown(
+                ChoiceCheck::Unknown(
                     "the API answered 503 Service Unavailable: The model is loading.".to_string()
                 ),
             ]
