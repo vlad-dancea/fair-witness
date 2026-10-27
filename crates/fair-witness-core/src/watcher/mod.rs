@@ -422,14 +422,16 @@ impl FolderWatcher {
             if !self.known.contains(&path) {
                 continue;
             }
+            // Nothing is reported for a path in a folder tagged as a cache since, as in `forget`.
+            let before = changes.len();
             if fs::symlink_metadata(&path).is_err_and(|e| missing(&e)) {
                 self.forget(&path, &mut changes);
             } else if doubt.replaced && !self.filter.skips(&path, false) {
                 changes.push(Change::Changed(path));
-            } else {
-                continue;
             }
-            times.push(doubt.at);
+            if changes.len() > before {
+                times.push(doubt.at);
+            }
         }
         let (first, last) = (*times.iter().min()?, *times.iter().max()?);
         let changes = changes
@@ -1383,6 +1385,28 @@ mod tests {
         ]);
 
         assert_eq!(changes, []);
+    }
+
+    #[tokio::test]
+    async fn reports_nothing_for_a_file_gone_from_a_folder_tagged_since() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "target/app", "x");
+        write(root, "target/build.log", "x");
+        let mut watcher = watch(root);
+
+        // A file goes without an event of its own, and the folder is tagged before the tag's
+        // event is handed on, so a create beside them is all the watcher gets.
+        fs::remove_file(root.join("target/build.log")).unwrap();
+        write(root, "target/CACHEDIR.TAG", CARGO_TAG);
+        write(root, "target/app.d", "x");
+        let create = notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+            .add_path(root.join("target/app.d"));
+        let changes = watcher.handle(vec![DebouncedEvent::new(create, Instant::now())]);
+        let later = watcher.settle(Instant::now() + DEBOUNCE * 2);
+
+        assert_eq!(changes, []);
+        assert_eq!(later.map(|found| found.changes), None);
     }
 
     #[tokio::test]
