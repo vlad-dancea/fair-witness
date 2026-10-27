@@ -274,7 +274,7 @@ impl Reviewer {
                         Err(e) => Err(format!("invalid verdict: {e}")),
                     }
                 } else {
-                    // The tools read the disk, which can block, such as on a FIFO.
+                    // The tools read the disk, which can block, such as on a network drive.
                     let tools = tools.clone();
                     let (name, arguments) = (call.fn_name.clone(), call.fn_arguments.clone());
                     tokio::task::spawn_blocking(move || tools.call(&name, &arguments))

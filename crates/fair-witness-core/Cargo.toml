@@ -21,6 +21,10 @@ toml = "1.1.6"
 tracing = "0.1.44"
 url = "2.5.8"
 
+[target.'cfg(unix)'.dependencies]
+# Opens the model's paths one name at a time, which the standard library cannot.
+rustix = { version = "1.1.5", features = ["fs"] }
+
 [features]
 # The fake model in `testing`, for the tests of crates that use this one.
 testing = []
