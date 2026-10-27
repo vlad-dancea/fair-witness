@@ -40,10 +40,7 @@ With --headless, each event is printed as one line of JSON on stdout, and messag
 go to stderr. It never asks for a DAMAP login, and stops when stdin closes, on Ctrl+C or on \
 SIGTERM.
 
-Exit codes: 0 when stopped, 1 when it fails while watching, 2 when it cannot start.
-
-Set FAIR_WITNESS_DEBOUNCE_MS to change how long the folder has to be quiet before its changes \
-count as one set (default 2000)."
+Exit codes: 0 when stopped, 1 when it fails while watching, 2 when it cannot start."
     )]
     Run(run::Args),
     #[command(about = "End the DAMAP session and forget the saved login for this folder")]

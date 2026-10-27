@@ -268,10 +268,10 @@ fn witness_command(
         // `check` asked the API about each real model and effort before all their runs, and the
         // fake model answers only what the scenario expects.
         .arg("--skip-model-check")
-        .env(
-            "FAIR_WITNESS_DEBOUNCE_MS",
-            settings.debounce_for(scenario).as_millis().to_string(),
-        );
+        .arg(format!(
+            "--debounce-ms={}",
+            settings.debounce_for(scenario).as_millis()
+        ));
     match (model, &settings.api_key) {
         (Model::Real(_), Some(key)) => command.env(API_KEY, key),
         // A key meant for a real model must not go to the fake one.
@@ -678,7 +678,8 @@ mod tests {
                 "--model",
                 "large",
                 "--effort=high",
-                "--skip-model-check"
+                "--skip-model-check",
+                "--debounce-ms=500"
             ]
         );
         assert_eq!(api_key(&witness), Some(Some("sk-secret")));
