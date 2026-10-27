@@ -17,6 +17,9 @@ const MADMP_FILE: &str = "madmp.json";
 /// ownCloud and Nextcloud clients skip these by default, so a client told to skip
 /// `credentials.toml` never uploads half of it either.
 const PARTIAL_SUFFIX: &str = ".part";
+/// Where earlier versions wrote `madmp.json` first. A crash could leave it behind, with the
+/// contributors' e-mail addresses, so it stays out of git.
+const OLD_MADMP_PARTIAL_FILE: &str = "madmp.json.partial";
 const LOG_DIR: &str = "log";
 const IGNORE_TEMPLATE: &str = "\
 # Ignore paths with .gitignore syntax, relative to the project folder.
@@ -305,7 +308,11 @@ fn write_gitignore(dir: &Path) -> Result<()> {
     write_file(
         dir,
         ".gitignore",
-        format!("{CREDENTIALS_FILE}\n{MADMP_FILE}\n*{PARTIAL_SUFFIX}\n{LOG_DIR}/\n").as_bytes(),
+        format!(
+            "{CREDENTIALS_FILE}\n{MADMP_FILE}\n*{PARTIAL_SUFFIX}\n{OLD_MADMP_PARTIAL_FILE}\n\
+             {LOG_DIR}/\n"
+        )
+        .as_bytes(),
         false,
     )
 }
@@ -397,6 +404,11 @@ fn replace_file(
         .persist(&path)
         .map_err(|e| e.error)
         .with_context(context)?;
+    // Until the folder is synced too, a power cut can undo the rename and bring back a refresh
+    // token that the login server has already replaced. The new file is in place by now, so a
+    // folder that cannot be synced, as on some network drives, is not worth failing the save for.
+    #[cfg(unix)]
+    let _ = File::open(dir).and_then(|dir| dir.sync_all());
     Ok(())
 }
 
@@ -611,7 +623,7 @@ mod tests {
         assert_eq!(credentials.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             fs::read_to_string(dir.join(".gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\n*.part\nlog/\n"
+            "credentials.toml\nmadmp.json\n*.part\nmadmp.json.partial\nlog/\n"
         );
         #[cfg(unix)]
         for name in [CREDENTIALS_FILE, MADMP_FILE] {
