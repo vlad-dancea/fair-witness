@@ -115,10 +115,19 @@ enum Source {
     Damap(i64),
 }
 
-/// The DMP to check changes against, and the header line that names it.
+/// The model to check with and its API key.
+struct Ai {
+    config: AiConfig,
+    api_key: Option<String>,
+    /// Why the saved API key is not sent, when it is for another API than the saved one.
+    key_not_sent: Option<String>,
+}
+
+/// The DMP to check changes against, the header line that names it and a warning about it.
 struct Dmp {
     json: String,
     status: String,
+    warning: Option<String>,
 }
 
 pub async fn run(here: &Path, args: Args) -> Result<(), Failure> {
@@ -153,8 +162,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     if config.is_none() && args.dmp_file.is_none() {
         bail!(NOT_SET_UP);
     }
-    let mut status = Vec::new();
-    let ai = ai(&project, config.as_ref(), &args, &mut status)?;
+    let ai = ai(&project, config.as_ref(), &args)?;
     let saved_dmp = config.as_ref().and_then(|config| config.damap.dmp_id);
 
     let mut session = Session::new(project.clone());
@@ -166,6 +174,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     }
     tracing::info!("watching {}", project.root().display());
     session = session.debounce(Duration::from_millis(args.debounce_ms));
+    let mut status = Vec::new();
     let mut settings = None;
     let dmp_given = args.dmp_file.is_some() || args.dmp.is_some();
     let source = match (args.dmp_file, args.dmp.or(saved_dmp)) {
@@ -173,42 +182,49 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         (None, id) => id.map(Source::Damap),
     };
     match (source, ai) {
-        (Some(source), Some((ai, api_key))) => {
-            let reviewer = Arc::new(ModelStep::new(&ai, api_key.clone())?);
+        (Some(source), Some(ai)) => {
+            let reviewer = Arc::new(ModelStep::new(&ai.config, ai.api_key.clone())?);
             // Before the DMP, so that a refusal comes before any DAMAP login.
-            if !args.skip_model_check
-                && let Err(e) = check_model(&reviewer, &ai.url, &mut status).await
-            {
-                // The status holds only why the saved API key is not sent, if it is not, which
-                // is why an API that needs one refuses.
-                let why = status
-                    .iter()
-                    .map(|line| format!("\n{line}"))
-                    .collect::<String>();
-                bail!("{e:#}{why}");
-            }
+            let unchecked = if args.skip_model_check {
+                None
+            } else {
+                check_model(&reviewer, &ai.config.url).await.map_err(|e| {
+                    // Why the saved API key is not sent, if it is not, is why an API that needs
+                    // one refuses.
+                    let why = ai.key_not_sent.as_ref().map(|line| format!("\n{line}"));
+                    anyhow!("{e:#}{}", why.unwrap_or_default())
+                })?
+            };
             let dmp = match source {
                 Source::File(file) => read_dmp(&file)?,
-                Source::Damap(id) => download_dmp(&project, id, args.headless, &mut status).await?,
+                Source::Damap(id) => download_dmp(&project, id, args.headless).await?,
             };
             session = session.reviewing(dmp.json, vec![reviewer.clone()]);
             tracing::info!("{}", dmp.status);
-            status.insert(0, dmp.status);
+            status.push(dmp.status);
+            status.extend(ai.key_not_sent);
+            for warning in [unchecked, dmp.warning].into_iter().flatten() {
+                // The screen draws each header line as one, and DAMAP's errors span several.
+                status.extend(warning.lines().map(str::to_string));
+            }
             settings = Some(ModelSettings {
                 project: project.clone(),
                 reviewer,
-                url: ai.url,
-                api_key,
+                url: ai.config.url,
+                api_key: ai.api_key,
             });
         }
         (Some(_), None) if dmp_given => bail!(
             "no AI model to check with; choose one with `fair-witness setup`, \
              or pass --ai-url and --model"
         ),
-        (None, Some(_)) => status.push(
-            "No DMP chosen, so changes are not checked; choose one with `fair-witness setup`."
-                .to_string(),
-        ),
+        (None, Some(ai)) => {
+            status.extend(ai.key_not_sent);
+            status.push(
+                "No DMP chosen, so changes are not checked; choose one with `fair-witness setup`."
+                    .to_string(),
+            );
+        }
         _ => status.push("Changes are not checked.".to_string()),
     }
 
@@ -223,12 +239,12 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
 
 /// Asks the API once whether it takes the model and effort, so that a choice it refuses stops
 /// `run` at once instead of failing every review. When the check cannot tell, `run` still starts,
-/// with a warning in `status`.
-async fn check_model(reviewer: &ModelStep, url: &str, status: &mut Vec<String>) -> Result<()> {
+/// with the warning it gives back.
+async fn check_model(reviewer: &ModelStep, url: &str) -> Result<Option<String>> {
     let choice = reviewer.choice();
     let described = choice.to_string();
     match reviewer.try_choice(&choice).await {
-        ChoiceCheck::Accepted => Ok(()),
+        ChoiceCheck::Accepted => Ok(None),
         ChoiceCheck::Refused(message) => bail!(
             "{url} refuses {described}: {message}\nPass another model with --model or another \
              effort with --effort, or choose a model with `fair-witness setup`"
@@ -239,20 +255,13 @@ async fn check_model(reviewer: &ModelStep, url: &str, status: &mut Vec<String>) 
                  takes it: {why}"
             );
             tracing::warn!("{warning}");
-            status.extend(warning.lines().map(str::to_string));
-            Ok(())
+            Ok(Some(warning))
         }
     }
 }
 
-/// The model to check with and its API key, from the flags and what `setup` saved. Why the saved
-/// key is not sent, when it is for another API than the saved one, goes into `status`.
-fn ai(
-    project: &Project,
-    config: Option<&Config>,
-    args: &Args,
-    status: &mut Vec<String>,
-) -> Result<Option<(AiConfig, Option<String>)>> {
+/// The model to check with and its API key, from the flags and what `setup` saved.
+fn ai(project: &Project, config: Option<&Config>, args: &Args) -> Result<Option<Ai>> {
     let saved = config.and_then(|config| config.ai.as_ref());
     let url = match &args.ai_url {
         Some(url) => web_url(url)?,
@@ -276,6 +285,7 @@ fn ai(
             .map(|saved| saved.effort.clone())
             .unwrap_or_default(),
     };
+    let mut key_not_sent = None;
     let api_key = match (&args.api_key, project.credentials()?.ai) {
         (Some(key), _) => Some(key.clone()),
         (None, Some(saved)) => match saved.for_api(&url) {
@@ -283,7 +293,7 @@ fn ai(
             // As after an edit of config.toml, or a `setup` that saved the key but not the API
             // it is for.
             None if saved_choice.is_some() => {
-                status.push(format!(
+                key_not_sent = Some(format!(
                     "The saved API key is for {}, so none is sent to {url}. To save one for \
                      {url}, run `fair-witness setup`.",
                     saved.url
@@ -303,7 +313,11 @@ fn ai(
         bail!("{}, {without_key}", api_key_unencrypted(&url));
     }
     let choice = ModelChoice { model, effort };
-    Ok(Some((AiConfig { url, choice }, api_key)))
+    Ok(Some(Ai {
+        config: AiConfig { url, choice },
+        api_key,
+        key_not_sent,
+    }))
 }
 
 fn read_dmp(path: &Path) -> Result<Dmp> {
@@ -314,17 +328,13 @@ fn read_dmp(path: &Path) -> Result<Dmp> {
     Ok(Dmp {
         json: serde_json::to_string_pretty(&json)?,
         status: format!("Comparing changes with the DMP in {}.", path.display()),
+        warning: None,
     })
 }
 
-/// Downloads DMP `id` and keeps a copy of the one chosen in `setup`, which stands in for it
-/// when DAMAP cannot be reached. The warning that it does goes into `status`.
-async fn download_dmp(
-    project: &Project,
-    id: i64,
-    headless: bool,
-    status: &mut Vec<String>,
-) -> Result<Dmp> {
+/// Downloads DMP `id` and keeps a copy of the one chosen in `setup`, which stands in for it,
+/// with a warning, when DAMAP cannot be reached.
+async fn download_dmp(project: &Project, id: i64, headless: bool) -> Result<Dmp> {
     let config = project.config()?.context(NOT_SET_UP)?.damap;
     let downloaded = async {
         let (damap, instance) = damap::reach(&config.frontend_url).await?;
@@ -346,16 +356,17 @@ async fn download_dmp(
     };
     match downloaded.await {
         Ok((name, madmp)) => {
+            let mut warning = None;
             // The DMP is downloaded, so a copy that cannot be saved only costs the fallback.
             if config.dmp_id == Some(id)
                 && let Err(e) = project.save_madmp(&config.frontend_url, id, &madmp)
             {
-                let warning = format!("Warning: could not save a copy of the DMP: {e:#}");
-                status.extend(warning.lines().map(str::to_string));
+                warning = Some(format!("Warning: could not save a copy of the DMP: {e:#}"));
             }
             Ok(Dmp {
                 json: serde_json::to_string_pretty(&madmp)?,
                 status: format!("Comparing changes with project #{id} - {name}."),
+                warning,
             })
         }
         Err(e) => {
@@ -367,11 +378,10 @@ async fn download_dmp(
                  saved before: {e:#}"
             );
             tracing::warn!("{warning}");
-            // The screen draws each header line as one, and DAMAP's errors span several.
-            status.extend(warning.lines().map(str::to_string));
             Ok(Dmp {
                 json,
                 status: format!("Comparing changes with the saved copy of project #{id}."),
+                warning: Some(warning),
             })
         }
     }
@@ -809,10 +819,8 @@ mod tests {
             }),
         };
         let effort = |args: Args| {
-            let (ai, _) = ai(&project, Some(&config), &args, &mut Vec::new())
-                .unwrap()
-                .unwrap();
-            ai.choice.effort.name().to_string()
+            let ai = ai(&project, Some(&config), &args).unwrap().unwrap();
+            ai.config.choice.effort.name().to_string()
         };
 
         assert_eq!(
@@ -859,14 +867,12 @@ mod tests {
                 ai_url: Some(given.to_string()),
                 ..args(None, None)
             };
-            let (ai, api_key) = ai(&project, Some(&config), &args, &mut Vec::new())
-                .unwrap()
-                .unwrap();
+            let ai = ai(&project, Some(&config), &args).unwrap().unwrap();
             (
-                ai.url,
-                ai.choice.model,
-                ai.choice.effort.name().to_string(),
-                api_key,
+                ai.config.url,
+                ai.config.choice.model,
+                ai.config.choice.effort.name().to_string(),
+                ai.api_key,
             )
         };
         let saved = (
