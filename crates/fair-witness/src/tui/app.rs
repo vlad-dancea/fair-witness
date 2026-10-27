@@ -26,6 +26,9 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const RESULT_ARROW: &str = " ↳ ";
 /// An explicit green: terminal themes often remap the ANSI one.
 const IN_LINE_GREEN: Color = Color::Rgb(0x6c, 0xc6, 0x44);
+/// Oldest lines go first once the changes pane holds this many, so a long session does not
+/// slow down drawing.
+const MAX_LINES: usize = 1_000;
 
 pub enum Update {
     Session(Record),
@@ -123,6 +126,10 @@ pub struct Screen {
     root: PathBuf,
     status: Vec<String>,
     log: Vec<LogLine>,
+    /// Whether the oldest lines of `log` were dropped.
+    dropped: bool,
+    /// The rows of `log` at a width, and the row each line starts at, kept until `log` changes.
+    rendered: Option<(usize, Vec<Line<'static>>, Vec<usize>)>,
     lines_from_bottom: usize,
     debug: DebugLog,
     debug_lines_from_bottom: usize,
@@ -141,6 +148,8 @@ impl Screen {
             root: root.to_path_buf(),
             status,
             log: Vec::new(),
+            dropped: false,
+            rendered: None,
             lines_from_bottom: 0,
             debug: DebugLog::default(),
             debug_lines_from_bottom: 0,
@@ -192,7 +201,7 @@ impl Screen {
                     None => {
                         watching = false;
                         self.reviewing = None;
-                        self.log.push(Line::from("Stopped watching.".red()).into());
+                        self.push_line(Line::from("Stopped watching.".red()).into());
                     }
                 },
                 _ = tick.tick() => {}
@@ -252,15 +261,16 @@ impl Screen {
             return;
         };
         let described = model_panel::describe(&choice);
+        let saved = settings.apply(choice);
         if let Some(why) = unchecked {
             let warning = format!(
                 "Could not check {described}, so the reviews will show whether the API takes it: \
                  {why}"
             );
-            self.log.push(Line::from(warning.yellow()).into());
+            self.push_line(Line::from(warning.yellow()).into());
         }
-        if let Err(e) = settings.apply(choice) {
-            self.log.push(
+        if let Err(e) = saved {
+            self.push_line(
                 Line::from(
                     format!("Checking with {described} until you quit; could not save it: {e:#}")
                         .yellow(),
@@ -293,7 +303,7 @@ impl Screen {
             Update::Session(record) => record,
             Update::NotifyFailed(e) => {
                 let failed = format!("  could not show a notification: {e}");
-                self.log.push(Line::from(failed.yellow()).into());
+                self.push_line(Line::from(failed.yellow()).into());
                 return;
             }
         };
@@ -301,7 +311,7 @@ impl Screen {
         match record.event {
             Event::Changes { set, changes } => {
                 for listed in watcher::summarize(&changes) {
-                    self.log.push(LogLine {
+                    self.push_line(LogLine {
                         line: change_line(&listed),
                         set: Some(set),
                         verdict: false,
@@ -335,46 +345,74 @@ impl Screen {
             }
             Event::WatchErrors { errors, .. } => {
                 for e in errors {
-                    self.log
-                        .push(Line::from(format!("watch error: {e}").red()).into());
+                    self.push_line(Line::from(format!("watch error: {e}").red()).into());
                 }
             }
             Event::LogStopped { error } => {
                 let stopped = format!("stopped writing the log in .fair-witness/log/: {error}");
-                self.log.push(Line::from(stopped.red()).into());
+                self.push_line(Line::from(stopped.red()).into());
             }
         }
+    }
+
+    fn push_line(&mut self, line: LogLine) {
+        self.make_room();
+        self.log.push(line);
     }
 
     /// Puts the verdict of `set` under the set's changes, above the sets that came while it
     /// was reviewed.
     fn add_verdict(&mut self, set: usize, spans: Vec<Span<'static>>) {
         self.reviewing = None;
+        self.make_room();
         let end = self.end_of(set);
         self.log.insert(end, LogLine::verdict(set, spans));
     }
 
-    /// Where the lines of change set `set` end in the log, or the end of the log when it has
-    /// none.
+    /// Drops the oldest line when the log is full, before a line is added, so that the new one
+    /// stays even when it goes first, as the verdict of a set whose lines were dropped does.
+    fn make_room(&mut self) {
+        if self.log.len() >= MAX_LINES {
+            self.log.drain(..=self.log.len() - MAX_LINES);
+            self.dropped = true;
+        }
+        self.rendered = None;
+    }
+
+    /// Where the lines of change set `set` end in the log. A set without lines, such as one
+    /// whose lines were dropped, ends where the next set starts, or at the end of the log.
     fn end_of(&self, set: usize) -> usize {
-        self.log
-            .iter()
-            .rposition(|line| line.set == Some(set))
-            .map_or(self.log.len(), |last| last + 1)
+        match self.log.iter().rposition(|line| line.set == Some(set)) {
+            Some(last) => last + 1,
+            None => self
+                .log
+                .iter()
+                .position(|line| line.set.is_some_and(|other| other > set))
+                .unwrap_or(self.log.len()),
+        }
     }
 
     /// The rows of the changes pane at `width`, with a spinner under the set being reviewed.
-    fn log_rows(&self, width: usize) -> Vec<Line<'static>> {
-        let reviewed = self.reviewing.map(|(set, _)| self.end_of(set));
-        let mut rows = Vec::new();
-        let mut spinner_row = 0;
-        for (index, line) in self.log.iter().enumerate() {
-            rows.extend(line.render(width));
-            if reviewed == Some(index + 1) {
-                spinner_row = rows.len();
+    fn log_rows(&mut self, width: usize) -> Vec<Line<'static>> {
+        if self.rendered.as_ref().is_none_or(|(w, ..)| *w != width) {
+            let mut rows = Vec::new();
+            if self.dropped {
+                rows.push(Line::from(
+                    "Older lines are no longer shown.".add_modifier(Modifier::DIM),
+                ));
             }
+            let mut starts = Vec::new();
+            for line in &self.log {
+                starts.push(rows.len());
+                rows.extend(line.render(width));
+            }
+            starts.push(rows.len());
+            self.rendered = Some((width, rows, starts));
         }
-        if let Some((_, since)) = self.reviewing {
+        let (_, rows, starts) = self.rendered.as_ref().expect("rendered above");
+        let mut rows = rows.clone();
+        if let Some((set, since)) = self.reviewing {
+            let spinner_row = starts[self.end_of(set)];
             let elapsed = since.elapsed();
             let frame = SPINNER[(elapsed.as_millis() / TICK.as_millis()) as usize % SPINNER.len()];
             let spinner = Line::from(vec![
@@ -897,6 +935,65 @@ mod tests {
                 "changed: results.csv                  #2",
                 "spinner",
                 "deleted: results.csv                  #3",
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_the_latest_lines_and_the_verdicts_of_sets_it_dropped() {
+        let mut screen = screen();
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
+        let apply = |screen: &mut Screen, event| {
+            screen.apply(Update::Session(Record { time, event }));
+        };
+        // The first rows, with the spinner's frame and seconds left out.
+        let top = |screen: &mut Screen| -> Vec<String> {
+            screen.log_rows(40)[..3]
+                .iter()
+                .map(text)
+                .map(|row| match row.contains("checking against the DMP") {
+                    true => "spinner".to_string(),
+                    false => row,
+                })
+                .collect()
+        };
+        let created = |set: usize| Event::Changes {
+            set,
+            changes: vec![Change::Created(format!("{set}.csv").into())],
+        };
+        apply(&mut screen, created(1));
+        apply(&mut screen, Event::Reviewing { set: 1 });
+        for set in 2..=MAX_LINES + 1 {
+            apply(&mut screen, created(set));
+        }
+        let reviewing = top(&mut screen);
+        apply(
+            &mut screen,
+            Event::Verdict {
+                set: 1,
+                verdict: Verdict {
+                    contradicts: false,
+                    dmp_field: None,
+                    explanation: "Results.".to_string(),
+                },
+            },
+        );
+
+        assert_eq!(screen.log.len(), MAX_LINES);
+        assert_eq!(
+            reviewing,
+            [
+                "Older lines are no longer shown.",
+                "spinner",
+                "created: 2.csv                        #2",
+            ]
+        );
+        assert_eq!(
+            top(&mut screen),
+            [
+                "Older lines are no longer shown.",
+                " ↳ in line with the DMP: Results.",
+                "created: 3.csv                        #3",
             ]
         );
     }
