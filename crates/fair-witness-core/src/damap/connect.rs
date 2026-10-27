@@ -72,7 +72,7 @@ pub fn save_session(
     })?;
     let mut credentials = project.credentials()?;
     // A login without a refresh token leaves none saved, since the one from before may be for
-    // another DAMAP.
+    // another DAMAP. A refresh always brings one, the old one when the login server issues none.
     credentials.damap = tokens.refresh_token.map(|refresh_token| DamapLogin {
         url: damap.url().to_string(),
         login_server: Some(oidc.issuer().to_string()),
