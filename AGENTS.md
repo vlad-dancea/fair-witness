@@ -184,8 +184,9 @@ disagrees with it.
   dialoguer or notify-rust (`cargo tree -p fair-witness-core` shows none of them) and never
   prompts or prints, so the review logic can run without the interface.
 - The model reads research data only through `review/tools.rs`, which keeps every path inside
-  the project folder and away from `.fair-witness/`, where the login and API key are stored. A
-  new tool keeps both limits and gets a test like the existing ones.
+  the project folder and away from what the watcher's `Filter` skips, such as `.fair-witness/`,
+  where the login and API key are stored. A new tool keeps both limits and gets a test like the
+  existing ones.
 - Errors use anyhow with context. A message the user sees says what went wrong and, when there
   is one, the command that fixes it.
 - Clippy's warnings fail the check. Fix the cause rather than adding an `allow`, and when an

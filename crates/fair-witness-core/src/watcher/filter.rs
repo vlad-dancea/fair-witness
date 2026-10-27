@@ -53,7 +53,9 @@ pub const CACHE_TAG: &str = "CACHEDIR.TAG";
 /// have the name does not hide a folder.
 const CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
-/// Decides which paths in the project folder are not research data.
+/// Decides which paths in the project folder are not research data, for the watcher and for
+/// the model's tools alike.
+#[derive(Clone)]
 pub struct Filter {
     root: PathBuf,
     rules: Gitignore,
@@ -85,9 +87,12 @@ impl Filter {
     }
 
     pub fn skips(&self, path: &Path, is_dir: bool) -> bool {
-        let Ok(relative) = path.strip_prefix(&self.root) else {
-            return false;
-        };
+        path.strip_prefix(&self.root)
+            .is_ok_and(|relative| self.skips_relative(relative, is_dir))
+    }
+
+    /// Like `skips`, for a path relative to the project folder.
+    pub fn skips_relative(&self, relative: &Path, is_dir: bool) -> bool {
         if relative.as_os_str().is_empty() {
             return false;
         }

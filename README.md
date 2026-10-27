@@ -98,7 +98,7 @@ A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json` an
 
 ### What is ignored
 
-Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to:
+Some files in a project are not research data, and checking them would only cost time and tokens. `run` does not report changes to them, and the AI cannot read them:
 
 - `.fair-witness/`, also in a subfolder, such as one that `setup` made there or that came with a colleague's folder
 - `.git`, so a commit does not count as a change
@@ -188,7 +188,7 @@ created: data/patients.csv                                       #1
 - **`contradicts the DMP`** (red): the AI names the DMP field it clashes with and explains why. You also get a **desktop notification**, so you see it even when the terminal is in the background.
 - **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it.
 
-To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or into `.fair-witness/`.
+To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
 
