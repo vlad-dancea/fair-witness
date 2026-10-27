@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -11,24 +12,40 @@ pub fn first_message(dmp: &str, about_changes: &str) -> String {
     format!("The DMP:\n```json\n{dmp}\n```\n\n{about_changes}")
 }
 
-/// What changed in the folder under `root` and what earlier steps of the review found, which
-/// the first message gives after the DMP.
-pub fn about_changes(root: &Path, changes: &[Change], found: &[String]) -> String {
+/// The paths of `changes` under `root` that are gone by the time of the review. A set waits for
+/// the reviews before it, and its files can go meanwhile.
+pub fn gone<'a>(root: &Path, changes: &'a [Change]) -> HashSet<&'a Path> {
+    changes
+        .iter()
+        .filter(|change| change.kind() != Kind::Deleted)
+        .map(Change::path)
+        .filter(|path| fs::symlink_metadata(root.join(path)).is_err())
+        .collect()
+}
+
+/// `change` as the model is told it, in the first message or by `list_changes`.
+pub fn line(change: &Change, gone: &HashSet<&Path>) -> String {
+    let line = format!(
+        "{}: {}",
+        change.kind().verb(),
+        Listed::One(change).describe()
+    );
+    if change.kind() != Kind::Deleted && gone.contains(change.path()) {
+        format!("{line} (gone since, so it can no longer be read)")
+    } else {
+        line
+    }
+}
+
+/// What changed, with the paths that are `gone`, and what earlier steps of the review found,
+/// which the first message gives after the DMP.
+pub fn about_changes(changes: &[Change], gone: &HashSet<&Path>, found: &[String]) -> String {
     let listed = watcher::summarize(changes);
     let lines: Vec<String> = listed
         .iter()
-        .map(|listed| {
-            let line = format!("{}: {}", listed.kind().verb(), listed.describe());
-            match listed {
-                // A set waits for the reviews before it, and its files can go meanwhile.
-                Listed::One(change)
-                    if change.kind() != Kind::Deleted
-                        && fs::symlink_metadata(root.join(change.path())).is_err() =>
-                {
-                    format!("{line} (gone since, so it can no longer be read)")
-                }
-                _ => line,
-            }
+        .map(|listed| match listed {
+            Listed::One(change) => line(change, gone),
+            many => format!("{}: {}", many.kind().verb(), many.describe()),
         })
         .collect();
     let mut prompt = format!("What changed in the project folder:\n{}", lines.join("\n"));
@@ -37,8 +54,8 @@ pub fn about_changes(root: &Path, changes: &[Change], found: &[String]) -> Strin
         .any(|listed| matches!(listed, Listed::Many { .. }))
     {
         prompt.push_str(
-            "\n\nThere were too many changes to name each path. list_dir shows the \
-             paths that still exist; deleted ones are gone.",
+            "\n\nThere were too many changes to name each path here. list_changes names \
+             each of them, a page at a time.",
         );
     }
     if !found.is_empty() {
@@ -73,7 +90,7 @@ mod tests {
         ];
 
         assert_eq!(
-            about_changes(root.path(), &changes, &[]),
+            about_changes(&changes, &gone(root.path(), &changes), &[]),
             "What changed in the project folder:\n\
              created: two\\nlines.csv\n\
              renamed: raw\\r.csv -> data/\\u{1b}[2Jclean.csv\n\
@@ -97,7 +114,7 @@ mod tests {
         ];
 
         assert_eq!(
-            about_changes(root.path(), &changes, &[]),
+            about_changes(&changes, &gone(root.path(), &changes), &[]),
             "What changed in the project folder:\n\
              changed: notes.txt\n\
              changed: results.csv (gone since, so it can no longer be read)\n\
