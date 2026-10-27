@@ -2,11 +2,13 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use reqwest::header::RETRY_AFTER;
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::net::{self, in_the_clear};
+use crate::review::retry_after;
 
 /// What logging in to DAMAP asks of the person in front of the screen.
 pub trait Prompts {
@@ -90,6 +92,8 @@ struct Refusal {
     endpoint: String,
     status: StatusCode,
     error: Option<OAuthError>,
+    /// How long it asks to wait before the next request, if it says.
+    retry_after: Option<Duration>,
 }
 
 impl Refusal {
@@ -154,6 +158,11 @@ async fn post(
     if status.is_success() {
         return Ok(Ok(response));
     }
+    let header = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok());
+    let retry_after = retry_after(header, "");
     // A proxy in front of the login server answers with a page of its own, such as for 502 Bad
     // Gateway, which holds no OAuth error.
     let error = response
@@ -165,6 +174,7 @@ async fn post(
         endpoint: endpoint.to_string(),
         status,
         error,
+        retry_after,
     }))
 }
 
@@ -319,7 +329,11 @@ impl Oidc {
             ("device_code", authorization.device_code.as_str()),
         ];
         // A poll after the code expired would only be told so, and hide why the last one failed.
-        while Instant::now() + wait < deadline {
+        // A wait too long to add to the time ends after it too.
+        while Instant::now()
+            .checked_add(wait)
+            .is_some_and(|next| next < deadline)
+        {
             tokio::time::sleep(wait).await;
             // The person may have confirmed the code already, so a request that fails on the way
             // or may pass must not end the login while the code is valid.
@@ -330,21 +344,22 @@ impl Oidc {
                     interval += Duration::from_secs(5);
                     None
                 }
-                Ok(Err(e)) if e.may_pass() => Some(anyhow!("{e}")),
+                Ok(Err(e)) if e.may_pass() => Some((anyhow!("{e}"), e.retry_after)),
                 Ok(Err(e)) => bail!("login failed: {e}"),
-                Err(e) => Some(e),
+                Err(e) => Some((e, None)),
             };
             wait = match &failure {
-                Some(e) => {
+                Some((e, asked)) => {
                     prompts.notice(&format!("Checking the login failed, trying again: {e:#}"));
-                    after_failure(wait, interval)
+                    // A rate limiter that says how long to wait gets at least that long.
+                    after_failure(wait, interval).max(asked.unwrap_or_default())
                 }
                 None => interval,
             };
         }
         let timed_out = "login timed out; please try again";
         Err(match failure {
-            Some(e) => e.context(timed_out),
+            Some((e, _)) => e.context(timed_out),
             None => anyhow!(timed_out),
         })
     }
@@ -392,7 +407,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::testing::{answer, fake_model, hang_up, page};
+    use crate::testing::{answer, fake_model, hang_up, page, too_many_requests};
 
     /// Keeps the links it is asked to open in the browser, and the notices.
     #[derive(Default)]
@@ -629,6 +644,37 @@ mod tests {
             ))
         );
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn waits_as_long_as_a_rate_limiter_asks() {
+        // Each wait outlasts the code, so no poll follows the refused one.
+        for wait in ["120", "18446744073709551616"] {
+            let (url, server) = fake_model(vec![
+                answer(
+                    "200 OK",
+                    json!({
+                        "device_code": "secret",
+                        "user_code": "ABCD-EFGH",
+                        "verification_uri": "https://login.example.org/device",
+                        "expires_in": 5,
+                        "interval": 0,
+                    }),
+                ),
+                too_many_requests(Some(wait), "Too many requests"),
+            ]);
+
+            let failed = login_server(&url).login(&Browser::default()).await;
+
+            assert_eq!(
+                failed.err().map(|e| format!("{e:#}")),
+                Some(format!(
+                    "login timed out; please try again: {url}/token answered 429 Too Many Requests"
+                )),
+                "Retry-After: {wait}"
+            );
+            assert_eq!(server.join().unwrap().len(), 2, "Retry-After: {wait}");
+        }
     }
 
     #[tokio::test]
