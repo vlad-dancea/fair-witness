@@ -263,7 +263,14 @@ fn run() -> Result<bool> {
         refused,
         runs: Vec::new(),
     };
-    let output = Arc::new(Mutex::new(Output::create(&args.output, results)?));
+    let output = Output::create(&args.output, results)?;
+    if !fake {
+        eprintln!(
+            "The results go to {} as the runs end.",
+            output.folder.display()
+        );
+    }
+    let output = Arc::new(Mutex::new(output));
     #[cfg(unix)]
     save_on_signal(Arc::clone(&output))?;
     run_all(&jobs, &settings, at_once, !fake, &output)?;
@@ -318,14 +325,12 @@ fn save_on_signal(output: Arc<Mutex<Output>>) -> Result<()> {
             // if it had ended, and the runner does not mark its results finished.
             let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
             run::stop_scripts();
-            if output.results.status == Status::Running {
-                match output.end(Status::Interrupted) {
-                    Ok(()) => eprintln!(
-                        "\nInterrupted. The runs that ended are in {}",
-                        output.folder.display()
-                    ),
-                    Err(e) => eprintln!("\nerror: {e:#}"),
-                }
+            // Says nothing unless saving failed, since a stderr that blocks would keep the
+            // runner from exiting.
+            if output.results.status == Status::Running
+                && let Err(e) = output.end(Status::Interrupted)
+            {
+                eprintln!("\nerror: {e:#}");
             }
             std::process::exit(128 + signal);
         }
@@ -487,13 +492,9 @@ fn run_all(
                     };
                     let ran = run::run(job.scenario, job.model, settings);
                     let outcome = report::judge(job.scenario, job.model, job.repeat, &ran);
-                    // Said before the output is locked, so that a signal does not wait while
-                    // stderr blocks.
-                    if progress {
-                        eprintln!(
-                            "{}/{} {}: {} of {} right{}",
-                            ended.fetch_add(1, Ordering::Relaxed) + 1,
-                            jobs.len(),
+                    let how = progress.then(|| {
+                        format!(
+                            "{}: {} of {} right{}",
                             tables::label(&outcome, false, false),
                             outcome.sets_correct(),
                             outcome.sets.len(),
@@ -502,8 +503,8 @@ fn run_all(
                             } else {
                                 ", with problems"
                             }
-                        );
-                    }
+                        )
+                    });
                     let saved = output.lock().unwrap_or_else(PoisonError::into_inner).save(
                         job.place,
                         outcome,
@@ -512,6 +513,12 @@ fn run_all(
                     if let Err(e) = saved {
                         next.store(jobs.len(), Ordering::Relaxed);
                         failed.lock().unwrap().get_or_insert(e);
+                    }
+                    // Said once the run is saved and the output unlocked, so that a stderr that
+                    // blocks neither keeps the run from being saved nor holds up a signal.
+                    if let Some(how) = how {
+                        let ended = ended.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!("{ended}/{} {how}", jobs.len());
                     }
                 }
             });
