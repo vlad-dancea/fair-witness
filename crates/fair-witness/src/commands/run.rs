@@ -487,7 +487,9 @@ async fn write_events(
         }
     });
     tokio::pin!(stopped, writer);
-    let mut watch_stopped = None;
+    // Why the session ended on its own, which fails the run also when a stop comes after it, as
+    // from a script that closes stdin once it reads the reason.
+    let mut ended = None;
     loop {
         tokio::select! {
             () = &mut stopped => break,
@@ -498,13 +500,11 @@ async fn write_events(
             behind = fallen_behind(&busy_since, read_within) => return Err(behind),
             record = records.recv() => {
                 let Some(record) = record else {
-                    // The last lines say why, so they go out before the error, as on a stop.
-                    drop(lines);
-                    let _ = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await;
-                    bail!(watch_stopped.unwrap_or_else(|| "stopped watching".to_string()));
+                    ended.get_or_insert_with(|| "stopped watching".to_string());
+                    break;
                 };
                 if let Event::WatchStopped { error } = &record.event {
-                    watch_stopped = Some(error.clone());
+                    ended = Some(error.clone());
                 }
                 let mut line = serde_json::to_string(&record)?;
                 line.push('\n');
@@ -523,7 +523,12 @@ async fn write_events(
     // since a reader that stopped reading never lets it.
     drop(lines);
     // A writer that fails now has lost its reader, which wants no more lines.
-    match tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await {
+    let written = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await;
+    // The last lines say why the session ended, so they went out before the error.
+    if let Some(ended) = ended {
+        bail!(ended);
+    }
+    match written {
         Ok(_) => Ok(()),
         Err(_) => bail!("stopped before writing every event, since stdout was not read"),
     }
@@ -686,6 +691,35 @@ mod tests {
             .await
             .expect("still writing");
         written.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fails_with_why_watching_stopped_also_when_stopped_after_it() {
+        let (sender, records) = mpsc::unbounded_channel();
+        let time = "2026-10-27T13:00:00Z".parse().unwrap();
+        let error = "the project folder was moved or deleted".to_string();
+        sender
+            .send(Record {
+                time,
+                event: Event::WatchStopped { error },
+            })
+            .unwrap();
+
+        // The session has not closed its channel yet when the stop comes.
+        let written = write_events(
+            records,
+            io::sink(),
+            tokio::time::sleep(Duration::from_millis(100)),
+            Duration::from_secs(60),
+        );
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "the project folder was moved or deleted"
+        );
     }
 
     #[tokio::test]

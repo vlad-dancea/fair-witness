@@ -348,7 +348,11 @@ impl Screen {
                     self.push_line(Line::from(format!("watch error: {e}").red()).into());
                 }
             }
-            Event::WatchStopped { error } => self.log.push(Line::from(error.red()).into()),
+            // The review in progress was dropped, and the spinner goes with it.
+            Event::WatchStopped { error } => {
+                self.reviewing = None;
+                self.push_line(Line::from(error.red()).into());
+            }
             Event::LogStopped { error } => {
                 let stopped = format!("stopped writing the log in .fair-witness/log/: {error}");
                 self.push_line(Line::from(stopped.red()).into());
@@ -995,6 +999,36 @@ mod tests {
                 "Older lines are no longer shown.",
                 " ↳ in line with the DMP: Results.",
                 "created: 3.csv                        #3",
+            ]
+        );
+    }
+
+    #[test]
+    fn says_why_watching_stopped_instead_of_the_review_it_dropped() {
+        let mut screen = screen();
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
+        let apply = |screen: &mut Screen, event| {
+            screen.apply(Update::Session(Record { time, event }));
+        };
+        apply(
+            &mut screen,
+            Event::Changes {
+                set: 1,
+                changes: vec![Change::Created("results.csv".into())],
+            },
+        );
+        apply(&mut screen, Event::Reviewing { set: 1 });
+        // Drawn once before the event, so that the rows it shows are rendered already.
+        screen.log_rows(40);
+
+        let error = "the project folder was moved or deleted".to_string();
+        apply(&mut screen, Event::WatchStopped { error });
+
+        assert_eq!(
+            screen.log_rows(40).iter().map(text).collect::<Vec<_>>(),
+            [
+                "created: results.csv                  #1",
+                "the project folder was moved or deleted",
             ]
         );
     }
