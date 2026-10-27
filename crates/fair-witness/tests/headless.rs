@@ -488,7 +488,8 @@ fn exits_with_1_when_the_project_folder_is_deleted() {
         ai: None,
     };
     Project::new(root.clone()).save_config(&config).unwrap();
-    let mut run = Run::start(&root, &[]);
+    // Started outside the project folder, since Windows deletes no folder a process is in.
+    let mut run = Run::start(parent.path(), &["--project", "project"]);
     run.stderr_until("Changes are not checked.");
 
     std::fs::remove_dir_all(&root).unwrap();
