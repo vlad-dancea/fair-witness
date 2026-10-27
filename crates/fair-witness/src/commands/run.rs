@@ -1,4 +1,3 @@
-use std::env::{self, VarError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,6 +11,7 @@ use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
 use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
 use fair_witness_core::session::{Event, Record, Session};
+use fair_witness_core::watcher::DEBOUNCE;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::Instant;
@@ -22,7 +22,6 @@ use crate::terminal::TerminalPrompts;
 use crate::tui::app::{Screen, Update};
 use crate::{diagnostics, notifications};
 
-const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";
 const STOP_WRITING_WITHIN: Duration = Duration::from_secs(2);
 /// How many lines may wait for a reader that is behind, so that one that stops reading does not
 /// fill the memory.
@@ -87,6 +86,15 @@ pub struct Args {
     effort: Option<Effort>,
     #[arg(
         long,
+        env = "FAIR_WITNESS_DEBOUNCE_MS",
+        value_name = "MS",
+        default_value_t = DEBOUNCE.as_millis() as u64,
+        help = "How long the folder has to be quiet before its changes count as one set, in \
+                milliseconds"
+    )]
+    debounce_ms: u64,
+    #[arg(
+        long,
         hide = true,
         help = "Do not check the model and effort before watching, for a caller that checked them \
                 already, such as the scenario runner"
@@ -145,7 +153,6 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     if config.is_none() && args.dmp_file.is_none() {
         bail!(NOT_SET_UP);
     }
-    let debounce = debounce()?;
     let mut status = Vec::new();
     let ai = ai(&project, config.as_ref(), &args, &mut status)?;
     let saved_dmp = config.as_ref().and_then(|config| config.damap.dmp_id);
@@ -158,9 +165,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         session = session.logging_to(log.events);
     }
     tracing::info!("watching {}", project.root().display());
-    if let Some(debounce) = debounce {
-        session = session.debounce(debounce);
-    }
+    session = session.debounce(Duration::from_millis(args.debounce_ms));
     let mut settings = None;
     let dmp_given = args.dmp_file.is_some() || args.dmp.is_some();
     let source = match (args.dmp_file, args.dmp.or(saved_dmp)) {
@@ -237,17 +242,6 @@ async fn check_model(reviewer: &ModelStep, url: &str, status: &mut Vec<String>) 
             status.extend(warning.lines().map(str::to_string));
             Ok(())
         }
-    }
-}
-
-fn debounce() -> Result<Option<Duration>> {
-    match env::var(DEBOUNCE_VARIABLE) {
-        Ok(ms) => match ms.trim().parse() {
-            Ok(ms) => Ok(Some(Duration::from_millis(ms))),
-            Err(_) => bail!("{DEBOUNCE_VARIABLE} must be a number of milliseconds, not {ms:?}"),
-        },
-        Err(VarError::NotPresent) => Ok(None),
-        Err(e) => Err(e).context(DEBOUNCE_VARIABLE),
     }
 }
 
@@ -792,6 +786,7 @@ mod tests {
             api_key: None,
             model: model.map(str::to_string),
             effort: effort.map(|name| name.parse().unwrap()),
+            debounce_ms: DEBOUNCE.as_millis() as u64,
             skip_model_check: false,
         }
     }
