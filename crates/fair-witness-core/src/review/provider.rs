@@ -290,7 +290,7 @@ const HTTP_DATES: [&str; 3] = [
 
 /// Reads the wait from the `Retry-After` header, in seconds or as a date, or else from a body
 /// such as Aqueduct's, whose message ends in "(Retry after 4s)".
-fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
+pub(crate) fn retry_after(header: Option<&str>, body: &str) -> Option<Duration> {
     let from_header = header.and_then(|value| {
         let value = value.trim();
         if let Ok(seconds) = value.parse() {
