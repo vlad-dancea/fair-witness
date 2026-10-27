@@ -420,7 +420,7 @@ impl FolderWatcher {
             let held = self.held.as_ref();
             let received = match held.map(|held| (held.complete(self.debounce), held.next_look)) {
                 // `timeout_at` polls the channel first, so batches that waited there while the
-                // session was busy still go into sets by when their events happened.
+                // watcher handled others still go into sets by when their events happened.
                 Some((complete, next_look)) => {
                     let until = complete.min(next_look).into();
                     match tokio::time::timeout_at(until, self.events.recv()).await {
@@ -905,7 +905,7 @@ mod tests {
         write(root, "target/build.log", "x");
         let mut watcher = watch(root);
 
-        // The session reads a batch only after the review before it, so the
+        // The debouncer hands events on a debounce after they happen, so the
         // tag can be written before the batch with earlier events is read.
         fs::remove_file(root.join("target/build.log")).unwrap();
         write(root, "target/CACHEDIR.TAG", CARGO_TAG);
@@ -1291,7 +1291,7 @@ mod tests {
         watcher.events = events;
         fs::write(root.join("results.csv"), "x").unwrap();
 
-        // The session handles both batches late, once the file holds the second write. That
+        // The watcher handles both batches late, once the file holds the second write. That
         // write came after a pause longer than the debounce, though less than a debounce after
         // the debouncer handed the create on, so it starts a set of its own.
         let start = Instant::now() - DEBOUNCE * 10;
@@ -1980,7 +1980,7 @@ mod tests {
         let (batches, events) = mpsc::unbounded_channel();
         watcher.events = events;
 
-        // The session reads batches only between reviews, so these all waited for it.
+        // These all waited in the channel, as while the watcher handles a large batch.
         let start = Instant::now() - DEBOUNCE * 10;
         let event = |kind, name: &str, quarters: u32| {
             let event = notify::Event::new(kind).add_path(root.join(name));
