@@ -18,7 +18,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -42,6 +42,11 @@ const MOST_JOBS: usize = 8;
 const REPEATS: usize = 5;
 /// TU Wien's AI gateway, which `fair-witness setup` offers first too.
 const AQUEDUCT: &str = "https://aqueduct.ai.datalab.tuwien.ac.at/v1";
+
+/// How many runs that ended before a signal stopped the scripts are not saved yet, which the
+/// signal waits for.
+static UNSAVED: Mutex<usize> = Mutex::new(0);
+static SAVED: Condvar = Condvar::new();
 
 #[derive(Parser)]
 #[command(
@@ -273,7 +278,14 @@ fn run() -> Result<bool> {
     let output = Arc::new(Mutex::new(output));
     #[cfg(unix)]
     save_on_signal(Arc::clone(&output))?;
-    run_all(&jobs, &settings, at_once, !fake, &output)?;
+    let ran = run_all(&jobs, &settings, at_once, !fake, &output);
+    if run::stopping() {
+        // The signal ends the runner, with its exit code, once the runs that ended are saved.
+        loop {
+            thread::park();
+        }
+    }
+    ran?;
     let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
     output.end(Status::Finished)?;
     // Taken, so that a signal does not wait for the report while stdout blocks. Nothing
@@ -322,8 +334,16 @@ fn save_on_signal(output: Arc<Mutex<Output>>) -> Result<()> {
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
             // Before anything waits for the output, so that a disk that stalls cannot keep the
-            // scripts running. The runs they were in are not saved, as `run::stopping` says.
+            // scripts running. The runs they were in are not saved, as `count_unsaved` says.
             run::stop_scripts();
+            drop(
+                SAVED
+                    .wait_while(
+                        UNSAVED.lock().unwrap_or_else(PoisonError::into_inner),
+                        |unsaved| *unsaved > 0,
+                    )
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
             // Held until the exit, so that the runner does not mark its results finished.
             let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
             // Says nothing unless saving failed, and then waits at most a second for stderr,
@@ -497,8 +517,7 @@ fn run_all(
                         return;
                     };
                     let ran = run::run(job.scenario, job.model, settings);
-                    // A signal stopped the scripts, so the run may not have ended on its own.
-                    if run::stopping() {
+                    if !count_unsaved() {
                         return;
                     }
                     let outcome = report::judge(job.scenario, job.model, job.repeat, &ran);
@@ -520,6 +539,8 @@ fn run_all(
                         outcome,
                         &ran.records,
                     );
+                    *UNSAVED.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                    SAVED.notify_all();
                     if let Err(e) = saved {
                         next.store(jobs.len(), Ordering::Relaxed);
                         failed.lock().unwrap().get_or_insert(e);
@@ -538,6 +559,17 @@ fn run_all(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Counts a run that has just ended as unsaved, unless a signal has stopped the scripts, which
+/// may have cut it short.
+fn count_unsaved() -> bool {
+    let mut unsaved = UNSAVED.lock().unwrap_or_else(PoisonError::into_inner);
+    if run::stopping() {
+        return false;
+    }
+    *unsaved += 1;
+    true
 }
 
 /// The folder of a run of the runner, whose `results.json` holds the runs that have ended at
