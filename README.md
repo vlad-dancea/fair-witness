@@ -110,7 +110,7 @@ Some files in a project are not research data, and checking them would only cost
 - downloads that are not finished yet, from browsers (`*.part`, `*.crdownload`) and from the ownCloud and Nextcloud clients (`.*.~*`), so a download shows up only under its final name
 - the journal and logs of the ownCloud and Nextcloud clients (`.sync_*.db*`, `._sync_*.db*`, `.csync_journal.db*`, `.owncloudsync.log*`, `.nextcloudsync.log*`, `.nextcloudpermissions.log*`)
 
-A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy, replace the API key with a new one and run `fair-witness logout` to end the DAMAP session in the copy. Then run `setup` to log in again.
+A folder synced with ownCloud or Nextcloud works like any other. The client uploads `.fair-witness/` with everything else, though, so anyone the folder is shared with would get your DAMAP session and API key from `credentials.toml`. Before you run `setup` in a synced folder, add `credentials.toml` to the client's ignored files. Ignoring it later leaves the uploaded copy on the server, so delete that copy, replace the API key with a new one and run `fair-witness logout`, which ends the DAMAP session in the copy as long as you have not logged in again since the client last uploaded it. Then run `setup` to log in again.
 
 To ignore more, edit `.fair-witness/ignore`, which `setup` creates with a commented template. It uses the same syntax as a `.gitignore`. Paths are relative to the project root, and a line starting with `!` undoes a rule, including a built-in one or a folder's cache tag. A `.fair-witness/` folder is always skipped, wherever it is:
 
@@ -242,7 +242,7 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 | `fair-witness run --headless` | Print what happens as lines of JSON instead of drawing the screen, see [Running from a script](#running-from-a-script) |
 | `fair-witness logout` | End the DAMAP session and forget the saved login for this folder |
 
-`logout` asks DAMAP's login server to end the session before it forgets the login, so a copy of `credentials.toml` stops working too. When DAMAP or its login server cannot be reached, or refuses, `logout` forgets the login anyway and says that the session stays valid until it expires.
+`logout` asks DAMAP's login server to end the saved session before it forgets the login, so a copy of `credentials.toml` with the same login stops working too. A copy from before a later login holds another session, which `logout` cannot end. When DAMAP or its login server cannot be reached, or refuses, `logout` forgets the login anyway and says that the session stays valid until it expires.
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
