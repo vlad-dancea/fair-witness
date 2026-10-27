@@ -46,7 +46,7 @@ Set FAIR_WITNESS_DEBOUNCE_MS to change how long the folder has to be quiet befor
 count as one set (default 2000)."
     )]
     Run(run::Args),
-    #[command(about = "Forget the saved login for this folder")]
+    #[command(about = "End the DAMAP session and forget the saved login for this folder")]
     Logout,
 }
 
@@ -91,6 +91,6 @@ pub async fn run() -> Result<(), Failure> {
             Ok(setup::run(project.as_ref(), Project::new(here), url, model).await?)
         }
         Command::Run(args) => run::run(&here, args).await,
-        Command::Logout => Ok(logout::run(Project::find(&here).as_ref())?),
+        Command::Logout => Ok(logout::run(Project::find(&here).as_ref()).await?),
     }
 }
