@@ -171,33 +171,79 @@ pub fn refused(error: &genai::Error) -> Option<String> {
     (status.is_client_error() && !busy.contains(status)).then(|| message(body))
 }
 
-/// Why a request failed, without the request and the full answer that genai's errors hold.
+/// Why a request failed, in one line and without the request and the full answer that genai's
+/// errors hold.
 pub fn why_failed(error: &genai::Error) -> String {
-    let genai::Error::WebModelCall { webc_error, .. } = error else {
-        return error.to_string().lines().collect::<Vec<_>>().join(" ");
-    };
-    match webc_error {
-        webc::Error::ResponseFailedStatus { status, body, .. } => match message(body) {
-            message if message.is_empty() => format!("the API answered {status}"),
-            message => format!("the API answered {status}: {message}"),
-        },
-        webc::Error::ResponseFailedNotJson { content_type, .. } => {
-            format!("the API answered with {content_type} instead of JSON")
-        }
-        webc::Error::ResponseFailedInvalidJson { cause, .. } => {
-            format!("the API answered with invalid JSON: {cause}")
-        }
-        webc::Error::Reqwest(e) => {
-            let mut why = format!("could not reach the API: {e}");
-            let mut source = std::error::Error::source(e);
-            while let Some(cause) = source {
-                why.push_str(&format!(": {cause}"));
-                source = cause.source();
+    let why = match error {
+        genai::Error::WebModelCall { webc_error, .. } => match webc_error {
+            webc::Error::ResponseFailedStatus { status, body, .. } => match message(body) {
+                message if message.is_empty() => format!("the API answered {status}"),
+                message => format!("the API answered {status}: {message}"),
+            },
+            webc::Error::ResponseFailedNotJson { content_type, .. } => {
+                format!("the API answered with {content_type} instead of JSON")
             }
-            why
+            webc::Error::ResponseFailedInvalidJson { cause, .. } => {
+                format!("the API answered with invalid JSON: {cause}")
+            }
+            webc::Error::Reqwest(e) => {
+                let mut why = format!("could not reach the API: {e}");
+                let mut source = std::error::Error::source(e);
+                while let Some(cause) = source {
+                    why.push_str(&format!(": {cause}"));
+                    source = cause.source();
+                }
+                why
+            }
+            e => e.to_string(),
+        },
+        // genai's own text quotes the whole request, with the DMP and every tool result.
+        genai::Error::ChatResponseGeneration { cause, .. } => {
+            format!(
+                "the model's reply could not be read: {}",
+                without_values(cause)
+            )
         }
         e => e.to_string(),
+    };
+    why.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `cause` with the values it quotes left out, since the reply that serde could not read may
+/// repeat what the model read in files. serde quotes a string in double quotes, escaped as Rust
+/// does, and a number, a character or a field name in backticks.
+fn without_values(cause: &str) -> String {
+    let mut kept = String::with_capacity(cause.len());
+    let mut rest = cause;
+    while let Some(at) = rest.find(['"', '`']) {
+        let (before, quoted) = rest.split_at(at);
+        kept.push_str(before);
+        let quote = &quoted[..1];
+        let Some(len) = quoted_len(quoted) else {
+            // Without its end, the rest may all be the value.
+            kept.push_str(&format!("{quote}…"));
+            return kept;
+        };
+        kept.push_str(&format!("{quote}…{quote}"));
+        rest = &quoted[len..];
     }
+    kept.push_str(rest);
+    kept
+}
+
+/// How long the quoted value at the start of `text` is, with its quotes.
+fn quoted_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    let (_, quote) = chars.next()?;
+    while let Some((at, c)) = chars.next() {
+        if c == quote {
+            return Some(at + c.len_utf8());
+        }
+        if c == '\\' && quote == '"' {
+            chars.next();
+        }
+    }
+    None
 }
 
 /// The message in an error body, which OpenAI and the APIs like it give as
