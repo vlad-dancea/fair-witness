@@ -2,7 +2,7 @@ use anyhow::Result;
 use dialoguer::{Confirm, Input, Password};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{Damap, InstanceConfig, discover, reach, save_session};
-use fair_witness_core::net::{same_url, web_url};
+use fair_witness_core::net::web_url;
 use fair_witness_core::project::Project;
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
@@ -39,22 +39,19 @@ pub async fn setup(
     };
     let (damap, instance) = match url {
         Some(url) => reach(&web_url(&url)?).await?,
-        None => ask_for_damap(previous_url.clone()).await?,
+        None => ask_for_damap(previous_url).await?,
     };
     let oidc = discover(&damap, &instance, &TerminalPrompts).await?;
-    let refresh_token = match around {
-        Some(around) => around.credentials()?.refresh_token,
+    let login = match around {
+        Some(around) => around.credentials()?.damap,
         None => None,
     };
-    let session = match refresh_token {
-        Some(token)
-            if previous_url
-                .as_deref()
-                .is_some_and(|url| same_url(url, damap.url())) =>
-        {
-            oidc.refresh(&token).await.ok()
-        }
-        _ => None,
+    let session = match login
+        .as_ref()
+        .and_then(|login| login.refresh_token_for(damap.url(), oidc.issuer()).ok())
+    {
+        Some(token) => oidc.refresh(token).await.ok(),
+        None => None,
     };
     let tokens = match session {
         Some(tokens)
@@ -68,7 +65,7 @@ pub async fn setup(
         _ => oidc.login(&TerminalPrompts).await?,
     };
     project.create()?;
-    save_session(project, damap, tokens, &TerminalPrompts)
+    save_session(project, damap, &oidc, tokens, &TerminalPrompts)
 }
 
 async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
