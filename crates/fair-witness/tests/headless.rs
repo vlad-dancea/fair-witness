@@ -478,6 +478,35 @@ fn exits_with_2_when_it_cannot_start() {
 }
 
 #[test]
+fn exits_with_1_when_the_project_folder_is_deleted() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let config = Config {
+        damap: DamapConfig {
+            frontend_url: "https://damap.example.org".to_string(),
+            dmp_id: None,
+        },
+        ai: None,
+    };
+    Project::new(root.clone()).save_config(&config).unwrap();
+    // Started outside the project folder, since Windows deletes no folder a process is in.
+    let mut run = Run::start(parent.path(), &["--project", "project"]);
+    run.stderr_until("Changes are not checked.");
+
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert_eq!(run.exit_code(), Some(1));
+    let error = "the project folder was moved or deleted, so it is no longer watched; start \
+                 `fair-witness run` again in its new place";
+    assert_eq!(run.stderr_until("error:"), [format!("error: {error}")]);
+    // The reason is also the last event, so a script reading only stdout learns it.
+    let last: Value = serde_json::from_str(&run.stdout.iter().last().unwrap()).unwrap();
+    assert_eq!(last["event"], "watch_stopped");
+    assert_eq!(last["error"], error);
+}
+
+#[test]
 fn stops_while_it_waits_for_damap() {
     let root = tempfile::tempdir().unwrap();
     // Takes the connection but never answers, as a DAMAP that hangs would.
