@@ -1,0 +1,45 @@
+{
+  "dmp": {
+    "title": "DMP for recovery after knee replacement",
+    "description": "How long patients take to walk, climb stairs and return to work after a knee replacement, from the follow-up visits of a partner clinic.",
+    "language": "eng",
+    "created": "2026-01-19T09:05:00.000+00:00",
+    "modified": "2026-06-30T09:20:00.000+00:00",
+    "ethical_issues_exist": "yes",
+    "ethical_issues_description": "Approved by the clinic's ethics committee (EK 1187/2025). The clinic anonymises every record before it reaches the project, so the project never holds names, birth dates or other identifying data.",
+    "dmp_id": { "identifier": "https://damap.example.org/dmp/207", "type": "url" },
+    "contact": {
+      "name": "Miriam Steiner",
+      "mbox": "miriam.steiner@example.org",
+      "contact_id": { "identifier": "https://orcid.org/0000-0001-5109-3700", "type": "orcid" }
+    },
+    "project": [
+      { "title": "Recovery after knee replacement", "start": "2026-02-01", "end": "2027-07-31" }
+    ],
+    "dataset": [
+      {
+        "title": "Anonymised recovery measurements",
+        "description": "One row per follow-up visit: a random study id, the operated knee, and the days until the patient walked without help, climbed stairs and returned to work.",
+        "type": "Tabular data",
+        "personal_data": "no",
+        "sensitive_data": "no",
+        "dataset_id": { "identifier": "recovery-measurements", "type": "other" },
+        "security_and_privacy": [
+          {
+            "title": "Anonymisation",
+            "description": "The clinic replaces names and birth dates with a random study id before export. The key stays at the clinic."
+          }
+        ],
+        "distribution": [
+          {
+            "title": "Recovery measurements as CSV",
+            "format": ["text/csv"],
+            "byte_size": 2000000,
+            "data_access": "shared",
+            "host": { "title": "TU Wien Research Data", "url": "https://researchdata.tuwien.ac.at" }
+          }
+        ]
+      }
+    ]
+  }
+}

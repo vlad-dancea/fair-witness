@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 use genai::Client;
 use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ReasoningEffort, Tool,
@@ -33,6 +33,9 @@ const CHECK_WAIT: Duration = Duration::from_secs(30);
 /// What a check sends in place of the DMP and the changes.
 const CHECK_MESSAGE: &str = "Nothing changed. This request only checks that the API takes the \
                              model, its effort and the tools.";
+/// The most characters of what an API answered that a trace, an error or a check keeps. A
+/// gateway may answer with a whole web page.
+const MAX_ANSWER: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
@@ -61,16 +64,14 @@ pub enum Trace {
     /// A later message from us, such as a reminder to hand in the verdict.
     Sent(String),
     /// The conversation so far goes to the model.
-    Request {
-        turn: usize,
-    },
+    Request { turn: usize },
     /// The API refused request `turn` with 429 Too Many Requests, so it goes again after
     /// `wait_ms`, as retry number `retry`.
     RateLimited {
         turn: usize,
         retry: usize,
         wait_ms: u64,
-        /// What the API answered.
+        /// What the API answered, as `Reviewer::reportable` leaves it.
         body: String,
     },
     /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
@@ -78,7 +79,7 @@ pub enum Trace {
     /// carry from the start.
     EffortNotAllowed {
         turn: usize,
-        /// What the API answered.
+        /// What the API answered, as `Reviewer::reportable` leaves it.
         body: String,
     },
     Reply {
@@ -106,6 +107,7 @@ pub enum Trace {
         #[serde(default, skip_serializing_if = "is_false")]
         failed: bool,
     },
+    /// Why a request failed, in one line as `Reviewer::reportable` leaves it.
     Failed(String),
 }
 
@@ -120,7 +122,8 @@ pub struct Reviewer {
     /// asks for each model it does not know to take an effort, and the field would make it
     /// pass an effort on raw to one it does know, such as Anthropic's, which refuses it.
     allowing_effort: Mutex<HashSet<String>>,
-    /// Kept to hide it in what a check reports, since an API may repeat a key it refuses.
+    /// Kept to hide it in what a check or a review reports, since an API may repeat a key it
+    /// refuses.
     api_key: Option<String>,
 }
 
@@ -278,11 +281,20 @@ impl Reviewer {
                     CHECK_WAIT.as_secs()
                 ))
             });
-        let hide = |text| secret::hide(text, self.api_key.as_deref());
         match checked {
             Checked::Accepted => Checked::Accepted,
-            Checked::Refused(message) => Checked::Refused(hide(message)),
-            Checked::Unknown(why) => Checked::Unknown(hide(why)),
+            Checked::Refused(message) => Checked::Refused(self.reportable(message)),
+            Checked::Unknown(why) => Checked::Unknown(self.reportable(why)),
+        }
+    }
+
+    /// `text`, from the API or about it, without the API key and cut to `MAX_ANSWER`
+    /// characters. The key goes first, so that the cut cannot leave part of it.
+    fn reportable(&self, text: String) -> String {
+        let text = secret::hide(text, self.api_key.as_deref());
+        match text.char_indices().nth(MAX_ANSWER) {
+            Some((end, _)) => format!("{}…", &text[..end]),
+            None => text,
         }
     }
 
@@ -326,15 +338,16 @@ impl Reviewer {
                             turn,
                             retry,
                             wait_ms: millis(wait),
-                            body: refused.body,
+                            body: self.reportable(refused.body),
                         });
                         tokio::time::sleep(wait).await;
                         continue;
                     }
                 }
             };
-            trace(Trace::Failed(format!("{e:#}")));
-            return Err(e).context(failed);
+            let why = self.reportable(why_failed(&e));
+            trace(Trace::Failed(why.clone()));
+            return Err(anyhow!(why).context(failed));
         }
     }
 
@@ -384,7 +397,10 @@ impl Reviewer {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(model.to_string());
-                trace(Trace::EffortNotAllowed { turn, body });
+                trace(Trace::EffortNotAllowed {
+                    turn,
+                    body: self.reportable(body),
+                });
                 continue;
             }
             return Err(e);
@@ -986,6 +1002,98 @@ mod tests {
              than fair-witness waits (60 s)"
         );
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fails_without_the_request_or_the_reply_when_the_reply_cannot_be_read() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("patients.csv"), "name\nAnna Muster\n").unwrap();
+        // Tool calls from a small model: one whose arguments are not JSON, and one that writes
+        // what it read where the function belongs.
+        let mut cut_off = tool_call("read_file", json!({}));
+        cut_off["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+            json!(r#"{"path": "notes"#);
+        let mut misplaced = tool_call("read_file", json!({}));
+        misplaced["choices"][0]["message"]["tool_calls"][0]["function"] = json!("Anna Muster");
+
+        let mut failures = Vec::new();
+        for unreadable in [cut_off, misplaced] {
+            let (endpoint, _server) = fake_model(vec![
+                tool_call("read_file", json!({ "path": "patients.csv" })),
+                unreadable,
+            ]);
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer(endpoint)
+                .review(
+                    &input(
+                        root.path(),
+                        r#"{"dmp": {"title": "Consent study"}}"#,
+                        &[Change::Created("patients.csv".into())],
+                    ),
+                    &|trace| traces.lock().unwrap().push(trace),
+                )
+                .await
+                .unwrap_err();
+            let Some(Trace::Failed(why)) = traces.into_inner().unwrap().pop() else {
+                panic!("no failure traced last");
+            };
+            failures.push((format!("{e:#}"), why));
+        }
+
+        let why = [
+            "the model's reply could not be read: Serde JSON error: EOF while parsing a string at \
+             line 1 column 15",
+            "the model's reply could not be read: Serde JSON error: invalid type: string \"…\", \
+             expected struct IterimFunction",
+        ];
+        assert_eq!(
+            failures,
+            why.map(|why| (format!("the model test failed: {why}"), why.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn hides_the_api_key_and_cuts_what_the_api_answered_in_traces() {
+        let root = tempfile::tempdir().unwrap();
+        let limited = format!("Rate limit exceeded for sk-test. {}", "Wait. ".repeat(200));
+        let not_allowed = format!("{EFFORT_NOT_ALLOWED} Key: sk-test");
+        let (endpoint, _server) = fake_model(vec![
+            too_many_requests(Some("0"), &limited),
+            bad_request(&not_allowed),
+            verdict().into(),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        reviewer(endpoint)
+            .review(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace)
+            })
+            .await
+            .unwrap();
+
+        let bodies: Vec<String> = traces
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .filter_map(|trace| match trace {
+                Trace::RateLimited { body, .. } | Trace::EffortNotAllowed { body, .. } => {
+                    Some(body)
+                }
+                _ => None,
+            })
+            .collect();
+        let hidden = |message: &str, kind| {
+            json!({ "error": { "message": message.replace("sk-test", "[API key]"), "type": kind } })
+                .to_string()
+        };
+        let limited = hidden(&limited, "rate_limit_error");
+        assert_eq!(
+            bodies,
+            [
+                format!("{}…", &limited[..MAX_ANSWER]),
+                hidden(&not_allowed, "invalid_request_error"),
+            ]
+        );
     }
 
     #[tokio::test]
