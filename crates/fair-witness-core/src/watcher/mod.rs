@@ -1,8 +1,8 @@
 mod filter;
 mod summary;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::mem;
@@ -148,6 +148,45 @@ pub enum WatchError {
 
 type Batch = (Instant, DebounceEventResult);
 
+/// Something about a known path that one batch cannot tell, because the event that tells it can
+/// come in a later one. The debouncer hands on each event once it is a debounce old, a tick at a
+/// time, so it can split one sequence of changes over batches anywhere.
+struct Doubt {
+    /// Whether a rename landed on the file, as `Doubt::replaced` says, rather than the path
+    /// missing from its folder, as `Doubt::missing` says.
+    replaced: bool,
+    /// When the events that raised it happened, which puts what it finds in their set.
+    at: Instant,
+    /// A debounce and a half after the batch that raised it was handled, as for a set's end, by
+    /// when the debouncer has handed on every event from before then.
+    due: Instant,
+}
+
+impl Doubt {
+    /// A rename landed on the file at the path, which it replaced unless the file there was
+    /// renamed away within the debounce. The debouncer joins the steps of a swap through a
+    /// temporary name into renames that seem to land on known files, each in its own batch or
+    /// both in one.
+    fn replaced(at: Instant, debounce: Duration) -> Self {
+        Self {
+            replaced: true,
+            at,
+            due: Instant::now() + debounce * 3 / 2,
+        }
+    }
+
+    /// The path was missing from its folder after a batch, which deleted it unless its remove or
+    /// rename is still to come. The debouncer drops the remove of a file that a rename lands on
+    /// and that moves on within the debounce, unless it had events of its own, so no event may
+    /// ever say.
+    fn missing(at: Instant, debounce: Duration) -> Self {
+        Self {
+            replaced: false,
+            ..Self::replaced(at, debounce)
+        }
+    }
+}
+
 pub struct FolderWatcher {
     /// None only once it could not be started again.
     debouncer: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
@@ -163,6 +202,8 @@ pub struct FolderWatcher {
     /// place since.
     root_id: FileId,
     known: BTreeSet<PathBuf>,
+    /// What a batch left open about the known paths, until a later event or the time settles it.
+    doubts: BTreeMap<PathBuf, Doubt>,
     filter: Filter,
     /// What the last batch showed went wrong, which `next` reports before anything else.
     pending: Vec<String>,
@@ -195,6 +236,7 @@ impl FolderWatcher {
             root: root.to_path_buf(),
             root_id,
             known,
+            doubts: BTreeMap::new(),
             filter,
             pending: Vec::new(),
             stopped: None,
@@ -206,14 +248,13 @@ impl FolderWatcher {
         &self.filter
     }
 
-    /// Applies `event`, whose batch makes the `moves`.
-    fn apply(&mut self, event: &DebouncedEvent, moves: &Moves, changes: &mut Vec<Change>) {
+    fn apply(&mut self, event: &DebouncedEvent, changes: &mut Vec<Change>) {
         let paths = &event.paths;
         match event.kind {
             EventKind::Create(_) => paths.iter().for_each(|path| self.arrive(path, changes)),
             EventKind::Remove(_) => paths.iter().for_each(|path| self.forget(path, changes)),
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
-                self.rename(&paths[0], &paths[1], moves, changes)
+                self.rename(&paths[0], &paths[1], event.time, changes)
             }
             EventKind::Modify(ModifyKind::Name(_)) => {
                 for path in paths {
@@ -271,7 +312,8 @@ impl FolderWatcher {
         }
     }
 
-    fn rename(&mut self, from: &Path, to: &Path, moves: &Moves, changes: &mut Vec<Change>) {
+    /// Applies a rename whose event happened `at`.
+    fn rename(&mut self, from: &Path, to: &Path, at: Instant, changes: &mut Vec<Change>) {
         let to_dir = fs::symlink_metadata(to).is_ok_and(|metadata| metadata.is_dir());
         // A move out of the project is a deletion, as when only its source is
         // reported.
@@ -284,37 +326,119 @@ impl FolderWatcher {
             self.arrive(to, changes);
             return;
         }
-        // A file renamed over another replaces it, which the rename alone does not say. The
-        // debouncer joins the steps of a swap through a temporary name into renames that seem to
-        // land on known files, but there the file that was there moves on in the same batch, or
-        // the source exists again when the swap's renames come in different batches, while a
-        // source that a create in the batch filled again is not a swap.
-        let replaced = self.known.contains(to)
-            && !to_dir
-            && !moves.renamed_away.contains(to)
-            && (fs::symlink_metadata(from).is_err() || moves.created.contains(from));
-        for old in moved {
+        // A file renamed over another replaces it, which the rename alone does not say, and
+        // whether it did can wait for a later batch.
+        if self.known.contains(to) && !to_dir {
+            let doubt = Doubt::replaced(at, self.debounce);
+            self.doubts.insert(to.to_path_buf(), doubt);
+        }
+        let moved_to = |old: &Path| {
             let rest = old
                 .strip_prefix(from)
                 .expect("subtree paths start with its root");
-            let new = if rest.as_os_str().is_empty() {
+            if rest.as_os_str().is_empty() {
                 to.to_path_buf()
             } else {
                 to.join(rest)
-            };
+            }
+        };
+        for old in moved {
+            let new = moved_to(&old);
             let is_dir = fs::symlink_metadata(&new).is_ok_and(|metadata| metadata.is_dir());
             if !self.filter.skips(&new, is_dir) {
                 self.known.insert(new);
+            }
+        }
+        // The doubts about what is in a renamed folder go with it. One about the folder itself
+        // was settled by this event.
+        let doubted: Vec<PathBuf> = self
+            .doubts
+            .range::<Path, _>((Bound::Excluded(from), Bound::Unbounded))
+            .take_while(|(path, _)| path.starts_with(from))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for old in doubted {
+            if let Some(doubt) = self.doubts.remove(&old) {
+                self.doubts.insert(moved_to(&old), doubt);
             }
         }
         changes.push(Change::Renamed {
             from: from.to_path_buf(),
             to: to.to_path_buf(),
         });
-        if replaced {
-            changes.push(Change::Changed(to.to_path_buf()));
-        }
         self.discover(to, changes);
+    }
+
+    /// Settles the doubts about the paths `event` names, before it is applied. A replaced file
+    /// that the event renames away within the debounce of the rename that landed on it was in a
+    /// swap, and any other event comes after the file was replaced, so it changed, also when the
+    /// event itself reports nothing, as a write to a path that is gone by now. A missing path is
+    /// settled by an event that creates, removes or renames it.
+    fn settle_by(&mut self, event: &DebouncedEvent, changes: &mut Vec<Change>) {
+        let renames = matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)));
+        let moves = renames || event.kind.is_create() || event.kind.is_remove();
+        for (index, path) in event.paths.iter().enumerate() {
+            let Some(doubt) = self.doubts.get(path) else {
+                continue;
+            };
+            if doubt.replaced {
+                let swapped = renames && index == 0 && event.time <= doubt.at + self.debounce;
+                if !swapped {
+                    changes.push(Change::Changed(path.clone()));
+                }
+            } else if !moves {
+                continue;
+            }
+            self.doubts.remove(path);
+        }
+    }
+
+    /// Doubts each path the watcher knows right inside `folder` that is not there, as
+    /// `Doubt::missing` says, with when the events that touched the folder happened.
+    fn doubt_missing(&mut self, folder: &Path, at: Instant) {
+        let Ok(entries) = fs::read_dir(folder) else {
+            return;
+        };
+        let names: HashSet<OsString> = entries.flatten().map(|entry| entry.file_name()).collect();
+        for path in children(&self.known, folder) {
+            if !path.file_name().is_some_and(|name| names.contains(name)) {
+                let doubt = Doubt::missing(at, self.debounce);
+                self.doubts.entry(path).or_insert(doubt);
+            }
+        }
+    }
+
+    /// Settles the doubts that are due by `now`, which no event settled: a path still known and
+    /// gone is deleted, and a replaced file still there changed. Gives back what they found as a
+    /// batch, with when the events that raised them happened.
+    fn settle(&mut self, now: Instant) -> Option<Held> {
+        let due: Vec<(PathBuf, Doubt)> = self
+            .doubts
+            .extract_if(.., |_, doubt| doubt.due <= now)
+            .collect();
+        let mut changes = Vec::new();
+        let mut times = Vec::new();
+        for (path, doubt) in due {
+            if !self.known.contains(&path) {
+                continue;
+            }
+            // Nothing is reported for a path in a folder tagged as a cache since, as in `forget`.
+            let before = changes.len();
+            if fs::symlink_metadata(&path).is_err_and(|e| missing(&e)) {
+                self.forget(&path, &mut changes);
+            } else if doubt.replaced && !self.filter.skips(&path, false) {
+                changes.push(Change::Changed(path));
+            }
+            if changes.len() > before {
+                times.push(doubt.at);
+            }
+        }
+        let (first, last) = (*times.iter().min()?, *times.iter().max()?);
+        let changes = changes
+            .into_iter()
+            .map(|change| change.relative_to(&self.root))
+            .collect();
+        Some(Held::new(changes, first, last, now + self.debounce / LOOKS))
     }
 
     fn handle(&mut self, events: Vec<DebouncedEvent>) -> Vec<Change> {
@@ -345,54 +469,28 @@ impl FolderWatcher {
                 self.take_subtree(folder);
             }
         }
+        // The debouncer puts a remove marked "override" before the create of a path or a rename
+        // onto it when the path has events of its own, as `sed -i`'s has after it reads the file,
+        // and keeps both in one batch. The create or rename says on its own that the file was
+        // replaced, as it does without such events, so the remove counts only when nothing came
+        // to the path after it, as when the new file moved on within the debounce.
+        let arrivals: HashMap<PathBuf, usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| Some((arrived_at(event)?, index)))
+            .collect();
         let mut changes = Vec::new();
-        let moves = Moves::of(&events);
-        let mut replaced = Vec::new();
-        for event in &events {
-            // The debouncer adds such a remove when a file is renamed over a path that has
-            // events of its own, as `sed -i` does after reading the file.
-            if event.kind.is_remove() && event.info() == Some("override") {
-                replaced.extend(event.paths.iter().cloned());
-            }
-            self.apply(event, &moves, &mut changes);
-        }
-        // A replaced path comes back as created, or as where a rename went, when the create or
-        // rename of it follows the remove, so it changed rather than went. When the new file
-        // moved on, or the folder it is in did, before it came back, what comes there later is
-        // another file, and the path stays deleted.
-        for path in replaced {
-            let Some(deleted) = changes
-                .iter()
-                .position(|change| *change == Change::Deleted(path.clone()))
-            else {
+        for (index, event) in events.iter().enumerate() {
+            let replaced = event.kind.is_remove()
+                && event.info() == Some("override")
+                && event.paths.first().and_then(|path| arrivals.get(path)) > Some(&index);
+            if replaced {
                 continue;
-            };
-            let back = changes
-                .iter()
-                .enumerate()
-                .skip(deleted + 1)
-                .find_map(|(index, change)| match change {
-                    Change::Created(created) if *created == path => Some(Some((index, true))),
-                    Change::Renamed { to, .. } if *to == path => Some(Some((index, false))),
-                    Change::Renamed { from: gone, .. } | Change::Deleted(gone)
-                        if path.starts_with(gone) =>
-                    {
-                        Some(None)
-                    }
-                    _ => None,
-                })
-                .flatten();
-            match back {
-                Some((created, true)) => {
-                    changes[created] = Change::Changed(path.clone());
-                    changes.remove(deleted);
-                }
-                Some((renamed, false)) => {
-                    changes.insert(renamed + 1, Change::Changed(path.clone()));
-                    changes.remove(deleted);
-                }
-                None => {}
             }
+            if can_change(&event.kind) {
+                self.settle_by(event, &mut changes);
+            }
+            self.apply(event, &mut changes);
         }
         // A folder whose tag is gone or lost its signature holds files that
         // were never reported, so they count as created, like the files of a
@@ -400,6 +498,25 @@ impl FolderWatcher {
         for folder in &tagged {
             if !self.filter.skips(folder, true) {
                 self.discover(folder, &mut changes);
+            }
+        }
+        // A file can go without an event of its own, so the folders whose entries the events
+        // changed are looked into. Only the folders, since a walk of the whole project after each
+        // batch would take long in a large one.
+        let touched: BTreeSet<&Path> = events
+            .iter()
+            .filter(|event| {
+                event.kind.is_create()
+                    || event.kind.is_remove()
+                    || matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+            })
+            .flat_map(|event| &event.paths)
+            .filter_map(|path| path.parent())
+            .filter(|folder| *folder == self.root || self.known.contains(*folder))
+            .collect();
+        if let Some(at) = events.iter().map(|event| event.time).max() {
+            for folder in touched {
+                self.doubt_missing(folder, at);
             }
         }
         // inotify watches a new folder only once the watcher has added it, so a file written
@@ -517,12 +634,7 @@ impl FolderWatcher {
                 continue;
             }
             match fs::symlink_metadata(path) {
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                    ) =>
-                {
+                Err(e) if missing(&e) => {
                     if !self.filter.skips(path, false) {
                         changes.push(Change::Deleted(path.clone()));
                     }
@@ -587,21 +699,28 @@ impl FolderWatcher {
             }
             // By the clock, since batches of other files can keep coming while a file is copied.
             self.look_if_due();
+            let doubts_due = self.doubts.values().map(|doubt| doubt.due).min();
             let held = self.held.as_ref();
-            let received = match held.map(|held| (held.complete(self.debounce), held.next_look)) {
+            let received = match held.map(|held| (self.complete(held), held.next_look)) {
                 // `timeout_at` polls the channel first, so batches that waited there while the
                 // watcher handled others still go into sets by when their events happened.
                 Some((complete, next_look)) => {
-                    let until = complete.min(next_look).into();
-                    match tokio::time::timeout_at(until, self.events.recv()).await {
+                    let until = doubts_due
+                        .into_iter()
+                        .fold(complete.min(next_look), Instant::min);
+                    match tokio::time::timeout_at(until.into(), self.events.recv()).await {
                         Ok(received) => received,
-                        // A look is due, or the set is complete unless the look finds a write.
+                        // A look or a doubt is due, or the set is complete unless the look finds a
+                        // write.
                         Err(_) => {
                             self.look_if_due();
-                            let held = self.held.as_ref();
-                            if held
-                                .is_some_and(|held| Instant::now() < held.complete(self.debounce))
+                            if let Some(found) = self.settle(Instant::now())
+                                && let Some(done) = self.hold(found)
                             {
+                                return Some(Ok(done));
+                            }
+                            let held = self.held.as_ref();
+                            if held.is_some_and(|held| Instant::now() < self.complete(held)) {
                                 continue;
                             }
                             None
@@ -611,11 +730,20 @@ impl FolderWatcher {
                 // Windows sends no event when the project folder itself is deleted, and no system
                 // sends one when a folder above it moves, so a quiet folder is looked at once a
                 // debounce.
-                None => match tokio::time::timeout(self.debounce, self.events.recv()).await {
-                    Ok(received) => received,
-                    Err(_) if self.gone(&[]) => return Some(Err(WatchError::Gone)),
-                    Err(_) => continue,
-                },
+                None => {
+                    let quiet = Instant::now() + self.debounce;
+                    let until = doubts_due.map_or(quiet, |due| due.min(quiet));
+                    match tokio::time::timeout_at(until.into(), self.events.recv()).await {
+                        Ok(received) => received,
+                        Err(_) if self.gone(&[]) => return Some(Err(WatchError::Gone)),
+                        Err(_) => {
+                            if let Some(found) = self.settle(Instant::now()) {
+                                self.held = Some(found);
+                            }
+                            continue;
+                        }
+                    }
+                }
             };
             let (sent, events) = match received {
                 Some((sent, Ok(events))) => (sent, events),
@@ -652,7 +780,7 @@ impl FolderWatcher {
                 .iter()
                 .filter(|event| can_change(&event.kind) || event.need_rescan())
                 .map(|event| event.time);
-            let (Some(first), Some(last)) = (times.clone().min(), times.max()) else {
+            let (Some(mut first), Some(last)) = (times.clone().min(), times.max()) else {
                 continue;
             };
             let mut arrived: Vec<PathBuf> = events.iter().filter_map(arrived_at).collect();
@@ -686,6 +814,12 @@ impl FolderWatcher {
                 );
                 extend_set(&mut changes, found);
             }
+            // The debouncer handed this batch on after every event that could settle these
+            // doubts, and they go with the batches that raised them.
+            if let Some(found) = self.settle(sent) {
+                extend_set(&mut changes, found.changes);
+                first = first.min(found.first);
+            }
             if changes.is_empty() {
                 continue;
             }
@@ -694,15 +828,30 @@ impl FolderWatcher {
                 .filter_map(|path| self.written_while_held(path, sent))
                 .fold(last, Instant::max);
             let batch = Held::new(changes, first, last, Instant::now() + self.debounce / LOOKS);
-            match &mut self.held {
-                Some(held) if held.takes(first, self.debounce) => held.add(batch),
-                held => {
-                    if let Some(done) = held.replace(batch) {
-                        return Some(Ok(done.changes));
-                    }
-                }
+            if let Some(done) = self.hold(batch) {
+                return Some(Ok(done));
             }
         }
+    }
+
+    /// Adds `batch` to the held set, or holds it instead and gives back the set it ends.
+    fn hold(&mut self, batch: Held) -> Option<Vec<Change>> {
+        match &mut self.held {
+            Some(held) if held.takes(batch.first, self.debounce) => {
+                held.add(batch);
+                None
+            }
+            held => held.replace(batch).map(|done| done.changes),
+        }
+    }
+
+    /// When the held set is complete: when `Held::complete` says, and not before every doubt is
+    /// settled, since what a doubt finds goes with the batch that raised it.
+    fn complete(&self, held: &Held) -> Instant {
+        self.doubts
+            .values()
+            .map(|doubt| doubt.due)
+            .fold(held.complete(self.debounce), Instant::max)
     }
 }
 
@@ -861,29 +1010,38 @@ fn take_under(paths: &mut BTreeSet<PathBuf>, root: &Path) -> Vec<PathBuf> {
     under
 }
 
-/// What a batch of events renames away and creates, which tells a rename in it that lands on a
-/// known file from one that swaps it through a temporary name.
-struct Moves {
-    renamed_away: HashSet<PathBuf>,
-    created: HashSet<PathBuf>,
-}
-
-impl Moves {
-    fn of(events: &[DebouncedEvent]) -> Self {
-        let first = |kind: fn(&EventKind) -> bool| {
-            events
-                .iter()
-                .filter(|event| kind(&event.kind))
-                .filter_map(|event| event.paths.first().cloned())
-                .collect()
+/// The paths in `paths` right inside `folder`, found without going through what is in them, so
+/// that a folder with a large tree under it stays quick to look into.
+fn children(paths: &BTreeSet<PathBuf>, folder: &Path) -> Vec<PathBuf> {
+    let mut children = Vec::new();
+    let mut from = Bound::Excluded(folder.to_path_buf());
+    while let Some(path) = paths.range((from, Bound::Unbounded)).next() {
+        let Some(name) = path
+            .strip_prefix(folder)
+            .ok()
+            .and_then(|rest| rest.iter().next())
+        else {
+            break;
         };
-        Self {
-            renamed_away: first(|kind| {
-                *kind == EventKind::Modify(ModifyKind::Name(RenameMode::Both))
-            }),
-            created: first(|kind| kind.is_create()),
+        let child = folder.join(name);
+        // Paths sort by their names one at a time, so the child's name with a NUL byte added, which
+        // no name holds, sorts after everything in the child and before the name after it.
+        let mut past = child.clone().into_os_string();
+        past.push("\0");
+        from = Bound::Included(PathBuf::from(past));
+        if *path == child {
+            children.push(child);
         }
     }
+    children
+}
+
+/// Whether `error`, from looking at a path, says that nothing is there.
+fn missing(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 /// Where a create or a rename put a file or a folder.
@@ -1227,6 +1385,28 @@ mod tests {
         ]);
 
         assert_eq!(changes, []);
+    }
+
+    #[tokio::test]
+    async fn reports_nothing_for_a_file_gone_from_a_folder_tagged_since() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "target/app", "x");
+        write(root, "target/build.log", "x");
+        let mut watcher = watch(root);
+
+        // A file goes without an event of its own, and the folder is tagged before the tag's
+        // event is handed on, so a create beside them is all the watcher gets.
+        fs::remove_file(root.join("target/build.log")).unwrap();
+        write(root, "target/CACHEDIR.TAG", CARGO_TAG);
+        write(root, "target/app.d", "x");
+        let create = notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+            .add_path(root.join("target/app.d"));
+        let changes = watcher.handle(vec![DebouncedEvent::new(create, Instant::now())]);
+        let later = watcher.settle(Instant::now() + DEBOUNCE * 2);
+
+        assert_eq!(changes, []);
+        assert_eq!(later.map(|found| found.changes), None);
     }
 
     #[tokio::test]
@@ -2566,20 +2746,31 @@ mod tests {
     async fn reports_a_file_as_deleted_when_the_file_renamed_over_it_moves_on() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        fs::write(root.join("b.csv"), "b").unwrap();
-        fs::write(root.join("a.csv~"), "a").unwrap();
+        // A folder whose name sorts before the files, which the look for what is missing skips.
+        write(root, "a/notes.csv", "n");
+        for name in ["read.csv", "unread.csv"] {
+            fs::write(root.join(name), "old").unwrap();
+            fs::write(root.join(format!("{name}.new~")), "new").unwrap();
+        }
         let mut watcher = watch(root);
 
-        // A backup is renamed over a file the watcher knows, after something read it, and moves
-        // on to another backup name, all within a debounce. Both backup names are ignored, so
-        // only the file the watcher knew is left to report, and it is gone.
-        fs::read(root.join("b.csv")).unwrap();
-        fs::rename(root.join("a.csv~"), root.join("b.csv")).unwrap();
-        fs::rename(root.join("b.csv"), root.join("c.csv~")).unwrap();
+        // A backup is renamed over a file the watcher knows and moves on to another backup name,
+        // all within a debounce, once after something read the file and once without. Both
+        // backup names are ignored, so only the file the watcher knew is left to report, and it
+        // is gone. The debouncer joins the renames into one between the backup names and says
+        // that the file is gone only when it has events of its own, from a read in the same
+        // debounce, which can also come in an earlier batch.
+        fs::read(root.join("read.csv")).unwrap();
+        for name in ["read.csv", "unread.csv"] {
+            fs::rename(root.join(format!("{name}.new~")), root.join(name)).unwrap();
+            fs::rename(root.join(name), root.join(format!("{name}.old~"))).unwrap();
+        }
 
+        let mut changes = drain(&mut watcher).await;
+        changes.sort_by_key(|change| format!("{change:?}"));
         assert_eq!(
-            drain(&mut watcher).await,
-            [Change::Deleted(PathBuf::from("b.csv"))]
+            changes,
+            ["read.csv", "unread.csv"].map(|name| Change::Deleted(PathBuf::from(name)))
         );
     }
 
@@ -2587,14 +2778,20 @@ mod tests {
     async fn reports_a_replaced_file_where_its_folder_went() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        write(root, "data/b.csv", "b");
-        write(root, "data/a.csv~", "a");
+        for name in ["read.csv", "unread.csv"] {
+            write(root, &format!("data/{name}"), "old");
+            write(root, &format!("data/{name}~"), "new");
+        }
         let mut watcher = watch(root);
 
-        // A backup is renamed over a file the watcher knows, after something read it, and the
-        // folder gets another name, all within a debounce.
-        fs::read(root.join("data/b.csv")).unwrap();
-        fs::rename(root.join("data/a.csv~"), root.join("data/b.csv")).unwrap();
+        // A backup is renamed over a file the watcher knows, once after something read it and
+        // once without, and the folder gets another name, all within a debounce. Either way the
+        // file changed where it was, and the folder's rename takes it along.
+        fs::read(root.join("data/read.csv")).unwrap();
+        for name in ["read.csv", "unread.csv"] {
+            let file = root.join("data").join(name);
+            fs::rename(file.with_file_name(format!("{name}~")), file).unwrap();
+        }
         fs::rename(root.join("data"), root.join("renamed")).unwrap();
 
         let mut changes = drain(&mut watcher).await;
@@ -2603,8 +2800,8 @@ mod tests {
         assert_eq!(
             changes,
             [
-                Change::Created(path("renamed/b.csv")),
-                Change::Deleted(path("data/b.csv")),
+                Change::Changed(path("data/read.csv")),
+                Change::Changed(path("data/unread.csv")),
                 Change::Renamed {
                     from: path("data"),
                     to: path("renamed"),
@@ -2646,41 +2843,53 @@ mod tests {
         for name in ["site-a.csv", "site-b.csv"] {
             fs::write(root.join(name), name).unwrap();
         }
-        let mut watcher = watch(root);
+        let [mut together, mut apart] = [watch(root), watch(root)];
         fs::rename(root.join("site-a.csv"), root.join("swap.tmp")).unwrap();
         fs::rename(root.join("site-b.csv"), root.join("site-a.csv")).unwrap();
         fs::rename(root.join("swap.tmp"), root.join("site-b.csv")).unwrap();
         fs::rename(root.join("site-a.csv"), root.join("site-c.csv")).unwrap();
 
         // The debouncer joins those steps into a rename from site-a.csv to site-b.csv and one
-        // from site-b.csv to site-c.csv. Handed on together, as here, they show that nothing was
-        // written over site-b.csv, though site-a.csv, the first rename's source, is gone. Its
-        // tick can also hand them on one at a time, and then site-b.csv shows up as changed too.
+        // from site-b.csv to site-c.csv, and its tick can hand them on together or one at a time.
+        // Either way nothing was written over site-b.csv, though site-a.csv, the first rename's
+        // source, is gone.
         let rename = |from: &str, to: &str| {
             let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
                 .add_path(root.join(from))
                 .add_path(root.join(to));
             DebouncedEvent::new(event, Instant::now())
         };
-        let changes = watcher.handle(vec![
+        let (first, second) = (
             rename("site-a.csv", "site-b.csv"),
             rename("site-b.csv", "site-c.csv"),
-        ]);
+        );
+        let mut sets = [
+            together.handle(vec![first.clone(), second.clone()]),
+            [apart.handle(vec![first]), apart.handle(vec![second])].concat(),
+        ];
+        // Once every event that could settle them has come.
+        let later = Instant::now() + DEBOUNCE * 2;
+        for (watcher, changes) in [&mut together, &mut apart].into_iter().zip(&mut sets) {
+            changes.extend(
+                watcher
+                    .settle(later)
+                    .into_iter()
+                    .flat_map(|found| found.changes),
+            );
+        }
 
         let path = PathBuf::from;
-        assert_eq!(
-            changes,
-            [
-                Change::Renamed {
-                    from: path("site-a.csv"),
-                    to: path("site-b.csv"),
-                },
-                Change::Renamed {
-                    from: path("site-b.csv"),
-                    to: path("site-c.csv"),
-                },
-            ]
-        );
+        let renames = [
+            Change::Renamed {
+                from: path("site-a.csv"),
+                to: path("site-b.csv"),
+            },
+            Change::Renamed {
+                from: path("site-b.csv"),
+                to: path("site-c.csv"),
+            },
+        ];
+        assert_eq!(sets, [renames.clone(), renames]);
     }
 
     #[tokio::test]
@@ -2739,6 +2948,259 @@ mod tests {
                 Change::Renamed {
                     from: path("draft.csv"),
                     to: path("final.csv"),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tells_a_replacement_from_a_swap_whatever_batches_their_renames_come_in() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["draft.csv", "final.csv", "site-a.csv", "site-b.csv"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+
+        // The draft replaces the final version and a new draft starts, and two sites swap names
+        // through a temporary one.
+        fs::rename(root.join("draft.csv"), root.join("final.csv")).unwrap();
+        fs::write(root.join("draft.csv"), "next").unwrap();
+        fs::rename(root.join("site-a.csv"), root.join("swap.tmp")).unwrap();
+        fs::rename(root.join("site-b.csv"), root.join("site-a.csv")).unwrap();
+        fs::rename(root.join("swap.tmp"), root.join("site-b.csv")).unwrap();
+        // The debouncer joins the swap into two renames. Its tick can hand on the rename onto the
+        // final version before the new draft's create, and the swap's renames one at a time, so
+        // that the first batch alone cannot tell the replacement from the swap.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let event = |kind, names: &[&str], quarters: u32| {
+            let event = names.iter().fold(notify::Event::new(kind), |event, name| {
+                event.add_path(root.join(name))
+            });
+            DebouncedEvent::new(event, start + DEBOUNCE * quarters / 4)
+        };
+        let rename = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+        let create = EventKind::Create(notify::event::CreateKind::File);
+        for batch in [
+            vec![
+                event(rename, &["draft.csv", "final.csv"], 0),
+                event(rename, &["site-a.csv", "site-b.csv"], 0),
+            ],
+            vec![
+                event(create, &["draft.csv"], 1),
+                event(rename, &["site-b.csv", "site-a.csv"], 1),
+            ],
+        ] {
+            batches.send((Instant::now(), Ok(batch))).unwrap();
+        }
+
+        let path = PathBuf::from;
+        assert_eq!(
+            watcher.next().await.unwrap().unwrap(),
+            [
+                Change::Renamed {
+                    from: path("draft.csv"),
+                    to: path("final.csv"),
+                },
+                Change::Renamed {
+                    from: path("site-a.csv"),
+                    to: path("site-b.csv"),
+                },
+                Change::Created(path("draft.csv")),
+                Change::Renamed {
+                    from: path("site-b.csv"),
+                    to: path("site-a.csv"),
+                },
+                Change::Changed(path("final.csv")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_replaced_file_as_changed_before_a_later_rename_moves_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for name in ["notes.csv", "notes-new.csv"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let mut watcher = watch(root);
+        fs::rename(root.join("notes-new.csv"), root.join("notes.csv")).unwrap();
+        fs::rename(root.join("notes.csv"), root.join("archive.csv")).unwrap();
+
+        // More than a debounce apart, so the second rename is no step of a swap.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let rename = |from: &str, to: &str, after: Duration| {
+            let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(root.join(from))
+                .add_path(root.join(to));
+            DebouncedEvent::new(event, start + after)
+        };
+        let changes = [
+            watcher.handle(vec![rename("notes-new.csv", "notes.csv", Duration::ZERO)]),
+            watcher.handle(vec![rename("notes.csv", "archive.csv", DEBOUNCE * 3 / 2)]),
+        ]
+        .concat();
+
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Renamed {
+                    from: path("notes-new.csv"),
+                    to: path("notes.csv"),
+                },
+                Change::Changed(path("notes.csv")),
+                Change::Renamed {
+                    from: path("notes.csv"),
+                    to: path("archive.csv"),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_replaced_file_as_changed_where_a_renamed_folder_took_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(root, "draft.csv", "draft");
+        write(root, "data/final.csv", "final");
+        let mut watchers = [(); 4].map(|_| watch(root)).into_iter();
+        fs::rename(root.join("draft.csv"), root.join("data/final.csv")).unwrap();
+        write(root, "data/final.csv", "edited");
+        fs::rename(root.join("data"), root.join("archive")).unwrap();
+
+        // Once without the write in between and once with it, which names the file where it no
+        // longer is. Each is handed on together or an event at a time, with nothing renamed away
+        // from data/final.csv.
+        let event = |kind, names: &[&str]| {
+            let event = names.iter().fold(notify::Event::new(kind), |event, name| {
+                event.add_path(root.join(name))
+            });
+            DebouncedEvent::new(event, Instant::now())
+        };
+        let rename = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+        let (first, write, second) = (
+            event(rename, &["draft.csv", "data/final.csv"]),
+            event(EventKind::Modify(ModifyKind::Any), &["data/final.csv"]),
+            event(rename, &["data", "archive"]),
+        );
+        let later = Instant::now() + DEBOUNCE * 2;
+        let mut sets = Vec::new();
+        for events in [
+            vec![first.clone(), second.clone()],
+            vec![first, write, second],
+        ] {
+            let one_at_a_time = events.iter().map(|event| vec![event.clone()]).collect();
+            for batches in [vec![events], one_at_a_time] {
+                let mut watcher = watchers.next().unwrap();
+                let mut changes = Vec::new();
+                for batch in batches {
+                    changes.extend(watcher.handle(batch));
+                }
+                changes.extend(
+                    watcher
+                        .settle(later)
+                        .into_iter()
+                        .flat_map(|found| found.changes),
+                );
+                sets.push(changes);
+            }
+        }
+
+        let path = PathBuf::from;
+        let renamed = |from: &str, to: &str| Change::Renamed {
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+        };
+        let plain = [
+            renamed("draft.csv", "data/final.csv"),
+            renamed("data", "archive"),
+            Change::Changed(path("archive/final.csv")),
+        ];
+        let written = [
+            renamed("draft.csv", "data/final.csv"),
+            Change::Changed(path("data/final.csv")),
+            renamed("data", "archive"),
+        ];
+        assert_eq!(
+            sets,
+            [&plain, &plain, &written, &written].map(|set| set.to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_a_rename_of_a_file_found_before_its_create_came() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut watcher = watch(root);
+        let event = |kind, names: &[&str]| {
+            let event = names.iter().fold(notify::Event::new(kind), |event, name| {
+                event.add_path(root.join(name))
+            });
+            DebouncedEvent::new(event, Instant::now())
+        };
+        let create = EventKind::Create(notify::event::CreateKind::Any);
+
+        // Walking the new folder finds the file. It is renamed after its create was handed on
+        // and before the watcher handles it, so the create names a path that is gone, and the
+        // rename's event comes later.
+        write(root, "data/a.csv", "a");
+        let mut changes = watcher.handle(vec![event(create, &["data"])]);
+        fs::rename(root.join("data/a.csv"), root.join("data/b.csv")).unwrap();
+        changes.extend(watcher.handle(vec![event(create, &["data/a.csv"])]));
+        let rename = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+        changes.extend(watcher.handle(vec![event(rename, &["data/a.csv", "data/b.csv"])]));
+
+        let path = PathBuf::from;
+        assert_eq!(
+            changes,
+            [
+                Change::Created(path("data")),
+                Change::Created(path("data/a.csv")),
+                Change::Changed(path("data/a.csv")),
+                Change::Renamed {
+                    from: path("data/a.csv"),
+                    to: path("data/b.csv"),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_a_rename_whose_event_comes_after_a_change_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fs::write(root.join("notes.csv"), "a").unwrap();
+        let mut watcher = watch(root);
+        let (batches, events) = mpsc::unbounded_channel();
+        watcher.events = events;
+
+        fs::write(root.join("results.csv"), "x").unwrap();
+        fs::rename(root.join("notes.csv"), root.join("notes-2026.csv")).unwrap();
+        // The new file's create comes in a batch before the rename, when notes.csv is already
+        // gone from the folder.
+        let start = Instant::now() - DEBOUNCE * 10;
+        let create = notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+            .add_path(root.join("results.csv"));
+        let rename = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root.join("notes.csv"))
+            .add_path(root.join("notes-2026.csv"));
+        for batch in [
+            DebouncedEvent::new(create, start),
+            DebouncedEvent::new(rename, start + DEBOUNCE / 4),
+        ] {
+            batches.send((Instant::now(), Ok(vec![batch]))).unwrap();
+        }
+
+        assert_eq!(
+            watcher.next().await.unwrap().unwrap(),
+            [
+                Change::Created(PathBuf::from("results.csv")),
+                Change::Renamed {
+                    from: PathBuf::from("notes.csv"),
+                    to: PathBuf::from("notes-2026.csv"),
                 },
             ]
         );
@@ -2804,6 +3266,29 @@ mod tests {
         assert_eq!(
             changes,
             ["analysis", "analysis/plot_ph.py"].map(|path| Change::Created(PathBuf::from(path)))
+        );
+    }
+
+    #[test]
+    fn finds_the_paths_right_inside_a_folder_whatever_their_names() {
+        let paths: BTreeSet<PathBuf> = [
+            "data",
+            "data/x",
+            "data/x/deep/a.csv",
+            "data/x-y.csv",
+            "data/x.csv",
+            "data/x0/b.csv",
+            "data/y",
+            "data2/c.csv",
+        ]
+        .map(PathBuf::from)
+        .into();
+
+        // A name that starts with another sorts after what is in the other, and a folder only
+        // known by what is in it is no path of its own.
+        assert_eq!(
+            children(&paths, Path::new("data")),
+            ["data/x", "data/x-y.csv", "data/x.csv", "data/y"].map(PathBuf::from)
         );
     }
 
