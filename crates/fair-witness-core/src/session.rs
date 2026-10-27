@@ -38,7 +38,9 @@ pub enum Event {
         set: usize,
         error: String,
     },
-    /// Watching failed after change set `set`, or before the first one when it is 0.
+    /// Watching failed for some folders, or the system dropped events and the changes found by
+    /// looking through the folder again come in the next set, after change set `set`, or
+    /// before the first one when it is 0.
     WatchErrors {
         set: usize,
         errors: Vec<String>,
@@ -201,7 +203,6 @@ async fn watch(
         let changes = match batch {
             Ok(changes) => changes,
             Err(WatchError::Failed(errors)) => {
-                let errors = errors.iter().map(ToString::to_string).collect();
                 events.send(Event::WatchErrors { set, errors });
                 continue;
             }
