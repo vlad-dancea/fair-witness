@@ -638,6 +638,54 @@ fn sends_the_saved_api_key_to_no_other_api() {
     assert_eq!(run.stop(), Some(0));
 }
 
+#[test]
+fn takes_an_api_key_only_with_the_url_of_its_api() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let (endpoint, server) = fake_model(vec![one_token()]);
+    let key = [("FAIR_WITNESS_API_KEY", "sk-test")];
+    let model = ["--dmp-file", &dmp_file, "--model", "test"];
+
+    let mut alone = Run::start_with(root.path(), &model, &key);
+    let setup = Command::new(env!("CARGO_BIN_EXE_fair-witness"))
+        .current_dir(root.path())
+        .args(["setup", "--api-key", "sk-test"])
+        .env_remove("FAIR_WITNESS_AI_URL")
+        .env_remove("FAIR_WITNESS_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let with_url = Run::start_with(
+        root.path(),
+        &model,
+        &[key[0], ("FAIR_WITNESS_AI_URL", &endpoint)],
+    );
+
+    assert_eq!(alone.exit_code(), Some(2));
+    assert_eq!(
+        alone.stderr_until("  --ai-url"),
+        [
+            "error: the following required arguments were not provided:",
+            "  --ai-url <AI_URL>"
+        ]
+    );
+    assert_eq!(setup.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&setup.stderr).starts_with(
+            "error: the following required arguments were not provided:\n  --ai-url <AI_URL>\n"
+        ),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    with_url.stderr_until("Comparing");
+    let (head, _) = &server.join().unwrap()[0];
+    assert!(
+        head.to_lowercase()
+            .contains("authorization: bearer sk-test"),
+        "{head}"
+    );
+    assert_eq!(with_url.stop(), Some(0));
+}
+
 /// Starts watching `project` against a DMP larger than a pipe holds, which the first trace
 /// event of a review carries. Nothing reads stdout.
 fn start_with_a_large_dmp(project: &Path) -> Run {

@@ -56,7 +56,7 @@ Run `fair-witness run` to start watching this folder.
 Edit /home/you/research/my-project/.fair-witness/ignore to choose which paths to ignore.
 ```
 
-Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The saved API key goes only to the API it was saved for. For that API, an empty answer keeps the key, and so does `--ai-url` with the same URL and no `--api-key`. Another API gets only a key you give for it, and the saved one is replaced, or removed when you give none. To remove the saved key and keep the API, run `fair-witness setup --api-key ''`. It removes the key before it contacts the API, so the key is gone even when an API that needs one then refuses to answer. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
+Run `setup` again any time to switch DMP, model or DAMAP instance. It remembers your previous answers and offers to keep you logged in. The saved API key goes only to the API it was saved for. For that API, an empty answer keeps the key, and so does `--ai-url` with the same URL and no `--api-key`. Another API gets only a key you give for it, and the saved one is replaced, or removed when you give none. To remove the saved key and keep the API, run `fair-witness setup --ai-url <its URL> --api-key ''`. It removes the key before it contacts the API, so the key is gone even when an API that needs one then refuses to answer. The effort chosen with `m` stays only when you keep the same API and model, because an effort one model takes can fail every review on another. When `setup` drops it, the line that names the model says so, and the model uses its default effort until you choose one with `m` in `run`.
 
 Last, `setup` asks the API once whether it takes the model and the effort it keeps, as `run` does when it starts. If the API refuses the effort, `setup` shows the API's message, drops the effort and checks the model at its default effort. If the API refuses the model, `setup` shows the message and asks for another model, or stops when `--model` named it.
 
@@ -72,7 +72,7 @@ The DAMAP URL and the AI settings can also be passed as flags or environment var
 |---|---|---|
 | `--url` | | DAMAP URL |
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API |
-| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it, or empty to remove the saved one |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for the API at `--ai-url`, or empty to remove the saved one. Needs `--ai-url` |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use |
 
 ```sh
@@ -80,7 +80,7 @@ FAIR_WITNESS_API_KEY=sk-... fair-witness setup --url https://damap.example.org \
   --ai-url https://api.openai.com/v1 --model gpt-5-mini
 ```
 
-You still log in and pick the DMP interactively.
+You still log in and pick the DMP interactively. A key from `--api-key` or `FAIR_WITNESS_API_KEY` needs `--ai-url` or `FAIR_WITNESS_AI_URL` beside it, in `setup` and in `run`, so that a key exported for one API never goes to another one.
 
 ### What setup saves
 
@@ -260,7 +260,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--project <dir>` | | Run in this folder instead of the current one. As there, the project is the nearest folder upwards that is set up, or this folder itself if none is |
 | `--dmp-file <path>` | | Check against the maDMP JSON in this file instead of downloading the DMP from DAMAP |
 | `--ai-url` | `FAIR_WITNESS_AI_URL` | Base URL of the OpenAI-compatible API, instead of the one chosen in `setup` |
-| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for it |
+| `--api-key` | `FAIR_WITNESS_API_KEY` | API key for the API at `--ai-url`. Needs `--ai-url` |
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use, instead of the one chosen in `setup` |
 | `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, instead of the effort chosen with `m`: a name the model takes, such as `low` or `xhigh`, which goes to the API as given. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore |
 | | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000). A set ends 30 times as long after its first change at the latest |
@@ -283,7 +283,7 @@ Each line is the same as in the events log of `.fair-witness/log/`: the time, th
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 
-The saved API key goes only to the API it was saved for in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved. As in `setup`, a key goes over plain `http://` only to this machine, and `run` exits with 2 before it sends anything when one would go elsewhere.
+The saved API key goes only to the API it was saved for in `setup`. With another `--ai-url`, pass its key with `--api-key`. A key from `--api-key` or `FAIR_WITNESS_API_KEY` needs `--ai-url` or `FAIR_WITNESS_AI_URL`, so that a key exported for one API never goes to the API a folder was set up with. A model chosen with `m` for such an API is used until you quit but not saved. As in `setup`, a key goes over plain `http://` only to this machine, and `run` exits with 2 before it sends anything when one would go elsewhere.
 
 ## Troubleshooting
 
@@ -294,6 +294,7 @@ The saved API key goes only to the API it was saved for in `setup`. With another
 - **"DAMAP's login server … uses plain HTTP"**: DAMAP logs in through a login server on another machine over plain HTTP. Only the people who run that DAMAP can change it.
 - **"… which would send the API key unencrypted"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
 - **"the saved DAMAP login is for …"** or **"… now logs in at …"**: `config.toml` names another DAMAP than the one you logged in to, or DAMAP names another login server than when you did. fair-witness does not send the login there. Log in again with `setup`.
+- **"the following required arguments were not provided: --ai-url"**: an API key was given with `--api-key` or `FAIR_WITNESS_API_KEY`, without the URL of its API. Pass `--ai-url` too, or unset `FAIR_WITNESS_API_KEY` to use the key saved by `setup`.
 - **"login failed: … answered …"**: DAMAP's login server refused the login, and its reason follows the status, such as "Invalid user credentials" for a wrong username or password. With only a status, such as `502 Bad Gateway`, the login server or a proxy in front of it failed. Try again later.
 - **"answered 401 Unauthorized"** from the AI API: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.

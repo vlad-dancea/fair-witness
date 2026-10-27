@@ -53,11 +53,13 @@ pub struct Args {
         help = "Base URL of an OpenAI-compatible API, instead of the one chosen in `setup`"
     )]
     ai_url: Option<String>,
+    // So that a key exported for one API never goes to the API a folder was set up with.
     #[arg(
         long,
         env = "FAIR_WITNESS_API_KEY",
         hide_env_values = true,
-        help = "API key for it, if it needs one"
+        requires = "ai_url",
+        help = "API key for the API at --ai-url, if it needs one"
     )]
     api_key: Option<String>,
     #[arg(

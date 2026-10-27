@@ -17,12 +17,15 @@ pub struct ModelArgs {
         help = "Base URL of an OpenAI-compatible API for the model; asked for if not given"
     )]
     pub ai_url: Option<String>,
+    // So that a key exported for one API is never saved for, or sent to, a URL typed at the
+    // prompt.
     #[arg(
         long,
         env = "FAIR_WITNESS_API_KEY",
         hide_env_values = true,
-        help = "API key for it, if it needs one, or empty to remove the saved one; asked for \
-                along with the URL"
+        requires = "ai_url",
+        help = "API key for the API at --ai-url, if it needs one, or empty to remove the saved \
+                one; asked for along with the URL"
     )]
     pub api_key: Option<String>,
     #[arg(
@@ -68,14 +71,7 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             let models = review::list_models(&url, api_key.as_deref()).await?;
             (url, api_key, models)
         }
-        None => {
-            ask_for_api(
-                previous.as_ref().map(|ai| ai.url.clone()),
-                args.api_key,
-                saved_key,
-            )
-            .await?
-        }
+        None => ask_for_api(previous.as_ref().map(|ai| ai.url.clone()), saved_key).await?,
     };
     let mut model = choose_model(
         &url,
@@ -164,7 +160,6 @@ fn chosen(previous: Option<AiConfig>, url: String, model: String) -> (AiConfig, 
 
 async fn ask_for_api(
     previous: Option<String>,
-    given_key: Option<String>,
     saved_key: Option<ApiKey>,
 ) -> Result<(String, Option<String>, Vec<String>)> {
     let mut default = previous.unwrap_or_else(|| DEFAULT_URL.to_string());
@@ -180,36 +175,22 @@ async fn ask_for_api(
                 continue;
             }
         };
-        let api_key = match &given_key {
-            Some(key) if key.is_empty() => None,
-            Some(_) if in_the_clear(&url) => {
-                println!(
-                    "{}, or leave out --api-key if it needs none. Try again, or press Ctrl+C to \
-                     stop.",
-                    api_key_unencrypted(&url)
-                );
-                default = url;
-                continue;
-            }
-            Some(key) => Some(key.clone()),
-            None if in_the_clear(&url) => {
-                println!("{}", no_key_sent(&url));
-                None
-            }
-            None => {
-                let saved_key = saved_key.as_ref().and_then(|saved| saved.for_api(&url));
-                let prompt = match saved_key {
-                    Some(_) => "API key (empty keeps the saved one)",
-                    None => "API key (empty for none)",
-                };
-                let key = Password::new()
-                    .with_prompt(prompt)
-                    .allow_empty_password(true)
-                    .interact()?;
-                Some(key)
-                    .filter(|key| !key.is_empty())
-                    .or(saved_key.map(str::to_string))
-            }
+        let api_key = if in_the_clear(&url) {
+            println!("{}", no_key_sent(&url));
+            None
+        } else {
+            let saved_key = saved_key.as_ref().and_then(|saved| saved.for_api(&url));
+            let prompt = match saved_key {
+                Some(_) => "API key (empty keeps the saved one)",
+                None => "API key (empty for none)",
+            };
+            let key = Password::new()
+                .with_prompt(prompt)
+                .allow_empty_password(true)
+                .interact()?;
+            Some(key)
+                .filter(|key| !key.is_empty())
+                .or(saved_key.map(str::to_string))
         };
         match review::list_models(&url, api_key.as_deref()).await {
             Ok(models) => return Ok((url, api_key, models)),
