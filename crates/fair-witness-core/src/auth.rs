@@ -190,6 +190,7 @@ async fn read<T: DeserializeOwned>(endpoint: &str, response: Response) -> Result
 }
 
 pub struct Oidc {
+    issuer: String,
     /// For the token endpoint, which may be on another machine than the issuer and so need
     /// another proxy setting.
     token_http: Client,
@@ -232,6 +233,7 @@ impl Oidc {
             bail!(unencrypted(endpoint));
         }
         Ok(Self {
+            issuer: issuer.to_string(),
             token_http: net::client(&discovery.token_endpoint, TIMEOUT)?,
             client_id: client_id.to_string(),
             scope: scope.to_string(),
@@ -239,6 +241,11 @@ impl Oidc {
             device_endpoint: discovery.device_authorization_endpoint,
             revocation_endpoint: discovery.revocation_endpoint,
         })
+    }
+
+    /// The login server, as DAMAP named it.
+    pub fn issuer(&self) -> &str {
+        &self.issuer
     }
 
     pub async fn refresh(&self, refresh_token: &str) -> Result<Tokens> {
@@ -510,6 +517,7 @@ mod tests {
     /// The login server at `url`, with all its endpoints there.
     fn login_server(url: &str) -> Oidc {
         Oidc {
+            issuer: url.to_string(),
             token_http: net::client(url, TIMEOUT).unwrap(),
             client_id: "damap".to_string(),
             scope: "openid".to_string(),

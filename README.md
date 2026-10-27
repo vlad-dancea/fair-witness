@@ -87,7 +87,7 @@ You still log in and pick the DMP interactively.
 Everything goes into a `.fair-witness/` folder at the root of the project:
 
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit.
-- `credentials.toml`: your DAMAP session and the API key. On macOS and Linux, readable only by you.
+- `credentials.toml`: your DAMAP session and the API key, each with the servers it was saved for. fair-witness sends each only to those, so a URL changed in `config.toml`, such as by a collaborator's commit, gets neither: `run` asks you to log in again, or warns that it sends no API key. On macOS and Linux, readable only by you. A file saved by an earlier version has no servers in it, so the first command that reads it takes them from `config.toml` and saves them there.
 - `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed on every `run`. When DAMAP cannot be reached, `run` checks against this copy and warns that it does. It names the DMP's contributors with their e-mail addresses, so on macOS and Linux it is readable only by you.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
 - `<file>.<random>.part`: what was left when fair-witness stopped while saving `<file>`. `config.toml`, `credentials.toml`, `madmp.json` and the `.gitignore` are written under such a name first and then renamed over the old file, so a save that fails keeps the old file whole. You can delete these.
@@ -242,7 +242,7 @@ Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right
 | `fair-witness run --headless` | Print what happens as lines of JSON instead of drawing the screen, see [Running from a script](#running-from-a-script) |
 | `fair-witness logout` | End the DAMAP session and forget the saved login for this folder |
 
-`logout` asks DAMAP's login server to end the saved session before it forgets the login, so a copy of `credentials.toml` with the same login stops working too. A copy from before a later login holds another session, which `logout` cannot end. When DAMAP or its login server cannot be reached, or refuses, `logout` forgets the login anyway and says that the session stays valid until it expires.
+`logout` asks the login server of the DAMAP the session was saved for to end it before it forgets the login, also when `config.toml` names another DAMAP since, so a copy of `credentials.toml` with the same login stops working too. A copy from before a later login holds another session, which `logout` cannot end. When DAMAP or its login server cannot be reached, or refuses, `logout` forgets the login anyway and says that the session stays valid until it expires.
 
 If `run` finds no DMP or no model, it still watches and lists changes, but does not check them. The header says so.
 
@@ -283,7 +283,7 @@ Each line is the same as in the events log of `.fair-witness/log/`: the time, th
 
 `--headless` stops when stdin closes, on `Ctrl+C` or on SIGTERM, also while it is still starting, and exits with 0. If stdout is not read, so that it cannot write out the events it has within 2 seconds, it exits with 1 instead. It never asks you to log in to DAMAP: when the saved login has expired, it falls back to the saved copy of the DMP, or fails if there is none. It exits with 2 when it cannot start, such as in a folder that is not set up or with a model or effort the API refuses, and with 1 when it fails while watching.
 
-The API key goes only to the API chosen in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved. As in `setup`, a key goes over plain `http://` only to this machine, and `run` exits with 2 before it sends anything when one would go elsewhere.
+The saved API key goes only to the API it was saved for in `setup`. With another `--ai-url`, pass its key with `--api-key`. A model chosen with `m` for such an API is used until you quit but not saved. As in `setup`, a key goes over plain `http://` only to this machine, and `run` exits with 2 before it sends anything when one would go elsewhere.
 
 ## Troubleshooting
 
@@ -293,6 +293,7 @@ The API key goes only to the API chosen in `setup`. With another `--ai-url`, pas
 - **"… which would send the DAMAP login unencrypted"**: the DAMAP URL uses plain HTTP to another machine. Run `setup` with DAMAP's `https://` address, also for a URL saved by an earlier `setup`.
 - **"DAMAP's login server … uses plain HTTP"**: DAMAP logs in through a login server on another machine over plain HTTP. Only the people who run that DAMAP can change it.
 - **"… which would send the API key unencrypted"**: the API key would cross the network unencrypted. Use `https://`, reach the API at `http://localhost` through an SSH tunnel, or leave out the key if the API needs none. For an API chosen in an earlier `setup`, run `setup` again.
+- **"the saved DAMAP login is for …"** or **"… now logs in at …"**: `config.toml` names another DAMAP than the one you logged in to, or DAMAP names another login server than when you did. fair-witness does not send the login there. Log in again with `setup`.
 - **"login failed: … answered …"**: DAMAP's login server refused the login, and its reason follows the status, such as "Invalid user credentials" for a wrong username or password. With only a status, such as `502 Bad Gateway`, the login server or a proxy in front of it failed. Try again later.
 - **"answered 401 Unauthorized"** from the AI API: the API key is missing or wrong. Aqueduct always needs one.
 - **"offers no models"**: with Ollama, install a model first, for example `ollama pull qwen3:8b`; otherwise pass `--model`.

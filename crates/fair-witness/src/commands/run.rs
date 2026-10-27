@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
@@ -135,7 +135,8 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         bail!(NOT_SET_UP);
     }
     let debounce = debounce()?;
-    let ai = ai(&project, config.as_ref(), &args)?;
+    let mut status = Vec::new();
+    let ai = ai(&project, config.as_ref(), &args, &mut status)?;
     let saved_dmp = config.as_ref().and_then(|config| config.damap.dmp_id);
 
     let mut session = Session::new(project.clone());
@@ -149,7 +150,6 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     if let Some(debounce) = debounce {
         session = session.debounce(debounce);
     }
-    let mut status = Vec::new();
     let mut settings = None;
     let dmp_given = args.dmp_file.is_some() || args.dmp.is_some();
     let source = match (args.dmp_file, args.dmp.or(saved_dmp)) {
@@ -232,11 +232,13 @@ fn debounce() -> Result<Option<Duration>> {
     }
 }
 
-/// The model to check with and its API key, from the flags and what `setup` saved.
+/// The model to check with and its API key, from the flags and what `setup` saved. Why the saved
+/// key is not sent, when it is for another API than the saved one, goes into `status`.
 fn ai(
     project: &Project,
     config: Option<&Config>,
     args: &Args,
+    status: &mut Vec<String>,
 ) -> Result<Option<(AiConfig, Option<String>)>> {
     let saved = config.and_then(|config| config.ai.clone());
     let url = match &args.ai_url {
@@ -247,24 +249,37 @@ fn ai(
             None => return Ok(None),
         },
     };
-    // Only the API from `setup` gets its saved key, model and effort.
-    let saved = saved.filter(|ai| same_url(&ai.url, &url));
-    let model = match (&args.model, &saved) {
+    // Only the API from `setup` gets its saved model and effort.
+    let saved_api = saved.filter(|ai| same_url(&ai.url, &url));
+    let model = match (&args.model, &saved_api) {
         (Some(model), _) => model.clone(),
         (None, Some(ai)) => ai.model.clone(),
         (None, None) => bail!("no model chosen for {url}; pass --model"),
     };
     let effort = match &args.effort {
         Some(effort) => effort.clone(),
-        None => saved
+        None => saved_api
             .as_ref()
             .filter(|ai| ai.model == model)
             .map(|ai| ai.effort.clone())
             .unwrap_or_default(),
     };
-    let api_key = match (&args.api_key, &saved) {
+    let api_key = match (&args.api_key, project.credentials()?.ai) {
         (Some(key), _) => Some(key.clone()),
-        (None, Some(_)) => project.credentials()?.api_key,
+        (None, Some(saved)) => match saved.for_api(&url) {
+            Some(key) => Some(key.to_string()),
+            // As after an edit of config.toml, or a `setup` that saved the key but not the API
+            // it is for.
+            None if saved_api.is_some() => {
+                status.push(format!(
+                    "The saved API key is for {}, so none is sent to {url}. To save one for \
+                     {url}, run `fair-witness setup`.",
+                    saved.url
+                ));
+                None
+            }
+            None => None,
+        },
         (None, None) => None,
     };
     // Also for an API saved before `setup` refused plain HTTP to another machine.
@@ -351,15 +366,18 @@ async fn saved_session(project: &Project) -> Result<Damap> {
     let config = project.config()?.context(NOT_SET_UP)?;
     let (damap, instance) = damap::reach(&config.damap.frontend_url).await?;
     let oidc = damap::discover(&damap, &instance, &ErrorOutput).await?;
-    let refresh_token = project
+    let login = project
         .credentials()?
-        .refresh_token
+        .damap
         .context("not logged in to DAMAP; log in with `fair-witness setup`")?;
+    let refresh_token = login
+        .refresh_token_for(damap.url(), oidc.issuer())
+        .map_err(|e| anyhow!("{e}; log in with `fair-witness setup`"))?;
     let tokens = oidc
-        .refresh(&refresh_token)
+        .refresh(refresh_token)
         .await
         .context("the DAMAP login has expired; log in again with `fair-witness setup`")?;
-    damap::save_session(project, damap, tokens, &ErrorOutput)
+    damap::save_session(project, damap, &oidc, tokens, &ErrorOutput)
 }
 
 /// Writes the login's notices to stderr, keeping stdout for events.
@@ -473,7 +491,7 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use fair_witness_core::project::{Credentials, DamapConfig};
+    use fair_witness_core::project::{ApiKey, Credentials, DamapConfig};
 
     use super::*;
 
@@ -507,7 +525,9 @@ mod tests {
             }),
         };
         let effort = |args: Args| {
-            let (ai, _) = ai(&project, Some(&config), &args).unwrap().unwrap();
+            let (ai, _) = ai(&project, Some(&config), &args, &mut Vec::new())
+                .unwrap()
+                .unwrap();
             ai.effort.name().to_string()
         };
 
@@ -530,8 +550,11 @@ mod tests {
         let project = Project::new(dir.path().to_path_buf());
         project
             .save_credentials(&Credentials {
-                api_key: Some("sk-saved".to_string()),
-                ..Credentials::default()
+                damap: None,
+                ai: Some(ApiKey {
+                    url: "https://api.example.org/v1".to_string(),
+                    key: "sk-saved".to_string(),
+                }),
             })
             .unwrap();
         let found = |saved: &str, given: &str| {
@@ -550,7 +573,9 @@ mod tests {
                 ai_url: Some(given.to_string()),
                 ..args(None, None)
             };
-            let (ai, api_key) = ai(&project, Some(&config), &args).unwrap().unwrap();
+            let (ai, api_key) = ai(&project, Some(&config), &args, &mut Vec::new())
+                .unwrap()
+                .unwrap();
             (ai.url, ai.model, ai.effort.name().to_string(), api_key)
         };
         let saved = (
