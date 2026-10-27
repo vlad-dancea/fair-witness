@@ -1019,6 +1019,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
