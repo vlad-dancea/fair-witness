@@ -8,7 +8,8 @@ use reqwest::{Client, ClientBuilder};
 use url::{Host, Url};
 
 /// Reads a web address as typed, the way fair-witness saves, compares and sends requests to it:
-/// `https://` is assumed when no scheme is given, and a trailing `/` is dropped.
+/// `https://` is assumed when no scheme is given, the path loses a trailing `/` and the fragment,
+/// which never reaches the server, is dropped. The query stays as typed.
 pub fn web_url(input: &str) -> Result<String> {
     let input = input.trim();
     let with_scheme = if input.contains("://") {
@@ -17,11 +18,32 @@ pub fn web_url(input: &str) -> Result<String> {
         format!("https://{input}")
     };
     match Url::parse(&with_scheme) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => {
-            Ok(url.as_str().trim_end_matches('/').to_string())
+        Ok(mut url) if matches!(url.scheme(), "http" | "https") && url.has_host() => {
+            url.set_fragment(None);
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(&path);
+            Ok(match url.query() {
+                Some(_) => url.into(),
+                // The url crate writes an empty path as `/`.
+                None => url.as_str().trim_end_matches('/').to_string(),
+            })
         }
         _ => bail!("{input} is not a web address like https://example.org"),
     }
+}
+
+/// Where a request for `path` goes on the server at `url`: under the path of `url`, with its
+/// query, as genai's OpenAI adapter builds its requests too.
+pub(crate) fn under(url: &str, path: &str) -> Result<String> {
+    let mut url = Url::parse(url)
+        .with_context(|| format!("{url} is not a web address like https://example.org"))?;
+    let joined = format!(
+        "{}/{}",
+        url.path().trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+    url.set_path(&joined);
+    Ok(url.into())
 }
 
 /// Whether `a` and `b` are the same web address, however each was typed or saved.
@@ -134,6 +156,7 @@ mod tests {
                 "http://gpu-box:11434/v1",
                 "HTTPS://Models.Example.org:443//",
                 "https://api.example.org/v1/?api-version=1/",
+                "http://localhost:11434/v1/#tag",
             ]
             .map(|input| web_url(input).unwrap()),
             [
@@ -143,7 +166,8 @@ mod tests {
                 "http://[::1]:11434/v1",
                 "http://gpu-box:11434/v1",
                 "https://models.example.org",
-                "https://api.example.org/v1/?api-version=1",
+                "https://api.example.org/v1?api-version=1/",
+                "http://localhost:11434/v1",
             ]
         );
     }
@@ -180,15 +204,25 @@ mod tests {
                     "https://api.example.org/v1",
                     "https://api.example.org/v1?key=1"
                 ),
-                // Requests go to /v1/chat/completions for one and /chat/completions for the other.
+                (
+                    "https://api.example.org/v1?key=1",
+                    "https://api.example.org/v1?key=1/"
+                ),
+                ("not a web address", "not a web address/"),
+                // Requests for both go to /v1/chat/completions?key=1.
                 (
                     "https://api.example.org/v1/?key=1",
                     "https://api.example.org/v1?key=1"
                 ),
-                ("not a web address", "not a web address/"),
+                (
+                    "http://localhost:11434/v1#tag",
+                    "http://localhost:11434/v1/"
+                ),
             ]
             .map(|(a, b)| same_url(a, b)),
-            [true, true, true, false, false, false, false, false]
+            [
+                true, true, true, false, false, false, false, false, true, true
+            ]
         );
     }
 
