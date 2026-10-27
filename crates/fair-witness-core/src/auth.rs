@@ -269,7 +269,8 @@ impl Oidc {
             ("grant_type", DEVICE_CODE_GRANT),
             ("device_code", authorization.device_code.as_str()),
         ];
-        while Instant::now() < deadline {
+        // A poll after the code expired would only be told so, and hide why the last one failed.
+        while Instant::now() + wait < deadline {
             tokio::time::sleep(wait).await;
             // The person may have confirmed the code already, so a request that fails on the way
             // or meets a server error must not end the login while the code is valid.
@@ -526,6 +527,33 @@ mod tests {
                 "{form}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reports_the_last_failure_when_the_code_expires() {
+        let (url, server) = fake_model(vec![
+            answer(
+                "200 OK",
+                json!({
+                    "device_code": "secret",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://login.example.org/device",
+                    "expires_in": 1,
+                    "interval": 0,
+                }),
+            ),
+            page("502 Bad Gateway", BAD_GATEWAY),
+        ]);
+
+        let failed = login_server(&url).login(&Browser::default()).await;
+
+        assert_eq!(
+            failed.err().map(|e| format!("{e:#}")),
+            Some(format!(
+                "login timed out; please try again: {url}/token answered 502 Bad Gateway"
+            ))
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[tokio::test]
