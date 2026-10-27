@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use genai::chat::Tool;
@@ -75,19 +75,24 @@ impl Tools {
         }
     }
 
-    /// Where `path` leads, relative to the root, if that is research data. Checking where it
-    /// leads keeps a link from reaching what the filter skips.
+    /// Where `path` leads, relative to the root, if that is research data. Both the name, which
+    /// the watcher and `list_dir` judge, and where a link in it leads must be.
     fn resolve(&self, path: &str) -> Result<PathBuf, String> {
         let unescaped = escape::unescape(path).map_err(|e| format!("{path}: {e}"))?;
         let resolved = self
             .root
-            .join(unescaped)
+            .join(&unescaped)
             .canonicalize()
             .map_err(|e| format!("{path}: {e}"))?;
         let Ok(relative) = resolved.strip_prefix(&self.root) else {
             return Err(format!("{path} is outside the project folder"));
         };
-        if self.filter.skips_relative(relative, resolved.is_dir()) {
+        let skips_name = as_written(&self.root, &unescaped).is_some_and(|name| {
+            // Without following a link, as the watcher looks at it.
+            let is_dir = fs::symlink_metadata(self.root.join(&name)).is_ok_and(|m| m.is_dir());
+            self.filter.skips_relative(&name, is_dir)
+        });
+        if skips_name || self.filter.skips_relative(relative, resolved.is_dir()) {
             return Err(format!("{path} is not part of the research data"));
         }
         Ok(relative.to_path_buf())
@@ -128,6 +133,21 @@ impl Tools {
     }
 }
 
+/// `path` relative to `root` as written, with `.` and `..` applied to the name alone, or
+/// nothing when the name leaves `root`.
+fn as_written(root: &Path, path: &Path) -> Option<PathBuf> {
+    let mut name = PathBuf::new();
+    for component in path.strip_prefix(root).unwrap_or(path).components() {
+        match component {
+            Component::Normal(part) => name.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if name.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(name)
+}
+
 fn read_file(path: &Path) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
@@ -161,7 +181,7 @@ mod tests {
         for (path, contents) in [
             ("data/a.csv", "id,name\n1,x\n"),
             (".fair-witness/credentials.toml", "secret"),
-            (".fair-witness/ignore", "scratch/\n"),
+            (".fair-witness/ignore", "scratch/\nprivate.csv\n"),
             // As `fair-witness setup` in `data/` leaves it.
             ("data/.fair-witness/credentials.toml", "secret"),
             (".git/config", "url = https://token@example.org/lab.git\n"),
@@ -239,14 +259,25 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn refuses_a_link_to_what_the_watcher_skips() {
+    fn refuses_a_link_to_or_named_as_what_the_watcher_skips() {
         let (dir, tools) = project();
-        std::os::unix::fs::symlink("../.git/config", dir.path().join("data/remote")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        for (target, link) in [
+            ("../.git/config", "data/remote"),
+            ("data/a.csv", "private.csv"),
+            ("../data", "notes/.fair-witness"),
+        ] {
+            std::os::unix::fs::symlink(target, dir.path().join(link)).unwrap();
+        }
 
-        assert_eq!(
-            call(&tools, "read_file", "data/remote"),
-            Err("data/remote is not part of the research data".to_string())
-        );
+        for path in ["data/remote", "private.csv", "notes/.fair-witness/a.csv"] {
+            assert_eq!(
+                call(&tools, "read_file", path),
+                Err(format!("{path} is not part of the research data"))
+            );
+        }
+        assert_eq!(call(&tools, "list_dir", ".").unwrap(), "data/\nnotes/");
+        assert_eq!(call(&tools, "list_dir", "notes").unwrap(), "(empty folder)");
     }
 
     #[test]
