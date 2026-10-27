@@ -12,7 +12,14 @@ use url::{Host, Url};
 /// which never reaches the server, is dropped. The query stays as typed.
 pub fn web_url(input: &str) -> Result<String> {
     let input = input.trim();
-    let with_scheme = if input.contains("://") {
+    // Only at the start, since a path or query may hold another address.
+    let has_scheme = input.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    let with_scheme = if has_scheme {
         input.to_string()
     } else {
         format!("https://{input}")
@@ -157,6 +164,7 @@ mod tests {
                 "HTTPS://Models.Example.org:443//",
                 "https://api.example.org/v1/?api-version=1/",
                 "http://localhost:11434/v1/#tag",
+                "gpu-box/v1?next=https://example.org",
             ]
             .map(|input| web_url(input).unwrap()),
             [
@@ -168,6 +176,7 @@ mod tests {
                 "https://models.example.org",
                 "https://api.example.org/v1?api-version=1/",
                 "http://localhost:11434/v1",
+                "https://gpu-box/v1?next=https://example.org",
             ]
         );
     }
