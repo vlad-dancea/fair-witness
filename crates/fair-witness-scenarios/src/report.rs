@@ -235,6 +235,10 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ru
                 problems.push(format!("watching failed: {}", errors.join("; ")));
                 continue;
             }
+            Event::WatchStopped { error } => {
+                problems.push(format!("watching stopped: {error}"));
+                continue;
+            }
             // Only a folder that is set up gets a log.
             Event::LogStopped { .. } => continue,
         };

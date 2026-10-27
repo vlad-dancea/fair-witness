@@ -10,7 +10,7 @@ use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
-use fair_witness_core::session::{Record, Session};
+use fair_witness_core::session::{Event, Record, Session};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::Instant;
@@ -487,6 +487,9 @@ async fn write_events(
         }
     });
     tokio::pin!(stopped, writer);
+    // Why the session ended on its own, which fails the run also when a stop comes after it, as
+    // from a script that closes stdin once it reads the reason.
+    let mut ended = None;
     loop {
         tokio::select! {
             () = &mut stopped => break,
@@ -496,7 +499,13 @@ async fn write_events(
             }
             behind = fallen_behind(&busy_since, read_within) => return Err(behind),
             record = records.recv() => {
-                let record = record.context("stopped watching")?;
+                let Some(record) = record else {
+                    ended.get_or_insert_with(|| "stopped watching".to_string());
+                    break;
+                };
+                if let Event::WatchStopped { error } = &record.event {
+                    ended = Some(error.clone());
+                }
                 let mut line = serde_json::to_string(&record)?;
                 line.push('\n');
                 // A full queue holds back the session's events, which then pile up in its channel
@@ -514,9 +523,17 @@ async fn write_events(
     // since a reader that stopped reading never lets it.
     drop(lines);
     // A writer that fails now has lost its reader, which wants no more lines.
-    match tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await {
-        Ok(_) => Ok(()),
-        Err(_) => bail!("stopped before writing every event, since stdout was not read"),
+    let unwritten = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer)
+        .await
+        .is_err()
+        .then_some("stopped before writing every event, since stdout was not read");
+    // The last lines say why the session ended, unless stdout was not read, which a reader that
+    // misses them learns too.
+    match (ended, unwritten) {
+        (Some(ended), Some(unwritten)) => bail!("{ended}\nIt also {unwritten}"),
+        (Some(ended), None) => bail!(ended),
+        (None, Some(unwritten)) => bail!(unwritten),
+        (None, None) => Ok(()),
     }
 }
 
@@ -677,6 +694,66 @@ mod tests {
             .await
             .expect("still writing");
         written.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fails_with_why_watching_stopped_also_when_stopped_after_it() {
+        let (sender, records) = mpsc::unbounded_channel();
+        let time = "2026-10-27T13:00:00Z".parse().unwrap();
+        let error = "the project folder was moved or deleted".to_string();
+        sender
+            .send(Record {
+                time,
+                event: Event::WatchStopped { error },
+            })
+            .unwrap();
+
+        // The session has not closed its channel yet when the stop comes.
+        let written = write_events(
+            records,
+            io::sink(),
+            tokio::time::sleep(Duration::from_millis(100)),
+            Duration::from_secs(60),
+        );
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "the project folder was moved or deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn says_why_watching_stopped_and_that_stdout_missed_it() {
+        let (sender, records) = mpsc::unbounded_channel();
+        let time = "2026-10-27T13:00:00Z".parse().unwrap();
+        let error = "the project folder was moved or deleted".to_string();
+        sender
+            .send(Record {
+                time,
+                event: Event::WatchStopped { error },
+            })
+            .unwrap();
+        drop(sender);
+        let (_test_runs, test_ended) = std::sync::mpsc::channel();
+
+        let written = write_events(
+            records,
+            Reader::new(test_ended, 1, Duration::MAX),
+            std::future::pending(),
+            Duration::from_secs(60),
+        );
+        let written = tokio::time::timeout(STOP_WRITING_WITHIN * 2, written)
+            .await
+            .expect("still writing");
+
+        assert_eq!(
+            written.unwrap_err().to_string(),
+            "the project folder was moved or deleted\nIt also stopped before writing every \
+             event, since stdout was not read"
+        );
     }
 
     #[tokio::test]
