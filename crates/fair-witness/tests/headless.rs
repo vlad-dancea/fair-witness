@@ -1,7 +1,7 @@
 //! Runs the binary headless, as a script or an agent would.
 
 use std::io::{BufRead, BufReader, Read};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -143,13 +143,18 @@ fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
-/// A port that was just free, so that nothing answers there.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// An address that closes every connection unanswered, as a server that cannot be reached
+/// would. It keeps listening until the tests end, because a port that was only freed can be
+/// handed to another test's fake server.
+fn hangs_up() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            drop(connection);
+        }
+    });
+    address
 }
 
 #[test]
@@ -249,7 +254,7 @@ fn checks_against_the_saved_copy_when_damap_cannot_be_reached() {
     let project = Project::new(root.path().to_path_buf());
     let config = Config {
         damap: DamapConfig {
-            frontend_url: format!("http://127.0.0.1:{}", free_port()),
+            frontend_url: format!("http://{}", hangs_up()),
             dmp_id: Some(3),
         },
         ai: None,
@@ -435,7 +440,7 @@ fn sends_the_api_key_to_this_machine_without_a_proxy() {
 #[test]
 fn starts_when_the_model_cannot_be_checked() {
     let (root, dmp_file) = unset_folder_with_a_dmp();
-    let endpoint = format!("http://127.0.0.1:{}/v1", free_port());
+    let endpoint = format!("http://{}/v1", hangs_up());
 
     let run = Run::start(
         root.path(),
