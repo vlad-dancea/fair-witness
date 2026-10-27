@@ -225,6 +225,7 @@ async fn watch(
                         .to_string(),
                 );
             }
+            Err(WatchError::Stopped(error)) => return Some(error),
         };
         set += 1;
         events.send(Event::Changes {
