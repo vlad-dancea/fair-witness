@@ -108,7 +108,11 @@ impl Run {
     }
 
     fn exit_code(&mut self) -> Option<i32> {
-        for _ in 0..PATIENCE.as_millis() / 20 {
+        self.exit_code_within(PATIENCE)
+    }
+
+    fn exit_code_within(&mut self, patience: Duration) -> Option<i32> {
+        for _ in 0..patience.as_millis() / 20 {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status.code();
             }
@@ -597,5 +601,22 @@ fn stops_when_nobody_reads_its_events() {
     assert_eq!(
         run.stderr_until("error:").pop().unwrap(),
         "error: stopped before writing every event, since stdout was not read"
+    );
+}
+
+#[test]
+fn stops_when_its_events_are_not_read_while_it_runs() {
+    let project = tempfile::tempdir().unwrap();
+    let mut run = start_with_a_large_dmp(project.path());
+    stuck_writing(project.path(), &mut run);
+
+    // Stdin stays open, so only the 30 seconds that the writer stays behind stop it.
+    assert_eq!(
+        run.exit_code_within(Duration::from_secs(30) + PATIENCE),
+        Some(1)
+    );
+    assert_eq!(
+        run.stderr_until("error:").pop().unwrap(),
+        "error: stopped, since stdout was not read fast enough for 30s"
     );
 }
