@@ -27,6 +27,9 @@ const MAX_RETRIES: usize = 10;
 /// The longest wait before a retry. A limit per minute never asks for more, and a review is not
 /// worth holding for a longer one, such as a daily quota.
 const MAX_WAIT: Duration = Duration::from_secs(60);
+/// How often a request goes again after a reply that could not be read. A small model now and
+/// then writes a tool call that is not JSON, and asked again, it usually writes it right.
+const MAX_REASKS: usize = 2;
 /// How long the API may take to answer one request. A reply at a high effort from a busy API
 /// can take minutes.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -114,7 +117,7 @@ pub enum Trace {
         failed: bool,
     },
     /// Why a request or the whole review failed, in one line as `Reviewer::reportable` leaves
-    /// it.
+    /// it. A request whose reply could not be read goes again after it.
     Failed(String),
 }
 
@@ -343,7 +346,8 @@ impl Reviewer {
     }
 
     /// Sends `request` and gives back the reply with how long it took. When the API refuses the
-    /// request with 429 Too Many Requests, waits as long as it asks and sends it again.
+    /// request with 429 Too Many Requests, waits as long as it asks and sends it again, and when
+    /// the reply cannot be read, sends it again at once.
     async fn ask(
         &self,
         model: &str,
@@ -353,6 +357,7 @@ impl Reviewer {
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<(ChatResponse, Duration)> {
         let mut retry = 0;
+        let mut reasks = 0;
         loop {
             let e = match self.send(model, request, options, turn, trace).await {
                 Ok(replied) => return Ok(replied),
@@ -399,6 +404,10 @@ impl Reviewer {
             };
             let why = self.reportable(why);
             trace(Trace::Failed(why.clone()));
+            if matches!(e, genai::Error::ChatResponseGeneration { .. }) && reasks < MAX_REASKS {
+                reasks += 1;
+                continue;
+            }
             return Err(anyhow!(why).context(failed));
         }
     }
@@ -1076,10 +1085,9 @@ mod tests {
 
         let mut failures = Vec::new();
         for unreadable in [cut_off, misplaced] {
-            let (endpoint, _server) = fake_model(vec![
-                tool_call("read_file", json!({ "path": "patients.csv" })),
-                unreadable,
-            ]);
+            let mut replies = vec![tool_call("read_file", json!({ "path": "patients.csv" }))];
+            replies.extend(vec![unreadable; MAX_REASKS + 1]);
+            let (endpoint, server) = fake_model(replies);
             let traces = Mutex::new(Vec::new());
             let e = reviewer(endpoint)
                 .review(
@@ -1095,6 +1103,7 @@ mod tests {
             let Some(Trace::Failed(why)) = traces.into_inner().unwrap().pop() else {
                 panic!("no failure traced last");
             };
+            assert_eq!(server.join().unwrap().len(), MAX_REASKS + 2);
             failures.push((format!("{e:#}"), why));
         }
 
@@ -1107,6 +1116,46 @@ mod tests {
         assert_eq!(
             failures,
             why.map(|why| (format!("the model test failed: {why}"), why.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn asks_again_after_a_reply_that_cannot_be_read() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cut_off = tool_call("read_file", json!({}));
+        cut_off["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+            json!(r#"{"path": "data/a.csv""#);
+        let (endpoint, server) = fake_model(vec![cut_off, verdict()]);
+
+        let traces = Mutex::new(Vec::new());
+        let verdict = reviewer(endpoint)
+            .review(
+                &input(root.path(), "{}", &[Change::Created("data/a.csv".into())]),
+                &|trace| traces.lock().unwrap().push(trace),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(verdict.explanation, "A log file.");
+        let requests = server.join().unwrap();
+        assert_eq!(requests[1].1, requests[0].1);
+        let traces: Vec<Trace> = traces
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .filter(|trace| matches!(trace, Trace::Request { .. } | Trace::Failed(_)))
+            .collect();
+        assert_eq!(
+            traces,
+            [
+                Trace::Request { turn: 1 },
+                Trace::Failed(
+                    "the model's reply could not be read: Serde JSON error: EOF while parsing an \
+                     object at line 1 column 21"
+                        .to_string()
+                ),
+                Trace::Request { turn: 1 },
+            ]
         );
     }
 
