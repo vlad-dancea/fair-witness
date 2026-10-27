@@ -1,9 +1,9 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use dialoguer::{Confirm, Input, Password};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{Damap, InstanceConfig, discover, reach, save_session};
+use fair_witness_core::net::{same_url, web_url};
 use fair_witness_core::project::Project;
-use reqwest::Url;
 
 const DEFAULT_URL: &str = "https://damap.it.tuwien.ac.at";
 
@@ -47,7 +47,11 @@ pub async fn setup(
         None => None,
     };
     let session = match refresh_token {
-        Some(token) if previous_url.as_deref() == Some(damap.url()) => {
+        Some(token)
+            if previous_url
+                .as_deref()
+                .is_some_and(|url| same_url(url, damap.url())) =>
+        {
             oidc.refresh(&token).await.ok()
         }
         _ => None,
@@ -65,26 +69,6 @@ pub async fn setup(
     };
     project.create()?;
     save_session(project, damap, tokens, &TerminalPrompts)
-}
-
-/// Reads a web address as typed: `https://` is assumed when no scheme is given.
-pub fn web_url(input: &str) -> Result<String> {
-    let input = input.trim();
-    let with_scheme = if input.contains("://") {
-        input.to_string()
-    } else {
-        format!("https://{input}")
-    };
-    let looks_like_a_site = |url: &Url| {
-        matches!(url.scheme(), "http" | "https")
-            && url
-                .host_str()
-                .is_some_and(|host| host.contains('.') || host == "localhost")
-    };
-    match Url::parse(&with_scheme) {
-        Ok(url) if looks_like_a_site(&url) => Ok(with_scheme),
-        _ => bail!("{input} is not a web address like https://example.org"),
-    }
 }
 
 async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfig)> {
@@ -111,33 +95,5 @@ async fn ask_for_damap(previous: Option<String>) -> Result<(Damap, InstanceConfi
             Err(e) => println!("{e:#}. Try again, or press Ctrl+C to stop."),
         }
         default = url;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::web_url;
-
-    #[test]
-    fn reads_web_addresses_as_typed() {
-        assert_eq!(
-            web_url("damap.it.tuwien.ac.at").unwrap(),
-            "https://damap.it.tuwien.ac.at"
-        );
-        assert_eq!(
-            web_url(" http://localhost:8085 ").unwrap(),
-            "http://localhost:8085"
-        );
-        assert_eq!(
-            web_url("https://aqueduct.ai.datalab.tuwien.ac.at/v1").unwrap(),
-            "https://aqueduct.ai.datalab.tuwien.ac.at/v1"
-        );
-    }
-
-    #[test]
-    fn rejects_what_is_not_a_web_address() {
-        for input in ["user", "", "ftp://example.org", "https://"] {
-            assert!(web_url(input).is_err(), "{input}");
-        }
     }
 }

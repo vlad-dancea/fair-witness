@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use fair_witness_core::auth::Prompts;
 use fair_witness_core::damap::{self, Damap};
-use fair_witness_core::net::in_the_clear;
+use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::{Checked, Reviewer};
 use fair_witness_core::session::{Record, Session};
@@ -16,8 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::Instant;
 
 use super::Failure;
-use crate::setup::damap::{TerminalPrompts, web_url};
-use crate::setup::model::unencrypted;
+use crate::setup::damap::TerminalPrompts;
 use crate::tui::app::{Screen, Update};
 use crate::tui::model_panel::{self, ModelSettings};
 use crate::{diagnostics, notifications};
@@ -257,7 +256,7 @@ fn ai(
         },
     };
     // Only the API from `setup` gets its saved key, model and effort.
-    let saved = saved.filter(|ai| ai.url == url);
+    let saved = saved.filter(|ai| same_url(&ai.url, &url));
     let model = match (&args.model, &saved) {
         (Some(model), _) => model.clone(),
         (None, Some(ai)) => ai.model.clone(),
@@ -282,7 +281,7 @@ fn ai(
             Some(_) => "or leave out --api-key if it needs none",
             None => "or run `fair-witness setup` again to use it without the saved key",
         };
-        bail!("{}, {without_key}", unencrypted(&url));
+        bail!("{}, {without_key}", api_key_unencrypted(&url));
     }
     Ok(Some((AiConfig { url, model, effort }, api_key)))
 }
@@ -510,7 +509,7 @@ async fn write_events(
 mod tests {
     use std::sync::mpsc::RecvTimeoutError;
 
-    use fair_witness_core::project::DamapConfig;
+    use fair_witness_core::project::{Credentials, DamapConfig};
     use fair_witness_core::session::Event;
 
     use super::*;
@@ -705,6 +704,52 @@ mod tests {
                 effort(args(Some("large"), Some("none"))),
             ],
             ["low", "default", "high", "default", "none"]
+        );
+    }
+
+    #[test]
+    fn finds_the_settings_saved_for_the_url_however_it_is_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::new(dir.path().to_path_buf());
+        project
+            .save_credentials(&Credentials {
+                api_key: Some("sk-saved".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+        let found = |saved: &str, given: &str| {
+            let config = Config {
+                damap: DamapConfig {
+                    frontend_url: "https://damap.example.org".to_string(),
+                    dmp_id: None,
+                },
+                ai: Some(AiConfig {
+                    url: saved.to_string(),
+                    model: "small".to_string(),
+                    effort: "low".parse().unwrap(),
+                }),
+            };
+            let args = Args {
+                ai_url: Some(given.to_string()),
+                ..args(None, None)
+            };
+            let (ai, api_key) = ai(&project, Some(&config), &args).unwrap().unwrap();
+            (ai.url, ai.model, ai.effort.name().to_string(), api_key)
+        };
+        let saved = (
+            "https://api.example.org/v1".to_string(),
+            "small".to_string(),
+            "low".to_string(),
+            Some("sk-saved".to_string()),
+        );
+
+        assert_eq!(
+            [
+                found("https://api.example.org/v1", "https://api.example.org/v1/"),
+                // As an earlier `setup` saved it when typed with a trailing `/`.
+                found("https://api.example.org/v1/", "API.example.org/v1"),
+            ],
+            [saved.clone(), saved]
         );
     }
 }
