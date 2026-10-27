@@ -332,12 +332,17 @@ fn mean(values: impl Iterator<Item = u64>) -> u64 {
     (sum + count / 2).checked_div(count).unwrap_or(0)
 }
 
+/// Compares the changes themselves, in any order. Their descriptions can read alike, since
+/// "renamed a to b to c" can be either of two renames.
 fn same_changes(want: &[Change], got: &[Change]) -> bool {
-    let sorted = |changes: &[Change]| {
-        let mut described: Vec<String> = changes.iter().map(describe_change).collect();
-        described.sort();
-        described
-    };
+    fn sorted(changes: &[Change]) -> Vec<&Change> {
+        let mut sorted: Vec<&Change> = changes.iter().collect();
+        sorted.sort_by_key(|&change| match change {
+            Change::Renamed { from, to } => (change.kind(), from.as_path(), Some(to.as_path())),
+            _ => (change.kind(), change.path(), None),
+        });
+        sorted
+    }
     sorted(want) == sorted(got)
 }
 
@@ -461,6 +466,25 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn tells_apart_renames_that_read_alike() {
+        let renamed = |from: &str, to: &str| Change::Renamed {
+            from: from.into(),
+            to: to.into(),
+        };
+        let want = [renamed("a", "b to c"), Change::Created("d".into())];
+
+        // Both read "renamed a to b to c".
+        assert!(!same_changes(
+            &want,
+            &[renamed("a to b", "c"), Change::Created("d".into())]
+        ));
+        assert!(same_changes(
+            &want,
+            &[Change::Created("d".into()), renamed("a", "b to c")]
+        ));
     }
 
     #[test]
