@@ -3,7 +3,7 @@ use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
 use fair_witness_core::project::{AiConfig, ApiKey, Effort, Project};
-use fair_witness_core::review::{self, Checked, ModelChoice, Reviewer};
+use fair_witness_core::review::{self, ChoiceCheck, ModelChoice, ModelStep};
 
 use crate::tui::model_panel::describe;
 
@@ -87,9 +87,12 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             effort: ai.effort.clone(),
         };
         let described = describe(&choice);
-        match Reviewer::new(&ai, api_key.clone())?.check(&choice).await {
-            Checked::Accepted => break (ai, line),
-            Checked::Unknown(why) => {
+        match ModelStep::new(&ai, api_key.clone())?
+            .try_choice(&choice)
+            .await
+        {
+            ChoiceCheck::Accepted => break (ai, line),
+            ChoiceCheck::Unknown(why) => {
                 println!(
                     "Could not check {described}, so the reviews will show whether the API takes \
                      it: {why}"
@@ -98,15 +101,15 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
             }
             // `setup` asks for no effort, so the one kept from before goes, and the model is
             // checked at its own.
-            Checked::Refused(message) if !ai.effort.is_default() => {
+            ChoiceCheck::Refused(message) if !ai.effort.is_default() => {
                 println!("{url} refuses {described}: {message}");
                 previous = None;
             }
-            Checked::Refused(message) if args.model.is_some() => bail!(
+            ChoiceCheck::Refused(message) if args.model.is_some() => bail!(
                 "{url} refuses {described}: {message}\nChoose another with --model, or leave it \
                  out to choose one from the list"
             ),
-            Checked::Refused(message) => {
+            ChoiceCheck::Refused(message) => {
                 println!("{url} refuses {described}: {message}");
                 println!("Choose another model, or press Ctrl+C to stop.");
                 model = choose_model(&url, &models, None, Some(model))?;
