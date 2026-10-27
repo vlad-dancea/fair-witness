@@ -54,6 +54,8 @@ pub struct Reply {
     status: &'static str,
     headers: String,
     body: Value,
+    /// Whether it keeps the connection open without answering.
+    silent: bool,
 }
 
 impl From<Value> for Reply {
@@ -62,7 +64,16 @@ impl From<Value> for Reply {
             status: "200 OK",
             headers: String::new(),
             body,
+            silent: false,
         }
+    }
+}
+
+/// No answer, as from a stuck API that takes the request and keeps the connection open.
+pub fn no_answer() -> Reply {
+    Reply {
+        silent: true,
+        ..Reply::from(Value::Null)
     }
 }
 
@@ -73,6 +84,7 @@ pub fn too_many_requests(retry_after: Option<&str>, message: &str) -> Reply {
         status: "429 Too Many Requests",
         headers: retry_after.map_or(String::new(), |wait| format!("Retry-After: {wait}\r\n")),
         body: json!({ "error": { "message": message, "type": "rate_limit_error" } }),
+        silent: false,
     }
 }
 
@@ -97,6 +109,7 @@ pub fn redirect(location: &str) -> Reply {
         status: "307 Temporary Redirect",
         headers: format!("Location: {location}\r\n"),
         body: Value::Null,
+        silent: false,
     }
 }
 
@@ -111,17 +124,20 @@ pub fn failure(status: &'static str, message: &str) -> Reply {
         status,
         headers: String::new(),
         body: json!({ "error": { "message": message, "type": "invalid_request_error" } }),
+        silent: false,
     }
 }
 
 /// Answers like an OpenAI-compatible API with `replies`, one per request, and hands back the
-/// requests it got once all replies are sent.
+/// requests it got once all replies are sent. The connections it gave no answer stay open until
+/// then.
 pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle<Vec<Request>>) {
     let replies: Vec<Reply> = replies.into_iter().map(Into::into).collect();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
+        let mut unanswered = Vec::new();
         for reply in replies {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream);
@@ -150,6 +166,10 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
             };
             requests.push((head, body));
 
+            if reply.silent {
+                unanswered.push(reader);
+                continue;
+            }
             let body = reply.body.to_string();
             write!(
                 reader.get_mut(),

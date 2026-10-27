@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
-    asks_to_allow_effort, openai_compatible, refused, too_many_requests, why_failed,
+    asks_to_allow_effort, openai_compatible, refused, timed_out, too_many_requests, why_failed,
 };
 use super::steps::{Input, Outcome, Step, StepFuture};
 use super::tools::Tools;
@@ -27,6 +27,12 @@ const MAX_RETRIES: usize = 10;
 /// The longest wait before a retry. A limit per minute never asks for more, and a review is not
 /// worth holding for a longer one, such as a daily quota.
 const MAX_WAIT: Duration = Duration::from_secs(60);
+/// How long the API may take to answer one request. A reply at a high effort from a busy API
+/// can take minutes.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// How long a review may take, with the waits after 429 Too Many Requests. Reviews run one after
+/// another, so a review that never ended would leave every later change set unreviewed.
+const REVIEW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long a check waits for the API: long enough for a busy one to answer with one token, and
 /// short enough that `run` does not seem to hang when it starts.
 const CHECK_WAIT: Duration = Duration::from_secs(30);
@@ -107,7 +113,8 @@ pub enum Trace {
         #[serde(default, skip_serializing_if = "is_false")]
         failed: bool,
     },
-    /// Why a request failed, in one line as `Reviewer::reportable` leaves it.
+    /// Why a request or the whole review failed, in one line as `Reviewer::reportable` leaves
+    /// it.
     Failed(String),
 }
 
@@ -125,6 +132,9 @@ pub struct Reviewer {
     /// Kept to hide it in what a check or a review reports, since an API may repeat a key it
     /// refuses.
     api_key: Option<String>,
+    /// Kept to say how long the API had when the client gives up on a request.
+    request_timeout: Duration,
+    review_timeout: Duration,
 }
 
 /// What the API made of a model and effort when a check asked it once, as a review would.
@@ -148,14 +158,26 @@ pub struct ModelChoice {
 
 impl Reviewer {
     pub fn new(config: &AiConfig, api_key: Option<String>) -> Result<Self> {
+        Self::with_timeouts(config, api_key, REQUEST_TIMEOUT, REVIEW_TIMEOUT)
+    }
+
+    /// A reviewer that gives up on a request after `request` and on a review after `review`.
+    pub(crate) fn with_timeouts(
+        config: &AiConfig,
+        api_key: Option<String>,
+        request: Duration,
+        review: Duration,
+    ) -> Result<Self> {
         Ok(Self {
-            client: openai_compatible(&config.url, api_key.clone())?,
+            client: openai_compatible(&config.url, api_key.clone(), request)?,
             choice: Mutex::new(ModelChoice {
                 model: config.model.clone(),
                 effort: config.effort.clone(),
             }),
             allowing_effort: Mutex::default(),
             api_key,
+            request_timeout: request,
+            review_timeout: review,
         })
     }
 
@@ -175,9 +197,31 @@ impl Reviewer {
         input: &Input<'_>,
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
+        let choice = self.choice();
+        let reviewed = self.converse(input, &choice, trace);
+        match tokio::time::timeout(self.review_timeout, reviewed).await {
+            Ok(reviewed) => reviewed,
+            Err(_) => {
+                let why = format!(
+                    "the model {} gave no verdict within {}",
+                    choice.model,
+                    spoken(self.review_timeout)
+                );
+                trace(Trace::Failed(why.clone()));
+                Err(anyhow!(why))
+            }
+        }
+    }
+
+    /// Talks with the model about the changes until it hands in a verdict.
+    async fn converse(
+        &self,
+        input: &Input<'_>,
+        choice: &ModelChoice,
+        trace: &(dyn Fn(Trace) + Sync),
+    ) -> Result<Verdict> {
         let tools = Arc::new(Tools::new(input.root)?);
         let about_changes = prompt::about_changes(input.changes, input.found);
-        let choice = self.choice();
         let definitions = definitions();
         trace(Trace::Setup {
             system: SYSTEM_PROMPT.to_string(),
@@ -345,7 +389,15 @@ impl Reviewer {
                     }
                 }
             };
-            let why = self.reportable(why_failed(&e));
+            let why = if timed_out(&e) {
+                format!(
+                    "the API did not answer within {}",
+                    spoken(self.request_timeout)
+                )
+            } else {
+                why_failed(&e)
+            };
+            let why = self.reportable(why);
             trace(Trace::Failed(why.clone()));
             return Err(anyhow!(why).context(failed));
         }
@@ -454,6 +506,14 @@ fn definitions() -> Vec<Tool> {
     let mut definitions = Tools::definitions();
     definitions.push(verdict_tool());
     definitions
+}
+
+/// `duration` as a message says it, in minutes when it is a whole number of them.
+fn spoken(duration: Duration) -> String {
+    match duration.as_secs() {
+        seconds if seconds >= 120 && seconds % 60 == 0 => format!("{} minutes", seconds / 60),
+        seconds => format!("{seconds} s"),
+    }
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -1048,6 +1108,39 @@ mod tests {
             failures,
             why.map(|why| (format!("the model test failed: {why}"), why.to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn gives_up_on_a_review_that_runs_out_of_time_while_waiting_after_429() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) =
+            fake_model(vec![too_many_requests(Some("2"), "Rate limit exceeded.")]);
+        let reviewer = Reviewer::with_timeouts(
+            &AiConfig {
+                url: endpoint,
+                model: "test".to_string(),
+                effort: Effort::default(),
+            },
+            None,
+            REQUEST_TIMEOUT,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let traces = Mutex::new(Vec::new());
+        let e = reviewer
+            .review(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(e.to_string(), "the model test gave no verdict within 1 s");
+        assert_eq!(
+            traces.into_inner().unwrap().last(),
+            Some(&Trace::Failed(e.to_string()))
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[tokio::test]

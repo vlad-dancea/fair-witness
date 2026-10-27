@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use crate::project::{AiConfig, Effort};
     use crate::review::Reviewer;
-    use crate::testing::{fake_model, tool_call};
+    use crate::testing::{fake_model, no_answer, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -438,5 +438,62 @@ mod tests {
                 "tokens_out": 1
             } } })
         );
+    }
+
+    #[tokio::test]
+    async fn fails_a_change_set_the_api_does_not_answer_and_reviews_the_next() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_model(vec![
+            no_answer(),
+            tool_call(
+                "report_verdict",
+                json!({ "contradicts": false, "explanation": "Survey answers, as planned." }),
+            )
+            .into(),
+        ]);
+        let reviewer = Reviewer::with_timeouts(
+            &AiConfig {
+                url: endpoint,
+                model: "test".to_string(),
+                effort: Effort::default(),
+            },
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .start()
+            .unwrap();
+
+        fs::write(root.path().join("notes.txt"), "Ask about consent").unwrap();
+        let mut seen = until_decided(&mut events).await;
+        fs::write(root.path().join("survey.csv"), "age\n42\n").unwrap();
+        seen.extend(until_decided(&mut events).await);
+
+        assert_eq!(
+            seen.iter()
+                .map(|record| describe(&record.event))
+                .collect::<Vec<_>>(),
+            [
+                r#"#1 changes [Created("notes.txt")]"#,
+                "#1 reviewing",
+                "#1 setup with DMP {}",
+                "#1 model test",
+                "#1 prompt created: notes.txt",
+                "#1 request 1",
+                "#1 failed: the API did not answer within 1 s",
+                "#1 review failed: the model test failed: the API did not answer within 1 s",
+                r#"#2 changes [Created("survey.csv")]"#,
+                "#2 reviewing",
+                "#2 prompt created: survey.csv",
+                "#2 request 1",
+                "#2 reply 1: report_verdict",
+                "#2 verdict: contradicts false (None): Survey answers, as planned.",
+            ]
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 }
