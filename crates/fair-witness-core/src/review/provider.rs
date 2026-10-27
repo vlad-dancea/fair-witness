@@ -171,33 +171,39 @@ pub fn refused(error: &genai::Error) -> Option<String> {
     (status.is_client_error() && !busy.contains(status)).then(|| message(body))
 }
 
-/// Why a request failed, without the request and the full answer that genai's errors hold.
+/// Why a request failed, in one line and without the request and the full answer that genai's
+/// errors hold.
 pub fn why_failed(error: &genai::Error) -> String {
-    let genai::Error::WebModelCall { webc_error, .. } = error else {
-        return error.to_string().lines().collect::<Vec<_>>().join(" ");
-    };
-    match webc_error {
-        webc::Error::ResponseFailedStatus { status, body, .. } => match message(body) {
-            message if message.is_empty() => format!("the API answered {status}"),
-            message => format!("the API answered {status}: {message}"),
-        },
-        webc::Error::ResponseFailedNotJson { content_type, .. } => {
-            format!("the API answered with {content_type} instead of JSON")
-        }
-        webc::Error::ResponseFailedInvalidJson { cause, .. } => {
-            format!("the API answered with invalid JSON: {cause}")
-        }
-        webc::Error::Reqwest(e) => {
-            let mut why = format!("could not reach the API: {e}");
-            let mut source = std::error::Error::source(e);
-            while let Some(cause) = source {
-                why.push_str(&format!(": {cause}"));
-                source = cause.source();
+    let why = match error {
+        genai::Error::WebModelCall { webc_error, .. } => match webc_error {
+            webc::Error::ResponseFailedStatus { status, body, .. } => match message(body) {
+                message if message.is_empty() => format!("the API answered {status}"),
+                message => format!("the API answered {status}: {message}"),
+            },
+            webc::Error::ResponseFailedNotJson { content_type, .. } => {
+                format!("the API answered with {content_type} instead of JSON")
             }
-            why
+            webc::Error::ResponseFailedInvalidJson { cause, .. } => {
+                format!("the API answered with invalid JSON: {cause}")
+            }
+            webc::Error::Reqwest(e) => {
+                let mut why = format!("could not reach the API: {e}");
+                let mut source = std::error::Error::source(e);
+                while let Some(cause) = source {
+                    why.push_str(&format!(": {cause}"));
+                    source = cause.source();
+                }
+                why
+            }
+            e => e.to_string(),
+        },
+        // genai's own text quotes the whole request, with the DMP and every tool result.
+        genai::Error::ChatResponseGeneration { cause, .. } => {
+            format!("the model's reply could not be read: {cause}")
         }
         e => e.to_string(),
-    }
+    };
+    why.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The message in an error body, which OpenAI and the APIs like it give as
