@@ -121,8 +121,11 @@ impl Session {
             let events = events.clone();
             async move {
                 tokio::select! {
-                    () = watch(watcher, &events, queue) => {}
+                    () = watch(watcher, &events, &queue) => {}
                     () = events.sender.closed() => {}
+                    // The reviews are gone only after a panic, and then the session ends at
+                    // once rather than look as if it still reviewed.
+                    () = queue.closed() => {}
                 }
             }
         });
@@ -173,7 +176,7 @@ impl Session {
 async fn watch(
     mut watcher: FolderWatcher,
     events: &Events,
-    queue: UnboundedSender<(usize, Vec<Change>)>,
+    queue: &UnboundedSender<(usize, Vec<Change>)>,
 ) {
     let mut set = 0;
     while let Some(batch) = watcher.next().await {
@@ -190,8 +193,6 @@ async fn watch(
             set,
             changes: changes.clone(),
         });
-        // The reviews are gone only after a panic, and then the session ends rather than report
-        // sets that nobody reviews.
         if queue.send((set, changes)).is_err() {
             return;
         }
@@ -292,7 +293,7 @@ mod tests {
 
     use super::*;
     use crate::project::{AiConfig, Effort};
-    use crate::review::Reviewer;
+    use crate::review::{Input, Reviewer, StepFuture};
     use crate::testing::{Reply, fake_model, held, tool_call};
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
@@ -396,6 +397,40 @@ mod tests {
                 "log stopped: No space left on device (os error 28)",
                 "#2 reviewing",
             ]
+        );
+    }
+
+    /// A step with a bug that makes it panic.
+    struct Panics;
+
+    impl Step for Panics {
+        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+            Box::pin(async { panic!("a step of the review panicked, as this test wants") })
+        }
+    }
+
+    #[tokio::test]
+    async fn ends_when_a_review_panics() {
+        let root = tempfile::tempdir().unwrap();
+        let mut events = Session::new(Project::new(root.path().to_path_buf()))
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![Arc::new(Panics)])
+            .start()
+            .unwrap();
+
+        // Nothing changes after the first set, so only the session's end can end the events.
+        fs::write(root.path().join("results.csv"), "a").unwrap();
+        let mut seen = Vec::new();
+        while let Some(record) = tokio::time::timeout(PATIENCE, events.recv())
+            .await
+            .expect("the session went on after its review panicked")
+        {
+            seen.push(describe(&record.event));
+        }
+
+        assert_eq!(
+            seen,
+            [r#"#1 changes [Created("results.csv")]"#, "#1 reviewing"]
         );
     }
 
