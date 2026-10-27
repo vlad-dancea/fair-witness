@@ -25,12 +25,13 @@ pub struct InstanceConfig {
 pub struct DmpListItem {
     pub id: i64,
     pub title: Option<String>,
-    pub project: Option<Project>,
+    pub project: Option<DmpProject>,
     pub modified: Option<String>,
 }
 
+/// The research project a DMP in DAMAP's list is for, which `DmpListItem::name` can show.
 #[derive(Debug, Deserialize)]
-pub struct Project {
+pub struct DmpProject {
     pub title: Option<String>,
 }
 

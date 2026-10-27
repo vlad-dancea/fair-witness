@@ -101,7 +101,8 @@ impl BodyLine {
     }
 }
 
-pub struct DebugLog {
+/// The debug pane: what each review sent to the AI and what came back.
+pub struct DebugPane {
     entries: Vec<Entry>,
     collapsed: bool,
     rendered: Option<(u16, Vec<Line<'static>>)>,
@@ -116,7 +117,7 @@ struct Setup {
     tools: Vec<String>,
 }
 
-impl Default for DebugLog {
+impl Default for DebugPane {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
@@ -128,7 +129,7 @@ impl Default for DebugLog {
     }
 }
 
-impl DebugLog {
+impl DebugPane {
     pub fn collapsed(&self) -> bool {
         self.collapsed
     }
@@ -265,7 +266,7 @@ impl DebugLog {
         self.rendered = None;
     }
 
-    /// The log as lines that fit `width` columns.
+    /// The pane as lines that fit `width` columns.
     pub fn lines(&mut self, width: u16) -> &[Line<'static>] {
         if self.rendered.as_ref().is_none_or(|(w, _)| *w != width) {
             let mut lines = Vec::new();
@@ -735,8 +736,8 @@ mod tests {
         wrap(&BodyLine::new(text, Style::new()), width)
     }
 
-    fn texts(log: &mut DebugLog, width: u16) -> Vec<String> {
-        log.lines(width)
+    fn texts(pane: &mut DebugPane, width: u16) -> Vec<String> {
+        pane.lines(width)
             .iter()
             .map(|line| {
                 line.spans
@@ -747,22 +748,22 @@ mod tests {
             .collect()
     }
 
-    fn prompts() -> DebugLog {
-        let mut log = DebugLog::default();
-        log.add_trace(Trace::Setup {
+    fn prompts() -> DebugPane {
+        let mut pane = DebugPane::default();
+        pane.add_trace(Trace::Setup {
             system: "Be careful.\nBe brief.".to_string(),
             dmp: "{\n}".to_string(),
             tools: vec!["read_file".to_string()],
         });
-        log.add_trace(Trace::Prompt("Changed: a.csv".to_string()));
-        log
+        pane.add_trace(Trace::Prompt("Changed: a.csv".to_string()));
+        pane
     }
 
     #[test]
     fn collapses_the_system_prompt_and_the_dmp_until_expanded() {
-        let mut log = prompts();
+        let mut pane = prompts();
         assert_eq!(
-            texts(&mut log, 80),
+            texts(&mut pane, 80),
             [
                 " SYSTEM PROMPT   how the AI should judge",
                 "  ⋯ 2 lines hidden (c to expand)",
@@ -776,8 +777,8 @@ mod tests {
             ],
         );
 
-        log.toggle_collapsed();
-        let shown = texts(&mut log, 80);
+        pane.toggle_collapsed();
+        let shown = texts(&mut pane, 80);
         assert!(shown.contains(&"  Be brief.".to_string()), "{shown:?}");
         assert!(shown.contains(&"  ```json".to_string()), "{shown:?}");
         assert!(shown.contains(&"  {".to_string()), "{shown:?}");
@@ -785,17 +786,17 @@ mod tests {
 
     #[test]
     fn shows_a_turn_with_its_tool_results_and_the_verdict() {
-        let mut log = DebugLog::default();
+        let mut pane = DebugPane::default();
         let choice = ModelChoice {
             model: "qwen3".to_string(),
             effort: Effort::default(),
         };
-        log.add(&Record {
+        pane.add(&Record {
             time: Timestamp::now(),
             event: Event::Reviewing { set: 3 },
         });
-        log.add_trace(Trace::Model(choice));
-        log.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::Model(choice));
+        pane.add_trace(Trace::Request { turn: 1 });
         let reply = |turn, text: &str, calls| Trace::Reply {
             turn,
             reasoning: None,
@@ -806,24 +807,24 @@ mod tests {
             tokens_out: Some(20),
             elapsed_ms: 1340,
         };
-        log.add_trace(reply(
+        pane.add_trace(reply(
             1,
             "Let me look.",
             vec![("read_file".to_string(), json!({ "path": "a.csv" }))],
         ));
-        log.add_trace(Trace::ToolResult {
+        pane.add_trace(Trace::ToolResult {
             name: "read_file".to_string(),
             output: "name,age".to_string(),
             failed: false,
         });
-        log.add_trace(Trace::Request { turn: 2 });
-        let lines = texts(&mut log, 40);
+        pane.add_trace(Trace::Request { turn: 2 });
+        let lines = texts(&mut pane, 40);
         assert_eq!(
             &lines[lines.len() - 2..],
             [" AI   turn 2 · qwen3", "  waiting for the reply…"]
         );
 
-        log.add_trace(reply(
+        pane.add_trace(reply(
             2,
             "Done.",
             vec![(
@@ -831,7 +832,7 @@ mod tests {
                 json!({ "contradicts": true, "dmp_field": "personal_data", "explanation": "Ages are personal." }),
             )],
         ));
-        let lines = texts(&mut log, 40);
+        let lines = texts(&mut pane, 40);
         assert!(
             lines[0].starts_with("━━ Review of change set #3 ━"),
             "{}",
@@ -861,17 +862,17 @@ mod tests {
 
     #[test]
     fn shows_a_request_that_waits_for_the_rate_limit_once() {
-        let mut log = DebugLog::default();
-        log.add_trace(Trace::Request { turn: 1 });
-        log.add_trace(Trace::RateLimited {
+        let mut pane = DebugPane::default();
+        pane.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::RateLimited {
             turn: 1,
             retry: 1,
             wait_ms: 4000,
             body: "Retry after 4s.".to_string(),
         });
-        log.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::Request { turn: 1 });
         assert_eq!(
-            texts(&mut log, 80),
+            texts(&mut pane, 80),
             [
                 " RATE LIMIT   turn 1 · retry 1 in 4.0 s",
                 "  Retry after 4s.",
@@ -884,15 +885,15 @@ mod tests {
 
     #[test]
     fn shows_a_request_that_goes_again_with_allowed_openai_params() {
-        let mut log = DebugLog::default();
-        log.add_trace(Trace::Request { turn: 1 });
-        log.add_trace(Trace::EffortNotAllowed {
+        let mut pane = DebugPane::default();
+        pane.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::EffortNotAllowed {
             turn: 1,
             body: "send allowed_openai_params=['reasoning_effort']".to_string(),
         });
-        log.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::Request { turn: 1 });
         assert_eq!(
-            texts(&mut log, 80),
+            texts(&mut pane, 80),
             [
                 " REFUSED   turn 1 · again with allowed_openai_params",
                 "  send allowed_openai_params=['reasoning_effort']",
@@ -905,8 +906,8 @@ mod tests {
 
     #[test]
     fn shortens_long_tool_output_while_collapsed() {
-        let mut log = DebugLog::default();
-        log.add_trace(Trace::Reply {
+        let mut pane = DebugPane::default();
+        pane.add_trace(Trace::Reply {
             turn: 1,
             reasoning: None,
             texts: Vec::new(),
@@ -917,18 +918,18 @@ mod tests {
             elapsed_ms: 0,
         });
         let output: Vec<String> = (1..=10).map(|n| format!("file{n}")).collect();
-        log.add_trace(Trace::ToolResult {
+        pane.add_trace(Trace::ToolResult {
             name: "list_dir".to_string(),
             output: output.join("\n"),
             failed: false,
         });
-        let lines = texts(&mut log, 80);
+        let lines = texts(&mut pane, 80);
         assert_eq!(
             lines.last().unwrap(),
             "    │ ⋯ 2 more lines hidden (c to expand)"
         );
-        log.toggle_collapsed();
-        assert_eq!(texts(&mut log, 80).last().unwrap(), "    │ file10");
+        pane.toggle_collapsed();
+        assert_eq!(texts(&mut pane, 80).last().unwrap(), "    │ file10");
     }
 
     #[tokio::test]
@@ -963,7 +964,7 @@ mod tests {
             .unwrap();
         fs::write(root.path().join("participants.csv"), "name\nAnna Muster\n").unwrap();
 
-        let mut live = DebugLog::default();
+        let mut live = DebugPane::default();
         loop {
             let record = tokio::time::timeout(Duration::from_secs(10), records.recv())
                 .await
@@ -974,7 +975,7 @@ mod tests {
                 break;
             }
         }
-        let mut replayed = DebugLog::default();
+        let mut replayed = DebugPane::default();
         for line in fs::read_to_string(&log).unwrap().lines() {
             replayed.add(&serde_json::from_str(line).unwrap());
         }
