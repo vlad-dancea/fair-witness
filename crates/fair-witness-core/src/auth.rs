@@ -32,6 +32,7 @@ pub struct Tokens {
 struct Discovery {
     token_endpoint: String,
     device_authorization_endpoint: Option<String>,
+    revocation_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +138,7 @@ pub struct Oidc {
     scope: String,
     token_endpoint: String,
     device_endpoint: Option<String>,
+    revocation_endpoint: Option<String>,
 }
 
 impl Oidc {
@@ -176,6 +178,7 @@ impl Oidc {
             scope: scope.to_string(),
             token_endpoint: discovery.token_endpoint,
             device_endpoint: discovery.device_authorization_endpoint,
+            revocation_endpoint: discovery.revocation_endpoint,
         })
     }
 
@@ -186,6 +189,28 @@ impl Oidc {
         ])
         .await?
         .map_err(|e| anyhow!("session could not be refreshed: {e}"))
+    }
+
+    /// Ends the session `refresh_token` belongs to at the login server, as RFC 7009 describes.
+    pub async fn revoke(&self, refresh_token: &str) -> Result<()> {
+        let Some(endpoint) = &self.revocation_endpoint else {
+            bail!("the login server names no endpoint to end a session at");
+        };
+        // Checked here rather than in `discover`, so that it stops only logging out.
+        if in_the_clear(endpoint) {
+            bail!(unencrypted(endpoint));
+        }
+        let form = [
+            ("client_id", self.client_id.as_str()),
+            ("token", refresh_token),
+            ("token_type_hint", "refresh_token"),
+        ];
+        // The login server answers 200 also for a token that has already expired, so any success
+        // means the session is over.
+        match post(&net::client(endpoint, TIMEOUT)?, endpoint, &form).await? {
+            Ok(_) => Ok(()),
+            Err(e) => bail!("{e}"),
+        }
     }
 
     pub async fn login(&self, prompts: &dyn Prompts) -> Result<Tokens> {
@@ -316,7 +341,7 @@ impl Oidc {
 mod tests {
     use std::cell::RefCell;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::testing::{answer, fake_model, hang_up, page};
@@ -408,6 +433,7 @@ mod tests {
             scope: "openid".to_string(),
             token_endpoint: format!("{url}/token"),
             device_endpoint: Some(format!("{url}/device")),
+            revocation_endpoint: Some(format!("{url}/revoke")),
         }
     }
 
@@ -500,5 +526,51 @@ mod tests {
                 "{form}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ends_the_session_at_the_revocation_endpoint() {
+        let (url, server) = fake_model(vec![
+            answer("200 OK", Value::Null),
+            answer(
+                "400 Bad Request",
+                json!({
+                    "error": "unsupported_token_type",
+                    "error_description": "Unsupported token type",
+                }),
+            ),
+        ]);
+        let (issuer, _) = fake_model(vec![json!({
+            "token_endpoint": format!("{url}/token"),
+            "revocation_endpoint": format!("{url}/revoke"),
+        })]);
+        let mut oidc = Oidc::discover(&issuer, "damap", "openid").await.unwrap();
+
+        let ended = oidc.revoke("secret").await;
+        let refused = oidc.revoke("secret").await;
+        oidc.revocation_endpoint = None;
+        let unknown = oidc.revoke("secret").await;
+
+        assert!(ended.is_ok(), "{ended:?}");
+        assert_eq!(
+            [refused, unknown].map(|result| result.err().map(|e| format!("{e:#}"))),
+            [
+                Some(format!(
+                    "{url}/revoke answered 400 Bad Request: Unsupported token type \
+                     (unsupported_token_type)"
+                )),
+                Some("the login server names no endpoint to end a session at".to_string()),
+            ]
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0].0.starts_with("POST /v1/revoke "),
+            "{}",
+            requests[0].0
+        );
+        assert_eq!(
+            requests[0].1,
+            json!("client_id=damap&token=secret&token_type_hint=refresh_token")
+        );
     }
 }
