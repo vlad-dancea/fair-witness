@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use fair_witness_core::model::{Effort, ModelChoice};
 use fair_witness_core::net::{in_the_clear, web_url};
-use fair_witness_core::project::Effort;
+use fair_witness_core::project::AiConfig;
 use fair_witness_core::secret::can_hide;
 use fair_witness_core::session::Record;
 use jiff::Timestamp;
@@ -456,11 +457,13 @@ fn models(args: &Args) -> Result<Vec<Model>> {
     let mut folders = HashSet::new();
     for name in &args.models {
         for effort in &efforts {
-            let model = Model::Real {
+            let model = Model::Real(AiConfig {
                 url: args.ai_url.clone(),
-                name: name.clone(),
-                effort: effort.clone(),
-            };
+                choice: ModelChoice {
+                    model: name.clone(),
+                    effort: effort.clone(),
+                },
+            });
             if !folders.insert(model.folder()) {
                 bail!(
                     "two of the models would write their events to {}; name each model and \
@@ -753,10 +756,14 @@ mod tests {
 
     #[test]
     fn takes_turns_between_the_models_before_the_efforts() {
-        let model = |name: &str, effort: &str| Model::Real {
-            url: AQUEDUCT.to_string(),
-            name: name.to_string(),
-            effort: effort.parse().unwrap(),
+        let model = |name: &str, effort: &str| {
+            Model::Real(AiConfig {
+                url: AQUEDUCT.to_string(),
+                choice: ModelChoice {
+                    model: name.to_string(),
+                    effort: effort.parse().unwrap(),
+                },
+            })
         };
         let models = [
             model("large", "default"),
@@ -823,10 +830,10 @@ mod tests {
                 url,
             ])
             .map_err(|e| e.kind())?;
-            let Model::Real { url, .. } = models(&args).unwrap().remove(0) else {
+            let Model::Real(ai) = models(&args).unwrap().remove(0) else {
                 panic!("no real model");
             };
-            Ok(url)
+            Ok(ai.url)
         };
 
         assert_eq!(

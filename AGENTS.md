@@ -165,17 +165,19 @@ disagrees with it.
   first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's
   tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API client and the
   login to it, `auth.rs` the OIDC login, `project.rs` the project folder and its
-  `.fair-witness/`, `secret.rs` hides the API key in what an API answered, and `net.rs`
+  `.fair-witness/`, `model.rs` the model and effort that `setup` saves and the model panel
+  changes, `secret.rs` hides the API key in what an API answered, and `net.rs`
   decides which servers get secrets over plain HTTP and which are reached without a proxy.
   The login asks the user for what it needs through the `Prompts` trait, which the binary
   implements. `testing.rs` is a fake model that answers like an
   OpenAI-compatible API, compiled for the core's tests and for crates that enable the
   `testing` feature, as the binary's tests do.
 - `fair-witness` is the binary that dist releases. `commands/` holds the clap commands,
-  `setup/` the questions `setup` asks, `tui/` the ratatui interface and `notifications.rs` the
-  desktop notifications. `run` hands a session's events to the screen and the notifications.
-  Only `commands/` reads the working directory, once at startup, and passes the `Project` it
-  finds to the rest.
+  `setup/` the questions `setup` asks, `tui/` the ratatui interface, `settings.rs` the model
+  `run` reviews with and how a new choice is saved, `terminal.rs` the questions of the DAMAP
+  login and `notifications.rs` the desktop notifications. `run` hands a session's events to
+  the screen and the notifications. Only `commands/` reads the working directory, once at
+  startup, and passes the `Project` it finds to the rest.
 - `fair-witness-scenarios` is a development tool that dist does not release. It runs each
   scenario in `scenarios/` against `fair-witness run --headless` with the fake model from
   `testing.rs` or, with `--model`, a real model, whose accuracy it measures. Only the

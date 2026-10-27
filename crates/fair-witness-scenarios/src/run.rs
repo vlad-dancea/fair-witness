@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use fair_witness_core::project::{AiConfig, Effort};
-use fair_witness_core::review::{ChoiceCheck, ModelChoice, ModelStep};
+use fair_witness_core::model::{Effort, ModelChoice};
+use fair_witness_core::project::AiConfig;
+use fair_witness_core::review::{ChoiceCheck, ModelStep};
 use fair_witness_core::secret::hide;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::testing::fake_model;
@@ -58,25 +59,21 @@ pub enum Model {
     /// expected verdict.
     Fake,
     /// A model behind an OpenAI-compatible API, whose verdicts are measured.
-    Real {
-        url: String,
-        name: String,
-        effort: Effort,
-    },
+    Real(AiConfig),
 }
 
 impl Model {
     pub fn name(&self) -> &str {
         match self {
             Model::Fake => "fake",
-            Model::Real { name, .. } => name,
+            Model::Real(ai) => &ai.choice.model,
         }
     }
 
     pub fn effort(&self) -> Effort {
         match self {
             Model::Fake => Effort::default(),
-            Model::Real { effort, .. } => effort.clone(),
+            Model::Real(ai) => ai.choice.effort.clone(),
         }
     }
 
@@ -85,9 +82,11 @@ impl Model {
     pub fn folder(&self) -> String {
         match self {
             Model::Fake => "fake".to_string(),
-            Model::Real { name, effort, .. } => {
-                format!("{}-{}", file_name(name), file_name(effort.name()))
-            }
+            Model::Real(ai) => format!(
+                "{}-{}",
+                file_name(&ai.choice.model),
+                file_name(ai.choice.effort.name())
+            ),
         }
     }
 }
@@ -126,25 +125,18 @@ pub fn check(models: &[Model], settings: &Settings) -> Result<Vec<Refused>> {
     let mut reviewers: HashMap<&str, ModelStep> = HashMap::new();
     let mut refused = Vec::new();
     for model in models {
-        let Model::Real { url, name, effort } = model else {
+        let Model::Real(ai) = model else {
             continue;
         };
-        let reviewer = match reviewers.entry(url) {
+        let reviewer = match reviewers.entry(&ai.url) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let ai = AiConfig {
-                    url: url.clone(),
-                    model: name.clone(),
-                    effort: effort.clone(),
-                };
-                entry.insert(ModelStep::new(&ai, settings.api_key.clone())?)
-            }
+            Entry::Vacant(entry) => entry.insert(ModelStep::new(ai, settings.api_key.clone())?),
         };
-        let choice = ModelChoice {
-            model: name.clone(),
-            effort: effort.clone(),
-        };
-        match runtime.block_on(reviewer.try_choice(&choice)) {
+        let ModelChoice {
+            model: name,
+            effort,
+        } = &ai.choice;
+        match runtime.block_on(reviewer.try_choice(&ai.choice)) {
             ChoiceCheck::Accepted => {}
             ChoiceCheck::Refused(error) => refused.push(Refused {
                 model: name.clone(),
@@ -194,7 +186,7 @@ fn run_into(
     }
     let (url, review) = match model {
         Model::Fake => (fake_model(scenario.fake_replies()).0, FAKE_REVIEW),
-        Model::Real { url, .. } => (url.clone(), REAL_REVIEW),
+        Model::Real(ai) => (ai.url.clone(), REAL_REVIEW),
     };
     let mut witness = Process::start(
         "fair-witness",
@@ -281,7 +273,7 @@ fn witness_command(
             settings.debounce_for(scenario).as_millis().to_string(),
         );
     match (model, &settings.api_key) {
-        (Model::Real { .. }, Some(key)) => command.env(API_KEY, key),
+        (Model::Real(_), Some(key)) => command.env(API_KEY, key),
         // A key meant for a real model must not go to the fake one.
         _ => command.env_remove(API_KEY),
     };
@@ -644,11 +636,13 @@ mod tests {
             debounce: Duration::from_millis(500),
             api_key: Some("sk-secret".to_string()),
         };
-        let real = Model::Real {
+        let real = Model::Real(AiConfig {
             url: "https://api.example.org/v1".to_string(),
-            name: "large".to_string(),
-            effort: "high".parse().unwrap(),
-        };
+            choice: ModelChoice {
+                model: "large".to_string(),
+                effort: "high".parse().unwrap(),
+            },
+        });
         let folder = Path::new("/tmp/project");
 
         let witness = witness_command(
@@ -702,10 +696,14 @@ mod tests {
             bad_request(gone),
             bad_request(gone),
         ]);
-        let model = |name: &str, effort: &str| Model::Real {
-            url: url.clone(),
-            name: name.to_string(),
-            effort: effort.parse().unwrap(),
+        let model = |name: &str, effort: &str| {
+            Model::Real(AiConfig {
+                url: url.clone(),
+                choice: ModelChoice {
+                    model: name.to_string(),
+                    effort: effort.parse().unwrap(),
+                },
+            })
         };
         let settings = Settings {
             binary: PathBuf::from("fair-witness"),

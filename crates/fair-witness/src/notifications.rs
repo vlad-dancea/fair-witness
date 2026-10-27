@@ -53,7 +53,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use fair_witness_core::project::{AiConfig, Effort, Project};
+    use fair_witness_core::model::{Effort, ModelChoice};
+    use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::{ModelStep, Trace};
     use fair_witness_core::session::Session;
     use fair_witness_core::testing::{failure, fake_model};
@@ -70,8 +71,10 @@ mod tests {
         )]);
         let ai = AiConfig {
             url: endpoint,
-            model: "test".to_string(),
-            effort: Effort::default(),
+            choice: ModelChoice {
+                model: "test".to_string(),
+                effort: Effort::default(),
+            },
         };
         let reviewer = ModelStep::new(&ai, Some("sk-test".to_string())).unwrap();
         let mut records = Session::new(Project::new(root.path().to_path_buf()))

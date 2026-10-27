@@ -332,7 +332,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::project::{AiConfig, Effort};
+    use crate::model::{Effort, ModelChoice};
+    use crate::project::AiConfig;
     use crate::review::{Input, ModelStep, StepFuture};
     use crate::testing::{Reply, fake_model, held, no_answer, tool_call};
 
@@ -376,8 +377,10 @@ mod tests {
     fn reviewer(endpoint: String) -> Arc<dyn Step> {
         let config = AiConfig {
             url: endpoint,
-            model: "test".to_string(),
-            effort: Effort::default(),
+            choice: ModelChoice {
+                model: "test".to_string(),
+                effort: Effort::default(),
+            },
         };
         Arc::new(ModelStep::new(&config, None).unwrap())
     }
@@ -695,8 +698,10 @@ mod tests {
         let reviewer = ModelStep::with_timeouts(
             &AiConfig {
                 url: endpoint,
-                model: "test".to_string(),
-                effort: Effort::default(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
             },
             None,
             Duration::from_secs(1),

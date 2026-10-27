@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self as terminal, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use fair_witness_core::review::ModelChoice;
+use fair_witness_core::model::ModelChoice;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::{self, Kind, Listed};
 use futures::StreamExt;
@@ -16,7 +16,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugPane;
-use super::model_panel::{self, ModelPanel, ModelSettings, PanelOutcome};
+use super::model_panel::{ModelPanel, PanelOutcome};
+use crate::settings::ModelSettings;
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.
@@ -266,7 +267,7 @@ impl Screen {
         let Some(settings) = &self.settings else {
             return;
         };
-        let described = model_panel::describe(&choice);
+        let described = choice.to_string();
         let saved = settings.apply(choice);
         if let Some(why) = unchecked {
             let warning = format!(
@@ -451,7 +452,7 @@ impl Screen {
             let choice = settings.reviewer.choice();
             header_lines.push(Line::from(vec![
                 "Using ".into(),
-                model_panel::describe(&choice).bold(),
+                choice.to_string().bold(),
                 format!(" from {}.", settings.url).into(),
             ]));
         }
@@ -620,8 +621,10 @@ mod tests {
         let root = Path::new("/home/researcher/sleep-study");
         let ai = AiConfig {
             url: "http://localhost:11434/v1".to_string(),
-            model: "qwen3:8b".to_string(),
-            effort: "medium".parse().unwrap(),
+            choice: ModelChoice {
+                model: "qwen3:8b".to_string(),
+                effort: "medium".parse().unwrap(),
+            },
         };
         let settings = ModelSettings {
             project: Project::new(root.to_path_buf()),

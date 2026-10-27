@@ -1,12 +1,12 @@
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::model::ModelChoice;
 use crate::net::same_url;
 
 pub const DIR_NAME: &str = ".fair-witness";
@@ -37,102 +37,33 @@ const IGNORE_TEMPLATE: &str = "\
 # *.log
 ";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub damap: DamapConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamapConfig {
     pub frontend_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dmp_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The model `setup` chose, with the API it is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiConfig {
     pub url: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Effort::is_default")]
-    pub effort: Effort,
+    #[serde(flatten)]
+    pub choice: ModelChoice,
 }
 
-/// How much a model reasons: a name the API gets as `reasoning_effort`, or `default`, which sends
-/// none so that the model uses its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Effort(String);
-
-const DEFAULT_EFFORT: &str = "default";
-/// The efforts the model panel offers. `none` asks for no reasoning, which some models ignore.
-const OFFERED_EFFORTS: [&str; 8] = [
-    DEFAULT_EFFORT,
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-];
-
-impl Effort {
-    pub fn offered() -> Vec<Effort> {
-        OFFERED_EFFORTS
-            .iter()
-            .map(|name| Effort(name.to_string()))
-            .collect()
-    }
-
-    pub fn name(&self) -> &str {
-        &self.0
-    }
-
-    pub fn is_default(&self) -> bool {
-        self.0 == DEFAULT_EFFORT
-    }
-
-    /// What goes to the API as `reasoning_effort`, nothing for `default`.
-    pub fn sent(&self) -> Option<&str> {
-        (!self.is_default()).then_some(&self.0)
-    }
-}
-
-impl Default for Effort {
-    fn default() -> Self {
-        Effort(DEFAULT_EFFORT.to_string())
-    }
-}
-
-impl FromStr for Effort {
-    type Err = anyhow::Error;
-
-    // No standard fixes the names, and each model takes its own with its own meaning, so any
-    // name passes on as given.
-    fn from_str(name: &str) -> Result<Self> {
-        if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            bail!(
-                "{name:?} is not a reasoning effort; name one such as `low` or `high`, or \
-                 `default` to send none"
-            );
-        }
-        Ok(Effort(name.to_string()))
-    }
-}
-
-impl TryFrom<String> for Effort {
-    type Error = anyhow::Error;
-
-    fn try_from(name: String) -> Result<Self> {
-        name.parse()
-    }
-}
-
-impl From<Effort> for String {
-    fn from(effort: Effort) -> Self {
-        effort.0
+impl AiConfig {
+    /// The model chosen for the API at `url`, if these settings are for that API. The same name
+    /// on another API can be another model, or one that refuses the effort.
+    pub fn for_api(&self, url: &str) -> Option<&ModelChoice> {
+        same_url(&self.url, url).then_some(&self.choice)
     }
 }
 
@@ -257,6 +188,24 @@ impl Project {
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
         write_toml(&self.ensure_dir()?, CONFIG_FILE, config, false)
+    }
+
+    /// Saves `choice` as the model for the API at `url`, which has to be the API `setup` chose.
+    pub fn save_model_choice(&self, url: &str, choice: &ModelChoice) -> Result<()> {
+        let mut config = self
+            .config()?
+            .context("this folder is not set up any more")?;
+        let ai = config
+            .ai
+            .as_mut()
+            .context("no AI model is set up any more")?;
+        // A model of another API, such as one given with --ai-url, would be saved under the API
+        // from `setup`.
+        if ai.for_api(url).is_none() {
+            bail!("{url} is not the API chosen in `fair-witness setup`");
+        }
+        ai.choice = choice.clone();
+        self.save_config(&config)
     }
 
     pub fn credentials(&self) -> Result<Credentials> {
@@ -512,6 +461,7 @@ fn replace_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Effort;
 
     #[test]
     fn creates_the_ignore_template_without_overwriting_an_existing_file() {
@@ -630,8 +580,10 @@ mod tests {
                 },
                 ai: Some(AiConfig {
                     url: "https://api.example.org/v1".to_string(),
-                    model: "small".to_string(),
-                    effort: "low".parse().unwrap(),
+                    choice: ModelChoice {
+                        model: "small".to_string(),
+                        effort: "low".parse().unwrap(),
+                    },
                 }),
             })
             .unwrap();
@@ -643,7 +595,98 @@ mod tests {
         );
         let config = project.config().unwrap().unwrap();
         assert_eq!(config.damap.dmp_id, Some(7));
-        assert_eq!(config.ai.unwrap().effort.sent(), Some("low"));
+        assert_eq!(config.ai.unwrap().choice.effort.sent(), Some("low"));
+    }
+
+    #[test]
+    fn loads_the_model_settings_that_earlier_versions_saved() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        let loaded = |ai: &str| {
+            fs::write(
+                root.path().join(".fair-witness/config.toml"),
+                format!("[damap]\nfrontend_url = \"https://damap.example.org\"\n\n[ai]\n{ai}"),
+            )
+            .unwrap();
+            project.config().unwrap().unwrap().ai.unwrap()
+        };
+        let small = |effort: &str| AiConfig {
+            url: "https://api.example.org/v1".to_string(),
+            choice: ModelChoice {
+                model: "small".to_string(),
+                effort: effort.parse().unwrap(),
+            },
+        };
+
+        assert_eq!(
+            [
+                // From before there were efforts.
+                loaded("url = \"https://api.example.org/v1\"\nmodel = \"small\"\n"),
+                loaded(
+                    "url = \"https://api.example.org/v1\"\nmodel = \"small\"\neffort = \"high\"\n"
+                ),
+                // As edited by hand.
+                loaded(
+                    "effort = \"high\"\nmodel = \"small\"\nurl = \"https://api.example.org/v1\"\n"
+                ),
+            ],
+            [small("default"), small("high"), small("high")]
+        );
+    }
+
+    #[test]
+    fn saves_a_model_only_for_the_api_chosen_in_setup() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let large = ModelChoice {
+            model: "large".to_string(),
+            effort: "high".parse().unwrap(),
+        };
+        let save = |url: &str| {
+            project
+                .save_model_choice(url, &large)
+                .map_err(|e| e.to_string())
+        };
+        let mut config = Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: Some(7),
+            },
+            ai: None,
+        };
+        let not_set_up = save("https://api.example.org/v1");
+        project.save_config(&config).unwrap();
+        let no_model = save("https://api.example.org/v1");
+        // As an earlier `setup` saved it when typed with a trailing `/`.
+        config.ai = Some(AiConfig {
+            url: "https://api.example.org/v1/".to_string(),
+            choice: ModelChoice {
+                model: "small".to_string(),
+                effort: Effort::default(),
+            },
+        });
+        project.save_config(&config).unwrap();
+
+        assert_eq!(
+            [
+                not_set_up,
+                no_model,
+                save("https://other.example.org/v1"),
+                save("API.example.org/v1"),
+            ],
+            [
+                Err("this folder is not set up any more".to_string()),
+                Err("no AI model is set up any more".to_string()),
+                Err(
+                    "https://other.example.org/v1 is not the API chosen in `fair-witness setup`"
+                        .to_string()
+                ),
+                Ok(()),
+            ]
+        );
+        config.ai.as_mut().unwrap().choice = large.clone();
+        assert_eq!(project.config().unwrap().unwrap(), config);
     }
 
     #[test]
@@ -665,6 +708,7 @@ mod tests {
                     .unwrap()
                     .ai
                     .unwrap()
+                    .choice
                     .effort
                     .sent()
                     .map(str::to_string)),
@@ -769,8 +813,10 @@ mod tests {
                     },
                     ai: ai.map(|url| AiConfig {
                         url: url.to_string(),
-                        model: "small".to_string(),
-                        effort: Effort::default(),
+                        choice: ModelChoice {
+                            model: "small".to_string(),
+                            effort: Effort::default(),
+                        },
                     }),
                 })
                 .unwrap();

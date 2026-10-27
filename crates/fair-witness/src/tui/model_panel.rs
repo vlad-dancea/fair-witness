@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use fair_witness_core::project::{Effort, Project};
-use fair_witness_core::review::{self, ChoiceCheck, ModelChoice, ModelStep};
+use anyhow::Result;
+use fair_witness_core::model::{Effort, ModelChoice};
+use fair_witness_core::review::{self, ChoiceCheck, ModelStep};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -14,40 +14,7 @@ use ratatui::widgets::{
 use tokio::sync::oneshot::{self, Receiver, error::TryRecvError};
 use tokio::task::JoinHandle;
 
-pub struct ModelSettings {
-    pub project: Project,
-    pub reviewer: Arc<ModelStep>,
-    pub url: String,
-    pub api_key: Option<String>,
-}
-
-impl ModelSettings {
-    pub fn apply(&self, choice: ModelChoice) -> Result<()> {
-        self.reviewer.set_choice(choice.clone());
-        let mut config = self
-            .project
-            .config()?
-            .context("this folder is not set up any more")?;
-        let ai = config
-            .ai
-            .as_mut()
-            .context("no AI model is set up any more")?;
-        // A model of an API given with --ai-url would be saved under the API from `setup`.
-        if ai.url != self.url {
-            bail!("{} is not the API chosen in `fair-witness setup`", self.url);
-        }
-        ai.model = choice.model;
-        ai.effort = choice.effort;
-        self.project.save_config(&config)
-    }
-}
-
-pub fn describe(choice: &ModelChoice) -> String {
-    match choice.effort.sent() {
-        Some(effort) => format!("{} ({effort} effort)", choice.model),
-        None => choice.model.clone(),
-    }
-}
+use crate::settings::ModelSettings;
 
 enum Models {
     Loading(Receiver<Result<Vec<String>>>),
@@ -336,15 +303,13 @@ impl ModelPanel {
     fn check_message(&self) -> Option<Paragraph<'static>> {
         let text = match &self.check {
             Check::None => return None,
-            Check::Running { choice, .. } => Text::styled(
-                format!("Checking {} with the API…", describe(choice)),
-                Modifier::DIM,
-            ),
+            Check::Running { choice, .. } => {
+                Text::styled(format!("Checking {choice} with the API…"), Modifier::DIM)
+            }
             // The API's message can span lines, which `Text` keeps apart.
-            Check::Refused { choice, message } => Text::styled(
-                format!("The API refuses {}: {message}", describe(choice)),
-                Color::Red,
-            ),
+            Check::Refused { choice, message } => {
+                Text::styled(format!("The API refuses {choice}: {message}"), Color::Red)
+            }
         };
         Some(Paragraph::new(text).wrap(Wrap { trim: false }))
     }
@@ -439,7 +404,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use fair_witness_core::project::AiConfig;
+    use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::testing::{
         EFFORT_REFUSED, Reply, bad_request, fake_model, one_token, too_many_requests,
     };
@@ -467,8 +432,10 @@ mod tests {
         let (url, _server) = fake_model(replies);
         let ai = AiConfig {
             url: url.clone(),
-            model: "qwen3:8b".to_string(),
-            effort: effort.parse().unwrap(),
+            choice: ModelChoice {
+                model: "qwen3:8b".to_string(),
+                effort: effort.parse().unwrap(),
+            },
         };
         let settings = ModelSettings {
             project: Project::new(PathBuf::from("/home/researcher/sleep-study")),
@@ -639,8 +606,10 @@ mod tests {
         let mut panel = loaded("medium", Vec::new()).await;
         let ai = AiConfig {
             url,
-            model: "qwen3:8b".to_string(),
-            effort: "medium".parse().unwrap(),
+            choice: ModelChoice {
+                model: "qwen3:8b".to_string(),
+                effort: "medium".parse().unwrap(),
+            },
         };
         panel.reviewer = Arc::new(ModelStep::new(&ai, None).unwrap());
         for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {

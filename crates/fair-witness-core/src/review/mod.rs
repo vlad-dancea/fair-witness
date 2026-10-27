@@ -7,7 +7,9 @@ mod tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use agent::{ChoiceCheck, ModelChoice, ModelStep};
+use crate::model::ModelChoice;
+
+pub use agent::{ChoiceCheck, ModelStep};
 pub use prompt::first_message;
 pub use provider::list_models;
 pub(crate) use provider::retry_after;

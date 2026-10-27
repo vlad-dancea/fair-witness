@@ -1,7 +1,9 @@
 mod commands;
 mod diagnostics;
 mod notifications;
+mod settings;
 mod setup;
+mod terminal;
 mod tui;
 
 fn main() {

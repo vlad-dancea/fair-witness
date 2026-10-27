@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use fair_witness_core::auth::Notices;
 use fair_witness_core::damap::{self, Login};
-use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
-use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
+use fair_witness_core::model::{Effort, ModelChoice};
+use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
+use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
 use fair_witness_core::session::{Event, Record, Session};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -16,9 +17,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::Instant;
 
 use super::Failure;
-use crate::setup::damap::TerminalPrompts;
+use crate::settings::ModelSettings;
+use crate::terminal::TerminalPrompts;
 use crate::tui::app::{Screen, Update};
-use crate::tui::model_panel::{self, ModelSettings};
 use crate::{diagnostics, notifications};
 
 const DEBOUNCE_VARIABLE: &str = "FAIR_WITNESS_DEBOUNCE_MS";
@@ -220,7 +221,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
 /// with a warning in `status`.
 async fn check_model(reviewer: &ModelStep, url: &str, status: &mut Vec<String>) -> Result<()> {
     let choice = reviewer.choice();
-    let described = model_panel::describe(&choice);
+    let described = choice.to_string();
     match reviewer.try_choice(&choice).await {
         ChoiceCheck::Accepted => Ok(()),
         ChoiceCheck::Refused(message) => bail!(
@@ -258,28 +259,27 @@ fn ai(
     args: &Args,
     status: &mut Vec<String>,
 ) -> Result<Option<(AiConfig, Option<String>)>> {
-    let saved = config.and_then(|config| config.ai.clone());
+    let saved = config.and_then(|config| config.ai.as_ref());
     let url = match &args.ai_url {
         Some(url) => web_url(url)?,
-        None => match &saved {
+        None => match saved {
             Some(ai) => ai.url.clone(),
             None if args.model.is_some() => bail!("--model needs --ai-url too"),
             None => return Ok(None),
         },
     };
     // Only the API from `setup` gets its saved model and effort.
-    let saved_api = saved.filter(|ai| same_url(&ai.url, &url));
-    let model = match (&args.model, &saved_api) {
+    let saved_choice = saved.and_then(|ai| ai.for_api(&url));
+    let model = match (&args.model, saved_choice) {
         (Some(model), _) => model.clone(),
-        (None, Some(ai)) => ai.model.clone(),
+        (None, Some(saved)) => saved.model.clone(),
         (None, None) => bail!("no model chosen for {url}; pass --model"),
     };
     let effort = match &args.effort {
         Some(effort) => effort.clone(),
-        None => saved_api
-            .as_ref()
-            .filter(|ai| ai.model == model)
-            .map(|ai| ai.effort.clone())
+        None => saved_choice
+            .filter(|saved| saved.model == model)
+            .map(|saved| saved.effort.clone())
             .unwrap_or_default(),
     };
     let api_key = match (&args.api_key, project.credentials()?.ai) {
@@ -288,7 +288,7 @@ fn ai(
             Some(key) => Some(key.to_string()),
             // As after an edit of config.toml, or a `setup` that saved the key but not the API
             // it is for.
-            None if saved_api.is_some() => {
+            None if saved_choice.is_some() => {
                 status.push(format!(
                     "The saved API key is for {}, so none is sent to {url}. To save one for \
                      {url}, run `fair-witness setup`.",
@@ -308,7 +308,8 @@ fn ai(
         };
         bail!("{}, {without_key}", api_key_unencrypted(&url));
     }
-    Ok(Some((AiConfig { url, model, effort }, api_key)))
+    let choice = ModelChoice { model, effort };
+    Ok(Some((AiConfig { url, choice }, api_key)))
 }
 
 fn read_dmp(path: &Path) -> Result<Dmp> {
@@ -806,15 +807,17 @@ mod tests {
             },
             ai: Some(AiConfig {
                 url: "https://api.example.org/v1".to_string(),
-                model: "small".to_string(),
-                effort: "low".parse().unwrap(),
+                choice: ModelChoice {
+                    model: "small".to_string(),
+                    effort: "low".parse().unwrap(),
+                },
             }),
         };
         let effort = |args: Args| {
             let (ai, _) = ai(&project, Some(&config), &args, &mut Vec::new())
                 .unwrap()
                 .unwrap();
-            ai.effort.name().to_string()
+            ai.choice.effort.name().to_string()
         };
 
         assert_eq!(
@@ -851,8 +854,10 @@ mod tests {
                 },
                 ai: Some(AiConfig {
                     url: saved.to_string(),
-                    model: "small".to_string(),
-                    effort: "low".parse().unwrap(),
+                    choice: ModelChoice {
+                        model: "small".to_string(),
+                        effort: "low".parse().unwrap(),
+                    },
                 }),
             };
             let args = Args {
@@ -862,7 +867,12 @@ mod tests {
             let (ai, api_key) = ai(&project, Some(&config), &args, &mut Vec::new())
                 .unwrap()
                 .unwrap();
-            (ai.url, ai.model, ai.effort.name().to_string(), api_key)
+            (
+                ai.url,
+                ai.choice.model,
+                ai.choice.effort.name().to_string(),
+                api_key,
+            )
         };
         let saved = (
             "https://api.example.org/v1".to_string(),
