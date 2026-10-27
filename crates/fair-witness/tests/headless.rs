@@ -606,44 +606,11 @@ fn stops_when_nobody_reads_its_events() {
 
 #[test]
 fn stops_when_its_events_are_not_read_while_it_runs() {
-    let (root, dmp_file) = unset_folder_with_a_dmp();
-    // Each tool call is an event of its own, and these are more than stdout and the lines
-    // waiting for it hold together.
-    let mut many_calls = tool_call("list_dir", json!({ "path": "." }));
-    let call = many_calls["choices"][0]["message"]["tool_calls"][0].clone();
-    let calls: Vec<Value> = (0..2_000)
-        .map(|i| {
-            let mut call = call.clone();
-            call["id"] = json!(format!("call_{i}"));
-            call
-        })
-        .collect();
-    many_calls["choices"][0]["message"]["tool_calls"] = json!(calls);
-    let (endpoint, _server) = fake_model(vec![
-        one_token(),
-        many_calls,
-        tool_call(
-            "report_verdict",
-            json!({ "contradicts": false, "explanation": "Notes are not data." }),
-        ),
-    ]);
-    let mut run = Run::start_unread(
-        root.path(),
-        &[
-            "--dmp-file",
-            &dmp_file,
-            "--ai-url",
-            &endpoint,
-            "--model",
-            "test",
-        ],
-        &[],
-    );
-    run.stderr_until("Comparing");
+    let project = tempfile::tempdir().unwrap();
+    let mut run = start_with_a_large_dmp(project.path());
+    stuck_writing(project.path(), &mut run);
 
-    std::fs::write(root.path().join("notes.txt"), "Ask about consent").unwrap();
-
-    // Stdin stays open, so only the 30 seconds that the events stay behind stop it.
+    // Stdin stays open, so only the 30 seconds that the writer stays behind stop it.
     assert_eq!(
         run.exit_code_within(Duration::from_secs(30) + PATIENCE),
         Some(1)
