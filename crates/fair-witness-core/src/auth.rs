@@ -10,13 +10,19 @@ use serde::de::DeserializeOwned;
 use crate::net::{self, in_the_clear};
 use crate::review::retry_after;
 
-/// What logging in to DAMAP asks of the person in front of the screen.
-pub trait Prompts {
+/// How logging in to DAMAP tells the person in front of the screen how it goes.
+pub trait Notices {
     /// Tells them how the login goes, such as which DAMAP it reached.
     fn notice(&self, message: &str);
+}
+
+/// What logging in to DAMAP asks of the person in front of the screen.
+pub trait Prompts: Notices {
     /// Asks them to confirm `code` at `link` in the browser.
     fn confirm_code(&self, link: &str, code: &str);
     fn username_and_password(&self) -> Result<(String, String)>;
+    /// Asks whether to keep the saved session, or to log in again, such as with another account.
+    fn stay_logged_in(&self) -> Result<bool>;
 }
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -427,16 +433,22 @@ mod tests {
     #[derive(Default)]
     struct Browser(RefCell<Vec<String>>, RefCell<Vec<String>>);
 
-    impl Prompts for Browser {
+    impl Notices for Browser {
         fn notice(&self, message: &str) {
             self.1.borrow_mut().push(message.to_string());
         }
+    }
 
+    impl Prompts for Browser {
         fn confirm_code(&self, link: &str, _: &str) {
             self.0.borrow_mut().push(link.to_string());
         }
 
         fn username_and_password(&self) -> Result<(String, String)> {
+            bail!("not asked in this test")
+        }
+
+        fn stay_logged_in(&self) -> Result<bool> {
             bail!("not asked in this test")
         }
     }

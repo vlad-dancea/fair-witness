@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args;
 use dialoguer::{FuzzySelect, Input, Password};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, same_url, web_url};
@@ -36,9 +36,12 @@ pub struct ModelArgs {
     pub model: Option<String>,
 }
 
-pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
-    let mut config = project.config()?.context("this folder is not set up yet")?;
-    let mut previous = config.ai.take();
+/// Chooses the model, offering the `previous` one, and saves its API key in `project`.
+pub async fn setup(
+    project: &Project,
+    mut previous: Option<AiConfig>,
+    args: ModelArgs,
+) -> Result<AiConfig> {
     let mut credentials = project.credentials()?;
     // An empty --api-key removes the saved key before the API is asked anything, since an API
     // that needs a key refuses to answer without one and `setup` would stop with the key saved.
@@ -124,8 +127,7 @@ pub async fn setup(project: &Project, args: ModelArgs) -> Result<()> {
     });
     project.save_credentials(&credentials)?;
     println!("{line}");
-    config.ai = Some(ai);
-    project.save_config(&config)
+    Ok(ai)
 }
 
 /// The settings to save for `model` and the line that names it. The saved effort stays only
@@ -237,7 +239,7 @@ fn choose_model(
 
 #[cfg(test)]
 mod tests {
-    use fair_witness_core::project::{Config, Credentials, DamapConfig};
+    use fair_witness_core::project::Credentials;
     use fair_witness_core::testing::{
         EFFORT_REFUSED, Reply, Request, bad_request, failure, fake_model, one_token,
     };
@@ -245,19 +247,10 @@ mod tests {
 
     use super::*;
 
-    /// A folder set up with DAMAP, with `ai` and `api_key` saved.
-    fn folder(ai: Option<AiConfig>, api_key: Option<ApiKey>) -> (tempfile::TempDir, Project) {
+    /// A folder with `api_key` saved.
+    fn folder(api_key: Option<ApiKey>) -> (tempfile::TempDir, Project) {
         let root = tempfile::tempdir().unwrap();
         let project = Project::new(root.path().to_path_buf());
-        project
-            .save_config(&Config {
-                damap: DamapConfig {
-                    frontend_url: "https://damap.example.org".to_string(),
-                    dmp_id: Some(3),
-                },
-                ai,
-            })
-            .unwrap();
         project
             .save_credentials(&Credentials {
                 damap: None,
@@ -280,13 +273,13 @@ mod tests {
     }
 
     /// Sets up the model of a folder whose config holds `saved`, with `model` given and an API
-    /// that lists `small` and then answers with `checks`. Gives back the AI settings it saved,
+    /// that lists `small` and then answers with `checks`. Gives back the AI settings it chose,
     /// or why it failed, and the requests the API got.
     async fn set_up(
         saved: Option<(&str, &str)>,
         model: &str,
         checks: Vec<Reply>,
-    ) -> (Result<Option<AiConfig>, String>, String, Vec<Request>) {
+    ) -> (Result<AiConfig, String>, String, Vec<Request>) {
         let mut replies = vec![models()];
         replies.extend(checks);
         let (url, server) = fake_model(replies);
@@ -295,17 +288,14 @@ mod tests {
             model: model.to_string(),
             effort: effort.parse().unwrap(),
         });
-        let (_root, project) = folder(ai, None);
+        let (_root, project) = folder(None);
 
         let args = ModelArgs {
             ai_url: Some(url.clone()),
             api_key: None,
             model: Some(model.to_string()),
         };
-        let set_up = setup(&project, args)
-            .await
-            .map(|()| project.config().unwrap().unwrap().ai)
-            .map_err(|e| e.to_string());
+        let set_up = setup(&project, ai, args).await.map_err(|e| e.to_string());
         (set_up, url, server.join().unwrap())
     }
 
@@ -322,7 +312,7 @@ mod tests {
         )
         .await;
 
-        let ai = set_up.unwrap().unwrap();
+        let ai = set_up.unwrap();
         assert_eq!((ai.model.as_str(), ai.effort), ("small", Effort::default()));
         let efforts: Vec<&Value> = requests[1..]
             .iter()
@@ -375,18 +365,20 @@ mod tests {
         };
         let other = "https://other.example.org/v1";
         let saved_key = |project: &Project| project.credentials().unwrap().ai;
-        let (_other, another_api) = folder(chosen(other), saved_for(other));
-        // As after an edit of config.toml.
-        let (_edited, edited) = folder(chosen(&url), saved_for(other));
-        let (_same, same_api) = folder(chosen(&url), saved_for(&url));
+        let (_other, another_api) = folder(saved_for(other));
+        let (_edited, edited) = folder(saved_for(other));
+        let (_same, same_api) = folder(saved_for(&url));
 
-        setup(&another_api, args(None)).await.unwrap();
-        setup(&edited, args(None)).await.unwrap();
-        setup(&same_api, args(None)).await.unwrap();
+        setup(&another_api, chosen(other), args(None))
+            .await
+            .unwrap();
+        // As after an edit of config.toml.
+        setup(&edited, chosen(&url), args(None)).await.unwrap();
+        setup(&same_api, chosen(&url), args(None)).await.unwrap();
         let kept = saved_key(&same_api);
         // An empty --api-key removes the saved key, also when the API then wants one.
         assert_eq!(
-            setup(&same_api, args(Some("")))
+            setup(&same_api, chosen(&url), args(Some("")))
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -416,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_no_api_key_over_plain_http_to_another_machine() {
-        let (_root, project) = folder(None, saved_for("https://api.example.org/v1"));
+        let (_root, project) = folder(saved_for("https://api.example.org/v1"));
         let (url, server) = fake_model(vec![models(), one_token().into()]);
         // 0.0.0.0 reaches this machine on Linux and macOS, but fair-witness cannot tell that it
         // is not another one.
@@ -428,7 +420,7 @@ mod tests {
         };
 
         assert_eq!(
-            setup(&project, args(Some("sk-given")))
+            setup(&project, None, args(Some("sk-given")))
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -438,7 +430,7 @@ mod tests {
                  http://localhost through an SSH tunnel, or leave out --api-key if it needs none"
             )
         );
-        setup(&project, args(None)).await.unwrap();
+        setup(&project, None, args(None)).await.unwrap();
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|(head, _)| !head.contains("sk-")));
