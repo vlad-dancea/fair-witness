@@ -127,6 +127,7 @@ mod tests {
             model(endpoint),
         ];
 
+        std::fs::write(root.path().join("survey.csv"), "name\nAnna Muster\n").unwrap();
         let changes = [Change::Created("survey.csv".into())];
         review(&steps, root.path(), "{}", &changes, &|_| {})
             .await

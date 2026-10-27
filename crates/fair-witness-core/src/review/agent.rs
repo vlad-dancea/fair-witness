@@ -173,7 +173,7 @@ impl Reviewer {
         trace: &(dyn Fn(Trace) + Sync),
     ) -> Result<Verdict> {
         let tools = Arc::new(Tools::new(input.root)?);
-        let about_changes = prompt::about_changes(input.changes, input.found);
+        let about_changes = prompt::about_changes(input.root, input.changes, input.found);
         let choice = self.choice();
         let definitions = definitions();
         trace(Trace::Setup {
