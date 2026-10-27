@@ -61,7 +61,7 @@ enum Focus {
     Effort,
 }
 
-pub enum Outcome {
+pub enum PanelOutcome {
     Open,
     Closed,
     /// A choice to use, with why it could not be checked, if it could not.
@@ -133,14 +133,16 @@ impl ModelPanel {
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+    pub fn handle_key(&mut self, key: KeyEvent) -> PanelOutcome {
         match key.code {
-            KeyCode::Esc => return Outcome::Closed,
+            KeyCode::Esc => return PanelOutcome::Closed,
             // The choice being checked stays as it is until the API answers.
             _ if matches!(self.check, Check::Running { .. }) => {}
             KeyCode::Enter => match self.chosen() {
                 // The one in use needs no check.
-                Some(choice) if choice == self.current => return Outcome::Chosen(choice, None),
+                Some(choice) if choice == self.current => {
+                    return PanelOutcome::Chosen(choice, None);
+                }
                 Some(choice) => self.start_check(choice),
                 None => {}
             },
@@ -163,7 +165,7 @@ impl ModelPanel {
             }
             _ => {}
         }
-        Outcome::Open
+        PanelOutcome::Open
     }
 
     fn start_check(&mut self, choice: ModelChoice) {
@@ -182,26 +184,26 @@ impl ModelPanel {
 
     /// What came of checking the choice: `Chosen` once the API took it or the check could not
     /// tell, and `Open` while it checks, after the API refused it, or before any check.
-    pub fn checked(&mut self) -> Outcome {
+    pub fn checked(&mut self) -> PanelOutcome {
         let Check::Running {
             choice, checked, ..
         } = &mut self.check
         else {
-            return Outcome::Open;
+            return PanelOutcome::Open;
         };
         let checked = match checked.try_recv() {
             Ok(checked) => checked,
-            Err(TryRecvError::Empty) => return Outcome::Open,
+            Err(TryRecvError::Empty) => return PanelOutcome::Open,
             Err(TryRecvError::Closed) => ChoiceCheck::Unknown("the check stopped".to_string()),
         };
         let choice = choice.clone();
         self.check = Check::None;
         match checked {
-            ChoiceCheck::Accepted => Outcome::Chosen(choice, None),
-            ChoiceCheck::Unknown(why) => Outcome::Chosen(choice, Some(why)),
+            ChoiceCheck::Accepted => PanelOutcome::Chosen(choice, None),
+            ChoiceCheck::Unknown(why) => PanelOutcome::Chosen(choice, Some(why)),
             ChoiceCheck::Refused(message) => {
                 self.check = Check::Refused { choice, message };
-                Outcome::Open
+                PanelOutcome::Open
             }
         }
     }
@@ -487,7 +489,7 @@ mod tests {
     }
 
     /// What happens once the API has answered the check of the choice.
-    async fn once_checked(panel: &mut ModelPanel) -> Outcome {
+    async fn once_checked(panel: &mut ModelPanel) -> PanelOutcome {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let outcome = panel.checked();
@@ -540,7 +542,7 @@ mod tests {
         let shown = drawn(&mut panel);
         assert!(shown.contains("│ mistral-small "), "{shown}");
         // The choice in use needs no check.
-        let Outcome::Chosen(choice, None) = panel.handle_key(KeyCode::Enter.into()) else {
+        let PanelOutcome::Chosen(choice, None) = panel.handle_key(KeyCode::Enter.into()) else {
             panic!("nothing chosen");
         };
         assert_eq!(
@@ -561,7 +563,7 @@ mod tests {
         .await;
 
         for key in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
-            assert!(matches!(panel.handle_key(key.into()), Outcome::Open));
+            assert!(matches!(panel.handle_key(key.into()), PanelOutcome::Open));
         }
         let checking = drawn(&mut panel);
         // While it checks, the choice stays as it is.
@@ -572,7 +574,7 @@ mod tests {
             checking.contains("│ Checking qwen3:8b (high effort) with the API…"),
             "{checking}"
         );
-        assert!(matches!(outcome, Outcome::Open));
+        assert!(matches!(outcome, PanelOutcome::Open));
         insta::assert_snapshot!(drawn_rows(&mut panel, 22));
     }
 
@@ -588,7 +590,7 @@ mod tests {
                 panel.handle_key(key.into());
             }
             match once_checked(&mut panel).await {
-                Outcome::Chosen(choice, unchecked) => outcomes.push((choice, unchecked)),
+                PanelOutcome::Chosen(choice, unchecked) => outcomes.push((choice, unchecked)),
                 _ => panic!("nothing chosen"),
             }
         }
@@ -648,7 +650,7 @@ mod tests {
 
         assert!(matches!(
             panel.handle_key(KeyCode::Esc.into()),
-            Outcome::Closed
+            PanelOutcome::Closed
         ));
         drop(panel);
 

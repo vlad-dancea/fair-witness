@@ -2,10 +2,10 @@
 
 use std::fmt::Write;
 
-use crate::report::{Accuracy, Outcome, Refused};
+use crate::report::{Accuracy, Refused, RunOutcome};
 
 /// Names the run of a scenario. `one_each` says that each scenario ran once.
-pub fn label(outcome: &Outcome, fake: bool, one_each: bool) -> String {
+pub fn label(outcome: &RunOutcome, fake: bool, one_each: bool) -> String {
     if fake && one_each {
         outcome.name.clone()
     } else if fake {
@@ -22,7 +22,7 @@ pub fn label(outcome: &Outcome, fake: bool, one_each: bool) -> String {
 }
 
 /// Which runs of the fake model passed. `one_each` says that each scenario ran once.
-pub fn passed(outcomes: &[Outcome], one_each: bool) -> String {
+pub fn passed(outcomes: &[RunOutcome], one_each: bool) -> String {
     let labels: Vec<String> = outcomes
         .iter()
         .map(|outcome| label(outcome, true, one_each))
@@ -48,7 +48,7 @@ pub fn passed(outcomes: &[Outcome], one_each: bool) -> String {
 
 /// How often each real model and effort gave the expected verdict, overall and for each change
 /// set, and why reviews failed.
-pub fn accuracy(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
+pub fn accuracy(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
     let mut rows = vec![
         [
             "model",
@@ -130,7 +130,7 @@ impl SetCell {
 
 /// How often each change set got the expected verdict from each model and effort, in the order
 /// of `accuracy`, and the tokens and seconds a review of it took.
-fn sets(outcomes: &[Outcome], accuracy: &[Accuracy]) -> String {
+fn sets(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
     let mut sets: Vec<SetRow> = Vec::new();
     for outcome in outcomes {
         let Some(column) = accuracy
@@ -198,7 +198,7 @@ struct Failed<'a> {
 }
 
 /// Why reviews failed, once for each model, effort and kind of error, such as a wrong API key.
-fn failed_reviews(outcomes: &[Outcome]) -> String {
+fn failed_reviews(outcomes: &[RunOutcome]) -> String {
     let mut failed: Vec<Failed> = Vec::new();
     for outcome in outcomes {
         let model = format!("{} {}", outcome.model, outcome.effort.name());
@@ -274,7 +274,7 @@ pub fn refused(refused: &[Refused]) -> String {
 }
 
 /// What went wrong in each run that did not go as expected.
-pub fn problems(outcomes: &[Outcome], fake: bool, one_each: bool) -> String {
+pub fn problems(outcomes: &[RunOutcome], fake: bool, one_each: bool) -> String {
     let mut text = String::new();
     for outcome in outcomes.iter().filter(|outcome| !outcome.passed) {
         let _ = writeln!(text, "\n{}:", label(outcome, fake, one_each));

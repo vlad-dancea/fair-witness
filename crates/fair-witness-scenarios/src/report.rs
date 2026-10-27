@@ -22,7 +22,7 @@ pub struct Refused {
 
 /// How a run of a scenario went.
 #[derive(Debug, Serialize)]
-pub struct Outcome {
+pub struct RunOutcome {
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -92,7 +92,7 @@ pub struct Accuracy {
     pub review_ms: u64,
 }
 
-impl Outcome {
+impl RunOutcome {
     pub fn sets_passed(&self) -> usize {
         self.sets.iter().filter(|set| set.passed()).count()
     }
@@ -220,7 +220,7 @@ impl SetOutcome {
 
 /// Compares the events of run `repeat` of a scenario with `model` with what the scenario
 /// expects of each change set.
-pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Outcome {
+pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> RunOutcome {
     let fake = *model == Model::Fake;
     let mut problems: Vec<String> = ran.error.iter().cloned().collect();
     let mut sets: Vec<SetOutcome> = scenario.sets.iter().cloned().map(SetOutcome::new).collect();
@@ -253,7 +253,7 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ou
     for set in &mut sets {
         set.compare(ran.error.is_none(), fake);
     }
-    Outcome {
+    RunOutcome {
         name: scenario.name.clone(),
         description: scenario.description.clone(),
         model: model.name().to_string(),
@@ -267,7 +267,7 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ou
 }
 
 /// The accuracy of each model and effort in `outcomes`, in the order they first come.
-pub fn accuracy(outcomes: &[Outcome]) -> Vec<Accuracy> {
+pub fn accuracy(outcomes: &[RunOutcome]) -> Vec<Accuracy> {
     let mut groups: Vec<(&str, &Effort, Vec<&SetOutcome>)> = Vec::new();
     for outcome in outcomes {
         let group = groups

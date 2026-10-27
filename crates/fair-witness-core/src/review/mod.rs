@@ -11,7 +11,7 @@ pub use agent::{ChoiceCheck, ModelChoice, ModelStep};
 pub use prompt::first_message;
 pub use provider::list_models;
 pub(crate) use provider::retry_after;
-pub use steps::{Input, Outcome, Step, StepFuture, review};
+pub use steps::{Input, Step, StepFuture, StepOutcome, run_steps};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {

@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::debug_pane::DebugLog;
-use super::model_panel::{self, ModelPanel, ModelSettings, Outcome};
+use super::model_panel::{self, ModelPanel, ModelSettings, PanelOutcome};
 
 const TICK: Duration = Duration::from_millis(100);
 /// From this width on, the debug pane sits beside the changes, not below.
@@ -243,11 +243,11 @@ impl Screen {
         }
     }
 
-    fn handle_outcome(&mut self, outcome: Outcome) {
+    fn handle_outcome(&mut self, outcome: PanelOutcome) {
         match outcome {
-            Outcome::Open => {}
-            Outcome::Closed => self.panel = None,
-            Outcome::Chosen(choice, unchecked) => {
+            PanelOutcome::Open => {}
+            PanelOutcome::Closed => self.panel = None,
+            PanelOutcome::Chosen(choice, unchecked) => {
                 self.panel = None;
                 self.use_model(choice, unchecked);
             }

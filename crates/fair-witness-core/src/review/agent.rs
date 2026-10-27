@@ -15,7 +15,7 @@ use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
     asks_to_allow_effort, openai_compatible, refused, timed_out, too_many_requests, why_failed,
 };
-use super::steps::{Input, Outcome, Step, StepFuture};
+use super::steps::{Input, Step, StepFuture, StepOutcome};
 use super::tools::Tools;
 use super::{Trace, Verdict};
 use crate::project::{AiConfig, Effort};
@@ -398,12 +398,12 @@ impl ModelStep {
 }
 
 impl Step for ModelStep {
-    fn check<'a>(
+    fn decide<'a>(
         &'a self,
         input: &'a Input<'a>,
         trace: &'a (dyn Fn(Trace) + Sync),
     ) -> StepFuture<'a> {
-        Box::pin(async move { Ok(Outcome::Decided(self.run(input, trace).await?)) })
+        Box::pin(async move { Ok(StepOutcome::Decided(self.run(input, trace).await?)) })
     }
 }
 
