@@ -10,7 +10,7 @@ use fair_witness_core::damap::{self, Damap};
 use fair_witness_core::net::in_the_clear;
 use fair_witness_core::project::{AiConfig, Config, Effort, NOT_SET_UP, Project};
 use fair_witness_core::review::{Checked, Reviewer};
-use fair_witness_core::session::{Record, Session};
+use fair_witness_core::session::{Event, Record, Session};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::Failure;
@@ -445,6 +445,7 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
         io::Result::Ok(())
     });
     tokio::pin!(stopped, writer);
+    let mut watch_stopped = None;
     loop {
         tokio::select! {
             () = &mut stopped => {
@@ -462,7 +463,15 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
                 bail!("stopped writing to stdout");
             }
             record = records.recv() => {
-                let record = record.context("stopped watching")?;
+                let Some(record) = record else {
+                    // The last lines say why, so they go out before the error, as on a stop.
+                    drop(lines);
+                    let _ = tokio::time::timeout(STOP_WRITING_WITHIN, &mut writer).await;
+                    bail!(watch_stopped.unwrap_or_else(|| "stopped watching".to_string()));
+                };
+                if let Event::WatchStopped { error } = &record.event {
+                    watch_stopped = Some(error.clone());
+                }
                 let mut line = serde_json::to_string(&record)?;
                 line.push('\n');
                 // When the writer has failed, the next turn of the loop reports why.

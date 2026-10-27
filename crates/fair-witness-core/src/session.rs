@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::project::{self, Project};
 use crate::review::{self, Step, Trace, Verdict};
-use crate::watcher::{self, Change, Filter, FolderWatcher};
+use crate::watcher::{self, Change, Filter, FolderWatcher, WatchError};
 
 /// Something that happened while watching, with the number of the change set it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +42,12 @@ pub enum Event {
     WatchErrors {
         set: usize,
         errors: Vec<String>,
+    },
+    /// Watching ended for good, such as when the project folder was moved or deleted, and the
+    /// session ends with it, dropping the reviews still to come. Only a `LogStopped` can follow,
+    /// when this event could not be logged.
+    WatchStopped {
+        error: String,
     },
     /// The log could not be written, so it holds no events from here on, not even this one.
     LogStopped {
@@ -102,8 +108,8 @@ impl Session {
         }
     }
 
-    /// Starts watching. The session runs until the receiver is dropped, and drops the review
-    /// in progress then.
+    /// Starts watching. The session runs until the receiver is dropped or watching stops, and
+    /// drops the review in progress then.
     pub fn start(self) -> Result<UnboundedReceiver<Record>> {
         let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
         // The rules the watcher read when it started, so that the model may read exactly what
@@ -117,25 +123,31 @@ impl Session {
         let (sender, received) = mpsc::unbounded_channel();
         let events = Arc::new(Events::new(sender, log));
         let (queue, queued) = mpsc::unbounded_channel();
-        // The watcher runs in a task of its own, so that a long review holds up neither the
-        // watcher's timing of the next set nor its look at the files the next events name,
-        // which may be gone by the time the review ends.
-        tokio::spawn({
+        let reviews = tokio::spawn({
             let events = events.clone();
             async move {
                 tokio::select! {
-                    () = watch(watcher, &events, &queue) => {}
+                    () = self.review_queued(queued, &filter, &events) => {}
                     () = events.sender.closed() => {}
-                    // The reviews are gone only after a panic, and then the session ends at
-                    // once rather than look as if it still reviewed.
-                    () = queue.closed() => {}
                 }
             }
         });
+        // The watcher runs in a task of its own, so that a long review holds up neither the
+        // watcher's timing of the next set nor its look at the files the next events name,
+        // which may be gone by the time the review ends.
         tokio::spawn(async move {
-            tokio::select! {
-                () = self.review_queued(queued, &filter, &events) => {}
-                () = events.sender.closed() => {}
+            let stopped = tokio::select! {
+                stopped = watch(watcher, &events, &queue) => stopped,
+                () = events.sender.closed() => None,
+                // The reviews are gone only after a panic, and then the session ends at once
+                // rather than look as if it still reviewed.
+                () = queue.closed() => None,
+            };
+            if let Some(error) = stopped {
+                // No review can read the folder any more, and why watching stopped comes last.
+                reviews.abort();
+                let _ = reviews.await;
+                events.send(Event::WatchStopped { error });
             }
         });
         Ok(received)
@@ -177,20 +189,28 @@ impl Session {
     }
 }
 
-/// Numbers each change set the watcher ends, reports it and queues it for review.
+/// Numbers each change set the watcher ends, reports it and queues it for review, and gives
+/// the error that stopped watching, if one did.
 async fn watch(
     mut watcher: FolderWatcher,
     events: &Events,
     queue: &UnboundedSender<(usize, Vec<Change>)>,
-) {
+) -> Option<String> {
     let mut set = 0;
     while let Some(batch) = watcher.next().await {
         let changes = match batch {
             Ok(changes) => changes,
-            Err(errors) => {
+            Err(WatchError::Failed(errors)) => {
                 let errors = errors.iter().map(ToString::to_string).collect();
                 events.send(Event::WatchErrors { set, errors });
                 continue;
+            }
+            Err(WatchError::Gone) => {
+                return Some(
+                    "the project folder was moved or deleted, so it is no longer watched; start \
+                     `fair-witness run` again in its new place"
+                        .to_string(),
+                );
             }
         };
         set += 1;
@@ -199,9 +219,10 @@ async fn watch(
             changes: changes.clone(),
         });
         if queue.send((set, changes)).is_err() {
-            return;
+            return None;
         }
     }
+    None
 }
 
 /// Stamps each event with the time, logs it and passes it on, leaving out what a review
@@ -375,6 +396,7 @@ mod tests {
             ),
             Event::ReviewFailed { set, error } => format!("#{set} review failed: {error}"),
             Event::WatchErrors { set, errors } => format!("#{set} watch errors: {errors:?}"),
+            Event::WatchStopped { error } => format!("watching stopped: {error}"),
             Event::LogStopped { error } => format!("log stopped: {error}"),
         }
     }
@@ -436,6 +458,52 @@ mod tests {
         assert_eq!(
             seen,
             [r#"#1 changes [Created("results.csv")]"#, "#1 reviewing"]
+        );
+    }
+
+    /// A step that never decides, as a slow model.
+    struct Stalls;
+
+    impl Step for Stalls {
+        fn check<'a>(&'a self, _: &'a Input<'a>, _: &'a (dyn Fn(Trace) + Sync)) -> StepFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn ends_with_why_once_the_project_folder_is_moved() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let mut events = Session::new(Project::new(root.clone()))
+            .debounce(Duration::from_millis(50))
+            .reviewing("{}".to_string(), vec![Arc::new(Stalls)])
+            .start()
+            .unwrap();
+
+        fs::write(root.join("results.csv"), "a").unwrap();
+        let mut seen: Vec<String> = until(&mut events, "#1 reviewing")
+            .await
+            .iter()
+            .map(|record| describe(&record.event))
+            .collect();
+        fs::rename(&root, parent.path().join("moved")).unwrap();
+        // The review in progress never decides, so only the session's end can end the events.
+        while let Some(record) = tokio::time::timeout(PATIENCE, events.recv())
+            .await
+            .expect("the session went on after its folder moved")
+        {
+            seen.push(describe(&record.event));
+        }
+
+        assert_eq!(
+            seen,
+            [
+                r#"#1 changes [Created("results.csv")]"#,
+                "#1 reviewing",
+                "watching stopped: the project folder was moved or deleted, so it is no longer \
+                 watched; start `fair-witness run` again in its new place",
+            ]
         );
     }
 
