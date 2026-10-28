@@ -15,9 +15,12 @@ awk 'BEGIN {
 (cd "$outside" && zip -q clinic-export-2026-10.zip clinic-export-2026-10.csv)
 
 # The researcher saves the attachment from the mail client into the data folder, extracts it a
-# few seconds later and deletes the archive.
+# few seconds later and deletes the archive. A pause of 2.5 seconds starts a new set, and
+# fair-witness hands the archive's set on for review 5 seconds after the save, so extracting it
+# after 3.5 seconds puts the export next to the archive before any model looks, with a second to
+# spare either way. Some models list the folder within a second of the review's start.
 cp "$outside/clinic-export-2026-10.zip" data/
-sleep 6
+sleep 3.5
 unzip -q data/clinic-export-2026-10.zip -d data
 sleep 8
 rm data/clinic-export-2026-10.zip
