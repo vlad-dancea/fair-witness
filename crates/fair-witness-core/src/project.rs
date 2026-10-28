@@ -28,8 +28,8 @@ const IGNORE_TEMPLATE: &str = "\
 # Use ! to check a path again, including paths fair-witness skips on its own.
 # .fair-witness/ itself is always skipped.
 # `fair-witness run` reads this file at startup. Restart it after edits.
-# See \"What is ignored\" in the README for what is skipped already:
-# https://github.com/vlad-dancea/fair-witness#what-is-ignored
+# See \"What is ignored\" for what is skipped already:
+# https://github.com/vlad-dancea/fair-witness/blob/main/docs/configuration.md#what-is-ignored
 #
 # Examples (remove the leading \"# \" to use):
 # build/

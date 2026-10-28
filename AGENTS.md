@@ -152,8 +152,10 @@ disagrees with it.
 - When changing `damap/` or `auth.rs`, try the change against TU Wien's DAMAP at
   `https://damap.it.tuwien.ac.at`, the default URL, logged in as `user` with password `user`.
   Do not start a local DAMAP for it.
-- Update the README when a command, option, environment variable or file in `.fair-witness/`
-  changes. It is the user documentation.
+- Update the user documentation in `docs/` when a command, option, environment variable or file
+  in `.fair-witness/` changes, and the README when its quick start does. `docs/demo/record.sh`
+  records the README's picture again after a change to the screen. It needs an Aqueduct API key,
+  so ask the maintainer to run it.
 
 ## Code
 
