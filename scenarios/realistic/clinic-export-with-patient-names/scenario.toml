@@ -2,15 +2,25 @@ description = "A researcher saves the clinic's monthly export, a ZIP attachment,
 
 [[set]]
 changes = [{ created = "data/clinic-export-2026-10.zip" }]
-contradicts = false
-explanation = "The DMP expects monthly exports from the clinic, and nothing in an archive's name or first bytes contradicts it."
-fake_tool_calls = [{ tool = "read_file", arguments = { path = "data/clinic-export-2026-10.zip" } }]
+contradicts = true
+dmp_field = [
+  "dataset[0].personal_data",
+  "dataset[0].sensitive_data",
+  "dataset[0].security_and_privacy",
+  "ethical_issues_description",
+]
+explanation = "A model cannot look inside the archive, but the researcher has extracted it before its review starts, and the export next to it names the patients and their birth dates. The DMP says the clinic anonymises every record and the project holds no personal data."
+fake_tool_calls = [
+  { tool = "list_dir", arguments = { path = "data" } },
+  { tool = "read_file", arguments = { path = "data/clinic-export-2026-10.csv" } },
+]
 
 [[set]]
 changes = [{ created = "data/clinic-export-2026-10.csv" }]
 contradicts = true
 dmp_field = [
   "dataset[0].personal_data",
+  "dataset[0].sensitive_data",
   "dataset[0].security_and_privacy",
   "ethical_issues_description",
 ]
