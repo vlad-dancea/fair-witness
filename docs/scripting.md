@@ -13,7 +13,7 @@ Scripts and agents can run fair-witness without a terminal and without DAMAP. Th
 | `--effort` | `FAIR_WITNESS_EFFORT` | How much the model reasons, instead of the effort chosen with `m`: a name the model takes, such as `low` or `xhigh`, which goes to the API as given. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore |
 | `--debounce-ms <ms>` | `FAIR_WITNESS_DEBOUNCE_MS` | How long the folder has to be quiet before its changes count as one set, in milliseconds (default 2000). A set ends 30 times as long after its first change at the latest |
 
-With `--dmp-file` and the AI flags, the folder does not need to be set up, and nothing is written into it:
+With `--dmp-file` and the AI flags, the folder does not need to be set up, and `run` writes nothing into a folder that is not:
 
 ```sh
 fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json \
@@ -29,7 +29,7 @@ fair-witness run --headless --project ~/research/my-project --dmp-file dmp.json 
 
 ## Events
 
-Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. The `changes` of the next sets can come before that, while the set is still reviewed, since the sets are reviewed one after another. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
+Each line is the same as in the events log of `.fair-witness/log/`: the time, the event and the number of the change set it belongs to, which `watch_stopped` and `log_stopped` do not have. `trace` events are the steps the debug pane shows, and a set ends with a `verdict` or a `review_failed`. Without a DMP or a model, `run` lists the changes but checks none, so no set gets either. A `log_stopped` event says that the log could not be written and holds no events from then on. The `changes` of the next sets can come before that, while the set is still reviewed, since the sets are reviewed one after another. Paths are relative to the project folder and written as the Changes pane and the AI see them, so that every name fits on one line and none is lost: `/` between folders on every system, a backslash in a name as `\\`, line breaks and other control characters as `\n`, `\r`, `\t` or `\u{1b}`, and a byte that is not UTF-8 as `\xe9`. JSON then doubles each backslash, as in `{"created":"latin1-\\xe9t\\xe9.csv"}`. Messages for people, such as which DMP is used, go to stderr. A folder that is set up also gets its log, and one that never ran `setup` gets none.
 
 ## Stopping and exit codes
 

@@ -14,7 +14,8 @@ The DAMAP URL and the AI settings can also be passed as flags or environment var
 | `--model` | `FAIR_WITNESS_MODEL` | Model to use |
 
 ```sh
-FAIR_WITNESS_API_KEY=sk-... fair-witness setup --url https://damap.example.org \
+read -rs key   # paste the key, kept out of the history
+FAIR_WITNESS_API_KEY=$key fair-witness setup --url https://damap.example.org \
   --ai-url https://api.openai.com/v1 --model gpt-5-mini
 ```
 
