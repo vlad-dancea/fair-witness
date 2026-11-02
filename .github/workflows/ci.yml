@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A hung build fails after 20 minutes instead of GitHub's 6-hour default.
     timeout-minutes: 20
     steps:
@@ -57,7 +57,7 @@ jobs:
   # goes out with the next push.
   changes:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -122,7 +122,7 @@ jobs:
   publish:
     needs: [check, changes]
     if: needs.changes.outputs.release == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write # push the release tag
