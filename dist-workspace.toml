@@ -20,3 +20,8 @@ dispatch-releases = true
 # Build only the released package, so that the scenario runner and the testing feature of
 # fair-witness-core it turns on stay out of release builds.
 precise-builds = true
+
+# GitHub retired macos-14, this dist version's default runner for Apple Silicon, on 2026-11-02.
+# dist 0.34.0 defaults to macos-15, so this can go when dist is updated.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
