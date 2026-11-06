@@ -13,7 +13,7 @@ use fair_witness_core::project::{
     AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Project,
 };
 use fair_witness_core::testing::{
-    EFFORT_REFUSED, bad_request, failure, fake_model, one_token, tool_call,
+    EFFORT_REFUSED, Reply, asking_to_wait, bad_request, failure, fake_model, one_token, tool_call,
 };
 use serde_json::{Value, json};
 
@@ -246,6 +246,63 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     assert_eq!(requests[0].1["max_tokens"], 1);
     assert!(requests[1].1.to_string().contains("Soil samples"));
     assert_eq!(requests[1].1["reasoning_effort"], "ultra");
+    assert_eq!(run.stop(), Some(0));
+}
+
+#[test]
+fn reaches_a_verdict_after_a_failure_that_goes_away() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let replies: Vec<Reply> = vec![
+        one_token().into(),
+        asking_to_wait(
+            "0",
+            failure("503 Service Unavailable", "The model is loading."),
+        ),
+        tool_call(
+            "report_verdict",
+            json!({ "contradicts": false, "explanation": "Soil samples, as planned." }),
+        )
+        .into(),
+    ];
+    let (endpoint, server) = fake_model(replies);
+
+    let run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            &endpoint,
+            "--model",
+            "test",
+        ],
+    );
+    run.stderr_until("Comparing");
+    std::fs::write(root.path().join("samples.csv"), "ph\n6.5\n").unwrap();
+    let events = run.events_until_verdict();
+
+    assert!(
+        events.contains(&json!({
+            "event": "trace",
+            "set": 1,
+            "trace": { "retrying": {
+                "turn": 1,
+                "retry": 1,
+                "wait_ms": 0,
+                "why": "the API answered 503 Service Unavailable: The model is loading."
+            } }
+        })),
+        "{events:?}"
+    );
+    assert_eq!(
+        events.last().unwrap(),
+        &json!({
+            "event": "verdict",
+            "set": 1,
+            "verdict": { "contradicts": false, "explanation": "Soil samples, as planned." }
+        })
+    );
+    assert_eq!(server.join().unwrap().len(), 3);
     assert_eq!(run.stop(), Some(0));
 }
 

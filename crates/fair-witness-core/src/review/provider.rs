@@ -102,37 +102,65 @@ pub fn openai_compatible(url: &str, api_key: Option<String>, timeout: Duration) 
         .with_context(|| format!("could not set up a client for the AI API at {url}"))
 }
 
-/// A request the API refused with 429 Too Many Requests.
-pub struct TooManyRequests {
+/// A failed request that may go through when it is sent again.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Blip {
+    /// The failure status the API answered with, if it did.
+    pub status: Option<StatusCode>,
     /// How long the API asks to wait, if it says.
     pub retry_after: Option<Duration>,
-    /// What the API answered.
+    /// What the API answered with that status.
     pub body: String,
 }
 
-pub fn too_many_requests(error: &genai::Error) -> Option<TooManyRequests> {
-    let genai::Error::WebModelCall {
-        webc_error:
-            webc::Error::ResponseFailedStatus {
-                status,
-                body,
-                headers,
-            },
-        ..
-    } = error
-    else {
+/// `error` as a failure that may go away by itself, or `None` for one that would come back the
+/// same however often the request goes again.
+pub fn blip(error: &genai::Error) -> Option<Blip> {
+    let genai::Error::WebModelCall { webc_error, .. } = error else {
         return None;
     };
-    if *status != StatusCode::TOO_MANY_REQUESTS {
-        return None;
+    let unanswered = Blip {
+        status: None,
+        retry_after: None,
+        body: String::new(),
+    };
+    match webc_error {
+        webc::Error::ResponseFailedStatus {
+            status,
+            body,
+            headers,
+        } => may_go_away(*status).then(|| {
+            let header = headers
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok());
+            Blip {
+                status: Some(*status),
+                retry_after: retry_after(header, body),
+                body: body.clone(),
+            }
+        }),
+        // Usually a proxy's error page or a reply cut off. What the model itself writes wrong
+        // comes as `genai::Error::ChatResponseGeneration`.
+        webc::Error::ResponseFailedNotJson { .. }
+        | webc::Error::ResponseFailedInvalidJson { .. } => Some(unanswered),
+        // A connection that could not be made or broke off, or a request that timed out. A
+        // request that cannot be built, such as with a key that cannot go in a header, or that
+        // redirects in a loop, goes the same way every time.
+        webc::Error::Reqwest(e) if !e.is_builder() && !e.is_redirect() => Some(unanswered),
+        _ => None,
     }
-    let header = headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok());
-    Some(TooManyRequests {
-        retry_after: retry_after(header, body),
-        body: body.clone(),
-    })
+}
+
+/// Whether sending a request again may change the failure `status`. OpenAI's SDK sends a request
+/// again after 408 Request Timeout, 409 Conflict and 429 Too Many Requests, which a busy API
+/// answers. A gateway often passes on a model's failure as a plain 500, so all of 5xx count.
+fn may_go_away(status: StatusCode) -> bool {
+    let busy = [
+        StatusCode::REQUEST_TIMEOUT,
+        StatusCode::CONFLICT,
+        StatusCode::TOO_MANY_REQUESTS,
+    ];
+    status.is_server_error() || busy.contains(&status)
 }
 
 /// What the API answered when it refused a request with 400 Bad Request and asked to name
@@ -150,8 +178,7 @@ pub fn asks_to_allow_effort(error: &genai::Error) -> Option<String> {
 }
 
 /// What the API said when it refused a request with a 4xx status that sending it again would
-/// not change. OpenAI's SDK sends a request again after 408 Request Timeout, 409 Conflict and 429
-/// Too Many Requests, which a busy API answers.
+/// not change.
 pub fn refused(error: &genai::Error) -> Option<String> {
     let genai::Error::WebModelCall {
         webc_error: webc::Error::ResponseFailedStatus { status, body, .. },
@@ -160,12 +187,7 @@ pub fn refused(error: &genai::Error) -> Option<String> {
     else {
         return None;
     };
-    let busy = [
-        StatusCode::REQUEST_TIMEOUT,
-        StatusCode::CONFLICT,
-        StatusCode::TOO_MANY_REQUESTS,
-    ];
-    (status.is_client_error() && !busy.contains(status)).then(|| message(body))
+    (status.is_client_error() && !may_go_away(*status)).then(|| message(body))
 }
 
 /// Whether the API took a request but did not answer it before the client's timeout.
@@ -503,6 +525,40 @@ mod tests {
                 "{date}: {wait:?}"
             );
         }
+    }
+
+    #[test]
+    fn draws_one_line_between_failures_that_go_away_and_refusals() {
+        let error = |status| genai::Error::WebModelCall {
+            model_iden: ModelIden::new(AdapterKind::OpenAI, "test"),
+            webc_error: webc::Error::ResponseFailedStatus {
+                status,
+                body: "No.".to_string(),
+                headers: Box::default(),
+            },
+        };
+        let status = |code| StatusCode::from_u16(code).unwrap();
+
+        for code in [408, 409, 429, 500, 501, 502, 503, 504, 599] {
+            let error = error(status(code));
+            assert_eq!(
+                blip(&error),
+                Some(Blip {
+                    status: Some(status(code)),
+                    retry_after: None,
+                    body: "No.".to_string(),
+                }),
+                "{code}"
+            );
+            assert_eq!(refused(&error), None, "{code}");
+        }
+        for code in [400, 401, 402, 403, 404, 422] {
+            let error = error(status(code));
+            assert_eq!(blip(&error), None, "{code}");
+            assert_eq!(refused(&error), Some("No.".to_string()), "{code}");
+        }
+        assert_eq!(blip(&error(status(304))), None);
+        assert_eq!(refused(&error(status(304))), None);
     }
 
     #[test]

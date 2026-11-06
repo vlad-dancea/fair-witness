@@ -52,6 +52,16 @@ pub enum Trace {
         /// What the API answered, as `ModelStep::reportable` leaves it.
         body: String,
     },
+    /// Request `turn` failed in another way that may go away, so it goes again after `wait_ms`,
+    /// as retry number `retry`, which counts on from those of `RateLimited`.
+    Retrying {
+        turn: usize,
+        retry: usize,
+        wait_ms: u64,
+        /// What the API answered or why it did not, in one line as `ModelStep::reportable`
+        /// leaves it.
+        why: String,
+    },
     /// The API refused request `turn` and asked to name its effort in `allowed_openai_params`,
     /// as LiteLLM does, so it goes again with the field, which later requests to the model
     /// carry from the start.

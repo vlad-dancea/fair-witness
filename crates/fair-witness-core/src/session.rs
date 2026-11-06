@@ -400,6 +400,9 @@ mod tests {
                 Trace::RateLimited { turn, wait_ms, .. } => {
                     format!("#{set} request {turn} waits {wait_ms} ms")
                 }
+                Trace::Retrying {
+                    turn, wait_ms, why, ..
+                } => format!("#{set} request {turn} waits {wait_ms} ms: {why}"),
                 Trace::EffortNotAllowed { turn, .. } => {
                     format!("#{set} request {turn} goes again with allowed_openai_params")
                 }
@@ -705,7 +708,7 @@ mod tests {
             },
             None,
             Duration::from_secs(1),
-            Duration::from_secs(60),
+            Duration::from_secs(2),
         )
         .unwrap();
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
@@ -730,8 +733,9 @@ mod tests {
                 "#1 model test",
                 "#1 prompt created: notes.txt",
                 "#1 request 1",
-                "#1 failed: the API did not answer within 1 s",
-                "#1 review failed: the model test failed: the API did not answer within 1 s",
+                "#1 request 1 waits 2000 ms: the API did not answer within 1 s",
+                "#1 failed: the model test gave no verdict within 2 s",
+                "#1 review failed: the model test gave no verdict within 2 s",
                 r#"#2 changes [Created("survey.csv")]"#,
                 "#2 reviewing",
                 "#2 prompt created: survey.csv",
