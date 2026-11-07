@@ -128,7 +128,7 @@ What you do about a contradiction is up to you. Either undo the change, or, if t
 
 A set whose review failed is kept and reviewed again under its own number, and the line under it says when. The attempts come after 1, 2, 5, 15 and 15 minutes, the oldest set first, and newer sets are checked in the meantime. Any verdict shows that the API works again, so the waiting sets go at once. Each failing set gives one desktop notification, however many attempts it takes.
 
-After the last attempt, or at once when the API refuses the request with a `4xx` status other than `408`, `409` or `429`, such as `401`, `403` or `404`, the line says that the set waits for the next run or another model. Picking a model with `m`, also the same one, sends every waiting set again and starts its waits over.
+After the last attempt, or at once when the API refuses the request with a `4xx` status other than `408`, `409` or `429`, such as `401`, `403` or `404`, the line says that no more attempts come in this run unless you pick another model. Picking a model with `m`, also the same one, sends every waiting set again and starts its waits over. Quitting `run` drops the waiting sets, so their changes stay unchecked until the files change again.
 
 A review reads the folder as it is then, so a verdict on a newer set also covers its paths in an older failed set. Those paths are not reviewed again, and when none are left, the older set says which verdict covers it. Sets never merge, so each number gets one verdict at most.
 

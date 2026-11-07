@@ -41,7 +41,7 @@ pub enum Update {
 pub fn next_attempt(retry_in_ms: Option<u64>) -> String {
     match retry_in_ms {
         Some(wait) => format!("trying again in {}", spoken(Duration::from_millis(wait))),
-        None => "waiting for the next run or another model (m)".to_string(),
+        None => "no more attempts in this run unless you pick another model (m)".to_string(),
     }
 }
 
@@ -1121,8 +1121,9 @@ mod tests {
             given_up,
             [
                 created.clone(),
-                " ↳ review failed, waiting for the next run or another model (m): the API is down"
+                " ↳ review failed, no more attempts in this run unless you pick another model"
                     .to_string(),
+                "   (m): the API is down".to_string(),
                 later.clone(),
                 " ↳ in line with the DMP: Notes.".to_string(),
             ]

@@ -50,7 +50,7 @@ pub enum Event {
     },
     /// A review of the set failed, and the set stays undecided. With `retry_in_ms` it goes again
     /// after that long, or sooner once any set gets a verdict. Without it, it goes again only when
-    /// another model is chosen, or else in the next run.
+    /// another model is chosen.
     ReviewFailed {
         set: usize,
         error: String,

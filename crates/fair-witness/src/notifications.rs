@@ -124,7 +124,8 @@ mod tests {
         assert_eq!(
             content(&error),
             Some((
-                "Could not check change set #1, waiting for the next run or another model (m)"
+                "Could not check change set #1, no more attempts in this run unless you pick another \
+                 model (m)"
                     .to_string(),
                 format!("the model test failed: {why}"),
             ))
