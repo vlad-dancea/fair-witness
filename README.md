@@ -35,3 +35,7 @@ You need a login for a DAMAP with a DMP for your project, by default TU Wien's a
 - [Running from a script](docs/scripting.md): `fair-witness run --headless`, its events and its exit codes
 - [Troubleshooting](docs/troubleshooting.md): what the error messages mean and what to do
 - [Development](docs/development.md): building, checking and releasing fair-witness
+
+## License
+
+fair-witness is released under the [MIT License](LICENSE).
