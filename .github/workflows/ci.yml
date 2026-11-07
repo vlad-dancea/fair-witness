@@ -157,9 +157,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" crates/fair-witness/Cargo.toml
-          # Keep Cargo.lock in step with the new version.
-          sed -i "/^name = \"fair-witness\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
+          # The core puts its own version in the User-Agent of its requests.
+          for crate in fair-witness fair-witness-core; do
+            sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" "crates/$crate/Cargo.toml"
+            # Keep Cargo.lock in step with the new version.
+            sed -i "/^name = \"$crate\"$/{n;s/^version = \".*\"$/version = \"$VERSION\"/}" Cargo.lock
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit --allow-empty -am "Release v$VERSION"
