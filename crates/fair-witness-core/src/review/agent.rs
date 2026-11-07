@@ -8,11 +8,12 @@ use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ReasoningEffort, Tool,
     ToolChoice, ToolResponse,
 };
+use reqwest::StatusCode;
 use serde_json::json;
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
-    asks_to_allow_effort, openai_compatible, refused, timed_out, too_many_requests, why_failed,
+    asks_to_allow_effort, blip, openai_compatible, refused, timed_out, why_failed,
 };
 use super::steps::{Input, Step, StepFuture, StepOutcome};
 use super::tools::Tools;
@@ -22,8 +23,9 @@ use crate::project::AiConfig;
 use crate::secret;
 
 const MAX_TURNS: usize = 12;
-/// How often a request goes again after the API refused it with 429 Too Many Requests. Reviews
-/// that share a model race for each request its limit frees, so one can lose several times.
+/// How often a request goes again after a failure that may go away, such as 429 Too Many
+/// Requests. Reviews that share a model race for each request its limit frees, so one can lose
+/// several times.
 const MAX_RETRIES: usize = 10;
 /// The longest wait before a retry. A limit per minute never asks for more, and a review is not
 /// worth holding for a longer one, such as a daily quota.
@@ -34,8 +36,9 @@ const MAX_REASKS: usize = 2;
 /// How long the API may take to answer one request. A reply at a high effort from a busy API
 /// can take minutes.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-/// How long a review may take, with the waits after 429 Too Many Requests. Reviews run one after
-/// another, so a review that never ended would leave every later change set unreviewed.
+/// How long a review may take, with the waits before a request goes again, so that a request
+/// that hangs gets one more try at most. Reviews run one after another, so a review that never
+/// ended would leave every later change set unreviewed.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long a check waits for the API: long enough for a busy one to answer with one token, and
 /// short enough that `run` does not seem to hang when it starts.
@@ -263,9 +266,9 @@ impl ModelStep {
         }
     }
 
-    /// Sends `request` and gives back the reply with how long it took. When the API refuses the
-    /// request with 429 Too Many Requests, waits as long as it asks and sends it again, and when
-    /// the reply cannot be read, sends it again at once.
+    /// Sends `request` and gives back the reply with how long it took. After a failure that may
+    /// go away, waits as long as the API asks and sends it again, and when the reply cannot be
+    /// read, sends it again at once.
     async fn ask(
         &self,
         model: &str,
@@ -281,37 +284,6 @@ impl ModelStep {
                 Ok(replied) => return Ok(replied),
                 Err(e) => e,
             };
-            let failed = match too_many_requests(&e) {
-                None => format!("the model {model} failed"),
-                Some(_) if retry == MAX_RETRIES => format!(
-                    "the model {model} still answered 429 Too Many Requests after \
-                     {MAX_RETRIES} retries"
-                ),
-                Some(refused) => {
-                    // Without a hint, the waits grow from 2 seconds.
-                    let wait = refused
-                        .retry_after
-                        .unwrap_or_else(|| Duration::from_secs(2 << retry.min(5)).min(MAX_WAIT));
-                    if wait > MAX_WAIT {
-                        format!(
-                            "the model {model} answered 429 Too Many Requests and asks to wait \
-                             {} s, longer than fair-witness waits ({} s)",
-                            wait.as_secs(),
-                            MAX_WAIT.as_secs()
-                        )
-                    } else {
-                        retry += 1;
-                        trace(Trace::RateLimited {
-                            turn,
-                            retry,
-                            wait_ms: millis(wait),
-                            body: self.reportable(refused.body),
-                        });
-                        tokio::time::sleep(wait).await;
-                        continue;
-                    }
-                }
-            };
             let why = if timed_out(&e) {
                 format!(
                     "the API did not answer within {}",
@@ -321,6 +293,48 @@ impl ModelStep {
                 why_failed(&e)
             };
             let why = self.reportable(why);
+            let failed = match blip(&e) {
+                None => format!("the model {model} failed"),
+                Some(blip) => {
+                    let answered = blip
+                        .status
+                        .map_or("failed".to_string(), |status| format!("answered {status}"));
+                    // Without a hint, the waits grow from 2 seconds.
+                    let wait = blip
+                        .retry_after
+                        .unwrap_or_else(|| Duration::from_secs(2 << retry.min(5)).min(MAX_WAIT));
+                    if retry == MAX_RETRIES {
+                        format!("the model {model} still {answered} after {MAX_RETRIES} retries")
+                    } else if wait > MAX_WAIT {
+                        format!(
+                            "the model {model} {answered} and asks to wait {} s, longer than \
+                             fair-witness waits ({} s)",
+                            wait.as_secs(),
+                            MAX_WAIT.as_secs()
+                        )
+                    } else {
+                        retry += 1;
+                        let wait_ms = millis(wait);
+                        trace(if blip.status == Some(StatusCode::TOO_MANY_REQUESTS) {
+                            Trace::RateLimited {
+                                turn,
+                                retry,
+                                wait_ms,
+                                body: self.reportable(blip.body),
+                            }
+                        } else {
+                            Trace::Retrying {
+                                turn,
+                                retry,
+                                wait_ms,
+                                why,
+                            }
+                        });
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
+            };
             trace(Trace::Failed(why.clone()));
             if matches!(e, genai::Error::ChatResponseGeneration { .. }) && reasks < MAX_REASKS {
                 reasks += 1;
@@ -486,8 +500,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        EFFORT_NOT_ALLOWED, EFFORT_REFUSED, Reply, bad_request, failure, fake_model, one_token,
-        too_many_requests, tool_call,
+        EFFORT_NOT_ALLOWED, EFFORT_REFUSED, Reply, asking_to_wait, bad_request, cut_off, failure,
+        fake_model, hang_up, no_answer, one_token, page, redirect, too_many_requests, tool_call,
     };
     use crate::watcher::{Change, Filter};
 
@@ -584,6 +598,7 @@ mod tests {
                 Trace::Sent(text) => format!("sent {text}"),
                 Trace::Request { turn } => format!("request {turn}"),
                 Trace::RateLimited { turn, .. } => format!("request {turn} rate limited"),
+                Trace::Retrying { turn, .. } => format!("request {turn} goes again"),
                 Trace::EffortNotAllowed { turn, .. } => format!("request {turn} effort refused"),
                 Trace::Reply { turn, calls, .. } => format!("reply {turn}: {}", calls[0].0),
                 Trace::ToolResult { name, output, .. } => format!("{name}: {output}"),
@@ -867,6 +882,354 @@ mod tests {
         );
     }
 
+    /// A reviewer that gives up on a request after `request` and on a review after `review`.
+    fn timed_reviewer(url: String, request: Duration, review: Duration) -> ModelStep {
+        ModelStep::with_timeouts(
+            &AiConfig {
+                url,
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
+            },
+            None,
+            request,
+            review,
+        )
+        .unwrap()
+    }
+
+    /// The traces of requests and of waits before they go again.
+    fn requests_and_waits(traces: Mutex<Vec<Trace>>) -> Vec<Trace> {
+        let mut traces = traces.into_inner().unwrap();
+        traces.retain(|trace| {
+            matches!(
+                trace,
+                Trace::Request { .. } | Trace::RateLimited { .. } | Trace::Retrying { .. }
+            )
+        });
+        traces
+    }
+
+    #[tokio::test]
+    async fn reaches_a_verdict_after_a_failure_that_goes_away() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = vec![
+            (
+                failure("408 Request Timeout", "The gateway timed out."),
+                "the API answered 408 Request Timeout: The gateway timed out.",
+            ),
+            (
+                failure("409 Conflict", "No replica is free."),
+                "the API answered 409 Conflict: No replica is free.",
+            ),
+            (
+                failure("500 Internal Server Error", "The model failed."),
+                "the API answered 500 Internal Server Error: The model failed.",
+            ),
+            (
+                page("502 Bad Gateway", "<h1>Bad Gateway</h1>"),
+                "the API answered 502 Bad Gateway: <h1>Bad Gateway</h1>",
+            ),
+            (
+                failure("503 Service Unavailable", "The model is loading."),
+                "the API answered 503 Service Unavailable: The model is loading.",
+            ),
+            (
+                failure("504 Gateway Timeout", "The model took too long."),
+                "the API answered 504 Gateway Timeout: The model took too long.",
+            ),
+            (
+                page("200 OK", "<h1>Log in</h1>"),
+                "the API answered with text/html instead of JSON",
+            ),
+            (
+                cut_off(),
+                "the API answered with invalid JSON: EOF while parsing a string at line 1 column 26",
+            ),
+            (
+                hang_up(),
+                "could not reach the API: error sending request for url",
+            ),
+            (no_answer(), "the API did not answer within 1 s"),
+        ];
+
+        // All at once, since each waits its 2 seconds.
+        let reviews: Vec<_> = cases
+            .into_iter()
+            .map(|(reply, why)| {
+                let root = root.path().to_path_buf();
+                tokio::spawn(async move {
+                    let (url, server) = fake_model(vec![reply, verdict().into()]);
+                    let traces = Mutex::new(Vec::new());
+                    let verdict = timed_reviewer(url, Duration::from_secs(1), REVIEW_TIMEOUT)
+                        .run(&input(&root, "{}", &[]), &|trace| {
+                            traces.lock().unwrap().push(trace);
+                        })
+                        .await
+                        .unwrap();
+
+                    assert_eq!(verdict.explanation, "A log file.", "{why}");
+                    let requests = server.join().unwrap();
+                    assert_eq!(requests[1].1, requests[0].1, "{why}");
+                    let mut traces = requests_and_waits(traces);
+                    // The cause of a dropped connection differs between systems.
+                    if let Trace::Retrying { why, .. } = &mut traces[1] {
+                        *why = why.split(" (http").next().unwrap().to_string();
+                    }
+                    assert_eq!(
+                        traces,
+                        [
+                            Trace::Request { turn: 1 },
+                            Trace::Retrying {
+                                turn: 1,
+                                retry: 1,
+                                wait_ms: 2000,
+                                why: why.to_string(),
+                            },
+                            Trace::Request { turn: 1 },
+                        ]
+                    );
+                })
+            })
+            .collect();
+        for review in reviews {
+            review.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn waits_as_long_as_retry_after_says_after_a_failure_that_goes_away() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_model(vec![
+            asking_to_wait(
+                "1",
+                failure("503 Service Unavailable", "The model is loading."),
+            ),
+            verdict().into(),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        let asked = Instant::now();
+        reviewer(endpoint)
+            .run(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace);
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            asked.elapsed() >= Duration::from_secs(1),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(
+            requests_and_waits(traces),
+            [
+                Trace::Request { turn: 1 },
+                Trace::Retrying {
+                    turn: 1,
+                    retry: 1,
+                    wait_ms: 1000,
+                    why: "the API answered 503 Service Unavailable: The model is loading."
+                        .to_string(),
+                },
+                Trace::Request { turn: 1 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn shares_the_retries_and_waits_of_429_with_other_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_model(vec![
+            too_many_requests(Some("0"), "Rate limit exceeded."),
+            failure("503 Service Unavailable", "The model is loading."),
+            verdict().into(),
+        ]);
+
+        let traces = Mutex::new(Vec::new());
+        reviewer(endpoint)
+            .run(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap().len(), 3);
+        assert_eq!(
+            requests_and_waits(traces),
+            [
+                Trace::Request { turn: 1 },
+                Trace::RateLimited {
+                    turn: 1,
+                    retry: 1,
+                    wait_ms: 0,
+                    body: json!({
+                        "error": { "message": "Rate limit exceeded.", "type": "rate_limit_error" }
+                    })
+                    .to_string(),
+                },
+                Trace::Request { turn: 1 },
+                Trace::Retrying {
+                    turn: 1,
+                    retry: 2,
+                    wait_ms: 4000,
+                    why: "the API answered 503 Service Unavailable: The model is loading."
+                        .to_string(),
+                },
+                Trace::Request { turn: 1 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fails_at_once_on_a_refusal_that_would_not_go_away() {
+        let root = tempfile::tempdir().unwrap();
+        for (status, message) in [
+            ("400 Bad Request", "The request is malformed."),
+            ("401 Unauthorized", "Incorrect API key provided."),
+            ("403 Forbidden", "This key may not use the model."),
+            ("404 Not Found", "The model test does not exist."),
+        ] {
+            let (endpoint, server) = fake_model(vec![failure(status, message)]);
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer(endpoint)
+                .run(&input(root.path(), "{}", &[]), &|trace| {
+                    traces.lock().unwrap().push(trace);
+                })
+                .await
+                .unwrap_err();
+
+            let why = format!("the API answered {status}: {message}");
+            assert_eq!(format!("{e:#}"), format!("the model test failed: {why}"));
+            assert_eq!(server.join().unwrap().len(), 1);
+            let traces = traces.into_inner().unwrap();
+            assert_eq!(
+                traces[traces.len() - 2..],
+                [Trace::Request { turn: 1 }, Trace::Failed(why)]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fails_at_once_on_a_request_that_would_only_go_the_same_way_again() {
+        let root = tempfile::tempdir().unwrap();
+        // Over the 10 redirects the client follows.
+        let redirects: Vec<Reply> = (0..11).map(|_| redirect("/v1/chat/completions")).collect();
+        let (endpoint, server) = fake_model(redirects);
+        let endless = reviewer(endpoint);
+        // No key can go in a header with a line break, so the request is never sent.
+        let unsendable = ModelStep::new(
+            &AiConfig {
+                url: "http://127.0.0.1:9/v1".to_string(),
+                choice: ModelChoice {
+                    model: "test".to_string(),
+                    effort: Effort::default(),
+                },
+            },
+            Some("sk-test\n".to_string()),
+        )
+        .unwrap();
+
+        for reviewer in [endless, unsendable] {
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer
+                .run(&input(root.path(), "{}", &[]), &|trace| {
+                    traces.lock().unwrap().push(trace);
+                })
+                .await
+                .unwrap_err();
+
+            assert_eq!(e.to_string(), "the model test failed");
+            assert_eq!(requests_and_waits(traces), [Trace::Request { turn: 1 }]);
+        }
+        assert_eq!(server.join().unwrap().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn fails_once_the_retries_run_out_after_other_failures_than_429() {
+        let root = tempfile::tempdir().unwrap();
+        let unavailable = || {
+            asking_to_wait(
+                "0",
+                failure("503 Service Unavailable", "The model is loading."),
+            )
+        };
+
+        for (last, expected) in [
+            (
+                unavailable(),
+                "the model test still answered 503 Service Unavailable after 10 retries",
+            ),
+            (hang_up(), "the model test still failed after 10 retries"),
+        ] {
+            let mut replies: Vec<Reply> = (0..MAX_RETRIES).map(|_| unavailable()).collect();
+            replies.push(last);
+            let (endpoint, server) = fake_model(replies);
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer(endpoint)
+                .run(&input(root.path(), "{}", &[]), &|trace| {
+                    traces.lock().unwrap().push(trace);
+                })
+                .await
+                .unwrap_err();
+
+            assert_eq!(e.to_string(), expected);
+            assert_eq!(server.join().unwrap().len(), MAX_RETRIES + 1);
+            let traces = traces.into_inner().unwrap();
+            let retries: Vec<usize> = traces
+                .iter()
+                .filter_map(|trace| match trace {
+                    Trace::Retrying { retry, .. } => Some(*retry),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(retries, (1..=MAX_RETRIES).collect::<Vec<_>>());
+            assert!(
+                matches!(traces.last(), Some(Trace::Failed(_))),
+                "{traces:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tries_an_api_it_cannot_reach_until_the_review_runs_out_of_time() {
+        let root = tempfile::tempdir().unwrap();
+        // No fake server gets a port this low, as one could get a port that was just free.
+        let reviewer = timed_reviewer(
+            "http://127.0.0.1:1/v1".to_string(),
+            REQUEST_TIMEOUT,
+            Duration::from_secs(1),
+        );
+
+        let traces = Mutex::new(Vec::new());
+        let asked = Instant::now();
+        let e = reviewer
+            .run(&input(root.path(), "{}", &[]), &|trace| {
+                traces.lock().unwrap().push(trace);
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(e.to_string(), "the model test gave no verdict within 1 s");
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            asked.elapsed()
+        );
+        let traces = traces.into_inner().unwrap();
+        assert!(
+            matches!(
+                traces.as_slice(),
+                [.., Trace::Retrying { retry: 1, wait_ms: 2000, why, .. }, Trace::Failed(_)]
+                    if why.starts_with("could not reach the API: ")
+            ),
+            "{traces:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sends_allowed_openai_params_to_a_model_once_the_api_asks_for_them() {
         let root = tempfile::tempdir().unwrap();
@@ -1032,22 +1395,35 @@ mod tests {
     #[tokio::test]
     async fn fails_at_once_when_the_api_asks_to_wait_too_long() {
         let root = tempfile::tempdir().unwrap();
-        let (endpoint, server) = fake_model(vec![too_many_requests(
-            Some("86400"),
-            "Daily quota exceeded.",
-        )]);
+        for (reply, status) in [
+            (
+                too_many_requests(Some("86400"), "Daily quota exceeded."),
+                "429 Too Many Requests",
+            ),
+            (
+                asking_to_wait(
+                    "86400",
+                    failure("503 Service Unavailable", "Back tomorrow."),
+                ),
+                "503 Service Unavailable",
+            ),
+        ] {
+            let (endpoint, server) = fake_model(vec![reply]);
 
-        let e = reviewer(endpoint)
-            .run(&input(root.path(), "{}", &[]), &|_| {})
-            .await
-            .unwrap_err();
+            let e = reviewer(endpoint)
+                .run(&input(root.path(), "{}", &[]), &|_| {})
+                .await
+                .unwrap_err();
 
-        assert_eq!(
-            e.to_string(),
-            "the model test answered 429 Too Many Requests and asks to wait 86400 s, longer \
-             than fair-witness waits (60 s)"
-        );
-        assert_eq!(server.join().unwrap().len(), 1);
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "the model test answered {status} and asks to wait 86400 s, longer than \
+                     fair-witness waits (60 s)"
+                )
+            );
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -1139,38 +1515,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gives_up_on_a_review_that_runs_out_of_time_while_waiting_after_429() {
+    async fn gives_up_on_a_review_that_runs_out_of_time_while_waiting() {
         let root = tempfile::tempdir().unwrap();
-        let (endpoint, server) =
-            fake_model(vec![too_many_requests(Some("2"), "Rate limit exceeded.")]);
-        let reviewer = ModelStep::with_timeouts(
-            &AiConfig {
-                url: endpoint,
-                choice: ModelChoice {
-                    model: "test".to_string(),
-                    effort: Effort::default(),
-                },
-            },
-            None,
-            REQUEST_TIMEOUT,
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        for reply in [
+            too_many_requests(Some("2"), "Rate limit exceeded."),
+            asking_to_wait(
+                "2",
+                failure("503 Service Unavailable", "The model is loading."),
+            ),
+        ] {
+            let (endpoint, server) = fake_model(vec![reply]);
+            let reviewer = timed_reviewer(endpoint, REQUEST_TIMEOUT, Duration::from_secs(1));
 
-        let traces = Mutex::new(Vec::new());
-        let e = reviewer
-            .run(&input(root.path(), "{}", &[]), &|trace| {
-                traces.lock().unwrap().push(trace)
-            })
-            .await
-            .unwrap_err();
+            let traces = Mutex::new(Vec::new());
+            let e = reviewer
+                .run(&input(root.path(), "{}", &[]), &|trace| {
+                    traces.lock().unwrap().push(trace);
+                })
+                .await
+                .unwrap_err();
 
-        assert_eq!(e.to_string(), "the model test gave no verdict within 1 s");
-        assert_eq!(
-            traces.into_inner().unwrap().last(),
-            Some(&Trace::Failed(e.to_string()))
-        );
-        assert_eq!(server.join().unwrap().len(), 1);
+            assert_eq!(e.to_string(), "the model test gave no verdict within 1 s");
+            assert_eq!(
+                traces.into_inner().unwrap().last(),
+                Some(&Trace::Failed(e.to_string()))
+            );
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -1178,9 +1549,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let limited = format!("Rate limit exceeded for sk-test. {}", "Wait. ".repeat(200));
         let not_allowed = format!("{EFFORT_NOT_ALLOWED} Key: sk-test");
+        let unavailable = format!("No replica for sk-test. {}", "Wait. ".repeat(200));
         let (endpoint, _server) = fake_model(vec![
             too_many_requests(Some("0"), &limited),
             bad_request(&not_allowed),
+            asking_to_wait("0", failure("503 Service Unavailable", &unavailable)),
             verdict().into(),
         ]);
 
@@ -1197,9 +1570,9 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|trace| match trace {
-                Trace::RateLimited { body, .. } | Trace::EffortNotAllowed { body, .. } => {
-                    Some(body)
-                }
+                Trace::RateLimited { body, .. }
+                | Trace::EffortNotAllowed { body, .. }
+                | Trace::Retrying { why: body, .. } => Some(body),
                 _ => None,
             })
             .collect();
@@ -1208,11 +1581,16 @@ mod tests {
                 .to_string()
         };
         let limited = hidden(&limited, "rate_limit_error");
+        let unavailable = format!(
+            "the API answered 503 Service Unavailable: {}",
+            unavailable.replace("sk-test", "[API key]").trim()
+        );
         assert_eq!(
             bodies,
             [
                 format!("{}…", &limited[..MAX_ANSWER]),
                 hidden(&not_allowed, "invalid_request_error"),
+                format!("{}…", &unavailable[..MAX_ANSWER]),
             ]
         );
     }

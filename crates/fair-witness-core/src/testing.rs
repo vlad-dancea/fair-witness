@@ -90,6 +90,14 @@ pub fn page(status: &'static str, html: &str) -> Reply {
     }
 }
 
+/// JSON cut off in the middle, with a success status.
+pub fn cut_off() -> Reply {
+    Reply {
+        body: r#"{"id": "chatcmpl-1", "choi"#.to_string(),
+        ..answer("200 OK", Value::Null)
+    }
+}
+
 /// Closes the connection after reading the request, without answering.
 pub fn hang_up() -> Reply {
     Reply {
@@ -112,6 +120,14 @@ pub fn held(reply: impl Into<Reply>, release: Receiver<()>) -> Reply {
     Reply {
         held: Some(release),
         ..reply.into()
+    }
+}
+
+/// `reply` with a `Retry-After` header that asks to wait `wait`.
+pub fn asking_to_wait(wait: &str, reply: Reply) -> Reply {
+    Reply {
+        headers: format!("Retry-After: {wait}\r\n"),
+        ..reply
     }
 }
 

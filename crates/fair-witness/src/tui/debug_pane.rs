@@ -31,8 +31,9 @@ enum Entry {
     /// A message from fair-witness to the AI.
     Prompt(String),
     Turn(Turn),
-    /// The API refused a request with 429 Too Many Requests, and it goes again after a wait.
-    RateLimited {
+    /// A request failed in a way that may go away, and it goes again after a wait.
+    Waiting {
+        badge: &'static str,
         turn: usize,
         retry: usize,
         wait_ms: u64,
@@ -188,11 +189,27 @@ impl DebugPane {
                 body,
             } => {
                 self.goes_again(turn);
-                self.push(Entry::RateLimited {
+                self.push(Entry::Waiting {
+                    badge: "RATE LIMIT",
                     turn,
                     retry,
                     wait_ms,
                     body,
+                });
+            }
+            Trace::Retrying {
+                turn,
+                retry,
+                wait_ms,
+                why,
+            } => {
+                self.goes_again(turn);
+                self.push(Entry::Waiting {
+                    badge: "RETRY",
+                    turn,
+                    retry,
+                    wait_ms,
+                    body: why,
                 });
             }
             Trace::EffortNotAllowed { turn, body } => {
@@ -336,7 +353,8 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
             push_body(lines, &indent, &prompt_lines(text, collapsed), width);
         }
         Entry::Turn(turn) => render_turn(turn, width, collapsed, lines),
-        Entry::RateLimited {
+        Entry::Waiting {
+            badge: name,
             turn,
             retry,
             wait_ms,
@@ -346,7 +364,7 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
                 "turn {turn} · retry {retry} in {:.1} s",
                 *wait_ms as f64 / 1000.0
             );
-            lines.push(badge("RATE LIMIT", Color::Yellow, &details));
+            lines.push(badge(name, Color::Yellow, &details));
             let body = text_lines(body, Style::new().add_modifier(Modifier::DIM));
             push_body(lines, &indent, &body, width);
         }
@@ -876,6 +894,29 @@ mod tests {
             [
                 " RATE LIMIT   turn 1 · retry 1 in 4.0 s",
                 "  Retry after 4s.",
+                "",
+                " AI   turn 1",
+                "  waiting for the reply…",
+            ]
+        );
+    }
+
+    #[test]
+    fn shows_a_request_that_waits_after_a_failure_once() {
+        let mut pane = DebugPane::default();
+        pane.add_trace(Trace::Request { turn: 1 });
+        pane.add_trace(Trace::Retrying {
+            turn: 1,
+            retry: 1,
+            wait_ms: 2000,
+            why: "the API answered 503 Service Unavailable: The model is loading.".to_string(),
+        });
+        pane.add_trace(Trace::Request { turn: 1 });
+        assert_eq!(
+            texts(&mut pane, 80),
+            [
+                " RETRY   turn 1 · retry 1 in 2.0 s",
+                "  the API answered 503 Service Unavailable: The model is loading.",
                 "",
                 " AI   turn 1",
                 "  waiting for the reply…",

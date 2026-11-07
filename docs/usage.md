@@ -126,7 +126,7 @@ What you do about a contradiction is up to you. Either undo the change, or, if t
 
 ### 4. See what the AI did
 
-Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts, how long each reply took and how long a request waited when the API had too many.
+Press `d` to open the **debug pane** next to the change list. It shows each review step by step: the prompt with the DMP, every request to the model, the tools it called with their results, its reasoning (if the model shares it), the token counts, how long each reply took, and how long a request waited before it went again when the API had too many or failed in a way that may go away.
 
 - `Tab` switches which pane the arrow keys scroll.
 - `c` collapses or expands long blocks, such as the DMP JSON.
