@@ -1,6 +1,6 @@
 [package]
 name = "fair-witness-core"
-version = "0.1.0"
+version = "0.1.68"
 edition = "2024"
 description = "Watches a research project folder and reviews its changes against a DAMAP data management plan"
 repository = "https://github.com/vlad-dancea/fair-witness"

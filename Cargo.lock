@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "fair-witness"
-version = "0.1.0"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "clap",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "fair-witness-core"
-version = "0.1.0"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "genai",
