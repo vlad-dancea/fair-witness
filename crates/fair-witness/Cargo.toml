@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Flags folder changes that contradict your DAMAP data management plan"
 repository = "https://github.com/vlad-dancea/fair-witness"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"

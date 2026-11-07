@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Runs scripted researcher scenarios against headless fair-witness"
 repository = "https://github.com/vlad-dancea/fair-witness"
+license = "MIT"
 publish = false
 
 # A development tool, so dist leaves it out of releases.
