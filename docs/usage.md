@@ -122,7 +122,11 @@ Changes you make while the AI checks a set show up right away as sets of their o
 
 To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders, 200 entries at a time, and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](configuration.md#what-is-ignored).
 
-What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
+What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP. The next review goes by the new version.
+
+#### When the DMP changes
+
+Before each review, `run` downloads the DMP again, which takes a fraction of a second, so each set is checked against the plan as it is when its review starts. When the plan has changed, the header says so with the version the checks use from then on. Verdicts already given stay as they are, since each holds for the version it was given against, and the events log names that version for every review. An edit to the plan starts no review by itself, and earlier sets are not checked again.
 
 #### When a review fails
 
@@ -214,4 +218,6 @@ If `run` finds no DMP or no model, it still watches and lists changes, but does 
 
 Before it watches, `run` asks the API once whether it takes the model and effort, with a request like the first of a review but cut off after one token. If the API refuses them, `run` stops with the API's message, which often names what the model takes, instead of failing every review later. If the API cannot be reached, answers that it is busy with `408 Request Timeout`, `409 Conflict` or `429 Too Many Requests`, or fails on its side, `run` starts anyway, and the header warns that the model could not be checked.
 
-If DAMAP cannot be reached, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, also when `--dmp` names it, and not for another DMP given with `--dmp`.
+If DAMAP cannot be reached when `run` starts, `run` checks changes against the copy of the DMP it saved last time, in `.fair-witness/madmp.json`, and the header warns about it. This works only for the DMP chosen in `setup`, also when `--dmp` names it, and not for another DMP given with `--dmp`.
+
+Once the screen is up, nobody is asked to log in and DAMAP failing never fails a review. When the DMP cannot be downloaded before a review within 20 seconds, because DAMAP does not answer or the saved login has expired, the review goes on with the last version it has, the header warns about it and the next review tries again. The warning goes away by itself once a download works, also after you log in again with `fair-witness setup` in another terminal, without restarting `run`.

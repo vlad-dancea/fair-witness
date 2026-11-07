@@ -7,6 +7,7 @@ mod tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::dmp::DmpVersion;
 use crate::model::ModelChoice;
 
 pub use agent::{ChoiceCheck, ModelStep, spoken};
@@ -28,6 +29,9 @@ pub struct Verdict {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trace {
+    /// Which version of the DMP the review uses, for each review, also when it is the same as the
+    /// last one, so that any verdict can be tied to the plan it was given against.
+    DmpVersion(DmpVersion),
     /// What the model is told before any change: the system prompt, the DMP and the tools it
     /// may call. A session passes it on only when it differs from the last one.
     Setup {

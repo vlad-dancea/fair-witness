@@ -13,8 +13,8 @@ use fair_witness_core::project::{
     AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Project,
 };
 use fair_witness_core::testing::{
-    EFFORT_REFUSED, Reply, asking_to_wait, bad_request, failure, fake_model, one_token,
-    too_many_requests, tool_call,
+    Download, EFFORT_REFUSED, Reply, answer, asking_to_wait, bad_request, failure, fake_damap,
+    fake_model, one_token, too_many_requests, tool_call,
 };
 use serde_json::{Value, json};
 
@@ -111,6 +111,13 @@ impl Run {
     fn stop(mut self) -> Option<i32> {
         drop(self.stdin.take());
         self.exit_code()
+    }
+
+    /// Closes stdin and returns the exit code and the lines on stderr that nothing has read yet.
+    fn stop_with_stderr(mut self) -> (Option<i32>, Vec<String>) {
+        drop(self.stdin.take());
+        let code = self.exit_code();
+        (code, self.stderr.iter().collect())
     }
 
     fn exit_code(&mut self) -> Option<i32> {
@@ -222,6 +229,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
             "trace",
             "trace",
             "trace",
+            "trace",
             "verdict"
         ]
     );
@@ -229,8 +237,9 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
         events[0],
         json!({ "event": "changes", "set": 1, "changes": [{ "created": "patients.csv" }] })
     );
+    assert_eq!(events[2]["trace"]["dmp_version"]["origin"], "file");
     assert_eq!(
-        events[7],
+        events[8],
         json!({
             "event": "verdict",
             "set": 1,
@@ -249,6 +258,214 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     assert_eq!(requests[1].1["reasoning_effort"], "ultra");
     assert_eq!(run.stop(), Some(0));
     assert!(!project.join(".fair-witness").exists());
+}
+
+/// A verdict that the changes are fine, from the fake model.
+fn fine() -> Value {
+    tool_call(
+        "report_verdict",
+        json!({ "contradicts": false, "explanation": "As planned." }),
+    )
+}
+
+/// The `dmp_status` events among `events`, without their versions.
+fn dmp_statuses(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|event| event["event"] == "dmp_status")
+        .map(|event| {
+            let mut event = event.clone();
+            event.as_object_mut().unwrap().remove("version");
+            event
+        })
+        .collect()
+}
+
+/// What the model was told in the first message of each review, after the check of the model.
+fn prompts(requests: &[(String, Value)]) -> Vec<String> {
+    requests[1..]
+        .iter()
+        .map(|(_, body)| body["messages"][1]["content"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn follows_the_dmp_file_and_keeps_the_last_text_while_it_is_half_saved() {
+    let root = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let dmp_file = elsewhere.path().join("dmp.json");
+    std::fs::write(&dmp_file, r#"{"dmp": {"title": "Soil samples"}}"#).unwrap();
+    let (endpoint, server) = fake_model(vec![one_token(), fine(), fine(), fine(), fine()]);
+
+    let run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            path(&dmp_file),
+            "--ai-url",
+            &endpoint,
+            "--model",
+            "test",
+        ],
+    );
+    run.stderr_until("Comparing");
+    let status = format!("Comparing changes with the DMP in {}.", dmp_file.display());
+    let change = |name: &str| {
+        std::fs::write(root.path().join(name), "a").unwrap();
+        run.events_until_verdict()
+    };
+
+    let unchanged = change("one.csv");
+    std::fs::write(&dmp_file, r#"{"dmp": {"title": "Water samples"}}"#).unwrap();
+    let edited = change("two.csv");
+    std::fs::write(&dmp_file, r#"{"dmp": {"tit"#).unwrap();
+    let half_saved = change("three.csv");
+    std::fs::write(&dmp_file, r#"{"dmp": {"title": "Water samples"}}"#).unwrap();
+    let saved = change("four.csv");
+
+    assert_eq!(dmp_statuses(&unchanged), Vec::<Value>::new());
+    assert_eq!(
+        dmp_statuses(&edited),
+        [json!({ "event": "dmp_status", "status": status })]
+    );
+    let warned = dmp_statuses(&half_saved);
+    assert_eq!(warned.len(), 1);
+    let warning = warned[0]["warning"].as_str().unwrap();
+    assert!(
+        warning.starts_with(&format!(
+            "Warning: could not read the DMP, so changes are checked against the last version \
+             read: {} is not a maDMP JSON file: ",
+            dmp_file.display()
+        )),
+        "{warning}"
+    );
+    assert_eq!(
+        dmp_statuses(&saved),
+        [json!({ "event": "dmp_status", "status": status })]
+    );
+    let told = prompts(&server.join().unwrap());
+    let plans: Vec<bool> = told.iter().map(|prompt| prompt.contains("Soil")).collect();
+    assert_eq!(plans, [true, false, false, false]);
+    let hash = |events: &[Value]| {
+        events
+            .iter()
+            .find_map(|event| event["trace"]["dmp_version"]["hash"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    assert_ne!(hash(&unchanged), hash(&edited));
+    assert_eq!(
+        [hash(&half_saved), hash(&saved)],
+        [hash(&edited), hash(&edited)]
+    );
+    assert_eq!(run.stop_with_stderr(), (Some(0), Vec::new()));
+    assert!(!root.path().join(".fair-witness").exists());
+}
+
+#[test]
+fn checks_against_the_last_plan_when_damap_fails_during_a_run_and_writes_nothing_on_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let project = Project::new(root.path().to_path_buf());
+    let plan = |title: &str| json!({ "project": [{ "title": title }] });
+    let expired = |_| {
+        answer(
+            "400 Bad Request",
+            json!({ "error": "invalid_grant", "error_description": "Token is not active" }),
+        )
+    };
+    let damap = fake_damap(vec![
+        Download::Gives("at the start", plan("Soil samples")),
+        Download::Refused(expired(())),
+        Download::Refused(expired(())),
+        Download::Down,
+        Download::Gives("refreshed during the run", plan("Water samples")),
+    ]);
+    let (endpoint, server) = fake_model(vec![one_token(), fine(), fine(), fine(), fine()]);
+    project
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: damap.url.clone(),
+                dmp_id: Some(3),
+            },
+            ai: None,
+        })
+        .unwrap();
+    let saved_login = |refresh_token: &str| DamapLogin {
+        url: damap.url.clone(),
+        login_server: Some(damap.login_server.clone()),
+        refresh_token: refresh_token.to_string(),
+    };
+    project
+        .save_credentials(&Credentials {
+            damap: Some(saved_login("saved")),
+            ai: None,
+        })
+        .unwrap();
+
+    let run = Run::start(root.path(), &["--ai-url", &endpoint, "--model", "test"]);
+    assert_eq!(
+        run.stderr_until("Comparing"),
+        [
+            format!("Connected to DAMAP at {}", damap.url),
+            format!("Watching {}", root.path().display()),
+            "Comparing changes with project #3 - Soil samples.".to_string(),
+        ]
+    );
+    let change = |name: &str| {
+        std::fs::write(root.path().join(name), "a").unwrap();
+        run.events_until_verdict()
+    };
+    let first_expired = change("one.csv");
+    let still_expired = change("two.csv");
+    let down = change("three.csv");
+    let back = change("four.csv");
+
+    let status = "Comparing changes with project #3 - Soil samples.";
+    let warned = dmp_statuses(&first_expired);
+    assert_eq!(warned.len(), 1, "{first_expired:?}");
+    assert_eq!(warned[0]["status"], status);
+    let warning = warned[0]["warning"].as_str().unwrap();
+    assert!(
+        warning.starts_with(
+            "Warning: could not download the DMP, so changes are checked against the last \
+             version downloaded: the DAMAP login has expired; log in again with `fair-witness \
+             setup`: "
+        ),
+        "{warning}"
+    );
+    assert_eq!(dmp_statuses(&still_expired), Vec::<Value>::new());
+    let warned = dmp_statuses(&down);
+    assert_eq!(warned.len(), 1, "{down:?}");
+    assert!(
+        warned[0]["warning"].as_str().unwrap().contains(&format!(
+            "last version downloaded: could not reach {}",
+            damap.url
+        )),
+        "{down:?}"
+    );
+    assert_eq!(
+        dmp_statuses(&back),
+        [json!({
+            "event": "dmp_status",
+            "status": "Comparing changes with project #3 - Water samples.",
+        })]
+    );
+    let told = prompts(&server.join().unwrap());
+    let plans: Vec<bool> = told.iter().map(|prompt| prompt.contains("Soil")).collect();
+    assert_eq!(plans, [true, true, true, false]);
+    assert!(told[3].contains("Water samples"), "{}", told[3]);
+    assert_eq!(run.stop_with_stderr(), (Some(0), Vec::new()));
+    assert_eq!(
+        project.credentials().unwrap().damap,
+        Some(saved_login("refreshed during the run"))
+    );
+    assert!(
+        project
+            .madmp(&damap.url, 3)
+            .unwrap()
+            .unwrap()
+            .contains("Water samples")
+    );
 }
 
 #[test]
@@ -707,7 +924,6 @@ fn logs_in_with_the_saved_session_and_leaves_config_toml_as_it_was() {
     })]);
     let (damap, damap_requests) = fake_model(vec![
         json!({ "issuer": login_server, "clientID": "damap", "scope": "openid" }),
-        json!([{ "id": 3, "title": "Soil samples" }]),
         serde_json::from_str::<Value>(DMP).unwrap(),
     ]);
     let (endpoint, _) = fake_model(vec![one_token()]);
@@ -759,7 +975,7 @@ fn logs_in_with_the_saved_session_and_leaves_config_toml_as_it_was() {
         })
         .collect();
     let bearer = Some("Bearer access".to_string());
-    assert_eq!(authorization, [None, bearer.clone(), bearer]);
+    assert_eq!(authorization, [None, bearer]);
     assert_eq!(
         project.credentials().unwrap().damap,
         Some(DamapLogin {

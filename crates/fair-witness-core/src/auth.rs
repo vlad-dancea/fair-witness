@@ -11,7 +11,7 @@ use crate::net::{self, in_the_clear};
 use crate::review::retry_after;
 
 /// How logging in to DAMAP tells the person in front of the screen how it goes.
-pub trait Notices {
+pub trait Notices: Sync {
     /// Tells them how the login goes, such as which DAMAP it reached.
     fn notice(&self, message: &str);
 }
@@ -422,7 +422,7 @@ impl Oidc {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use serde_json::{Value, json};
 
@@ -431,17 +431,17 @@ mod tests {
 
     /// Keeps the links it is asked to open in the browser, and the notices.
     #[derive(Default)]
-    struct Browser(RefCell<Vec<String>>, RefCell<Vec<String>>);
+    struct Browser(Mutex<Vec<String>>, Mutex<Vec<String>>);
 
     impl Notices for Browser {
         fn notice(&self, message: &str) {
-            self.1.borrow_mut().push(message.to_string());
+            self.1.lock().unwrap().push(message.to_string());
         }
     }
 
     impl Prompts for Browser {
         fn confirm_code(&self, link: &str, _: &str) {
-            self.0.borrow_mut().push(link.to_string());
+            self.0.lock().unwrap().push(link.to_string());
         }
 
         fn username_and_password(&self) -> Result<(String, String)> {
@@ -507,7 +507,7 @@ mod tests {
         let refused = oidc.login(&browser).await.err().map(|e| format!("{e:#}"));
 
         assert_eq!(refused, Some(unencrypted(page)));
-        assert!(browser.0.borrow().is_empty());
+        assert!(browser.0.lock().unwrap().is_empty());
         assert_eq!(discovery.join().unwrap().len(), 1);
         assert_eq!(device.join().unwrap().len(), 1);
     }
@@ -642,9 +642,12 @@ mod tests {
             ),
             ("access", Some("refresh"))
         );
-        assert_eq!(*browser.0.borrow(), ["https://login.example.org/device"]);
         assert_eq!(
-            *browser.1.borrow(),
+            *browser.0.lock().unwrap(),
+            ["https://login.example.org/device"]
+        );
+        assert_eq!(
+            *browser.1.lock().unwrap(),
             [
                 format!(
                     "Checking the login failed, trying again: could not reach the login server: \

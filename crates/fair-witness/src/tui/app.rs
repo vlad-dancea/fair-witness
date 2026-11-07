@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self as terminal, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use fair_witness_core::dmp::Dmp;
 use fair_witness_core::model::ModelChoice;
 use fair_witness_core::review::spoken;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::{self, Kind, Listed};
 use futures::StreamExt;
+use jiff::tz::TimeZone;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -138,8 +140,18 @@ fn wrap_hanging(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'
     rows
 }
 
+/// What the header says about the DMP.
+struct DmpHeader {
+    status: String,
+    hash: String,
+    /// Says when the DMP changed during this run, once it did.
+    changed: Option<String>,
+    warning: Option<String>,
+}
+
 pub struct Screen {
     root: PathBuf,
+    dmp: Option<DmpHeader>,
     status: Vec<String>,
     changes: Vec<ChangesLine>,
     /// Whether the oldest lines of `changes` were dropped.
@@ -167,12 +179,19 @@ pub struct Screen {
 impl Screen {
     pub fn new(
         root: &Path,
+        dmp: Option<&Dmp>,
         status: Vec<String>,
         settings: Option<ModelSettings>,
         comes_back: bool,
     ) -> Self {
         Self {
             root: root.to_path_buf(),
+            dmp: dmp.map(|dmp| DmpHeader {
+                status: dmp.status.clone(),
+                hash: dmp.version.hash.clone(),
+                changed: None,
+                warning: dmp.warning.clone(),
+            }),
             status,
             changes: Vec::new(),
             dropped: false,
@@ -338,6 +357,7 @@ impl Screen {
             }
         };
         self.debug.add(&record);
+        let time = record.time;
         match record.event {
             Event::Changes {
                 set,
@@ -418,6 +438,26 @@ impl Screen {
             }
             Event::StateProblem { error } => {
                 self.push_line(Line::from(error.yellow()).into());
+            }
+            Event::DmpStatus {
+                status,
+                version,
+                warning,
+            } => {
+                let Some(dmp) = &mut self.dmp else {
+                    return;
+                };
+                if dmp.hash != version.hash {
+                    let since = time.to_zoned(TimeZone::system());
+                    let since = since.strftime("%H:%M:%S");
+                    dmp.changed = Some(format!(
+                        "The DMP changed: checks since {since} use version {}.",
+                        version.hash
+                    ));
+                }
+                dmp.status = status;
+                dmp.hash = version.hash;
+                dmp.warning = warning;
             }
         }
     }
@@ -508,6 +548,13 @@ impl Screen {
             watching,
             self.root.display().to_string().bold(),
         ])];
+        if let Some(dmp) = &self.dmp {
+            header_lines.push(Line::from(dmp.status.clone()));
+            header_lines.extend(dmp.changed.iter().cloned().map(Line::from));
+            // Each line of it on its own, since DAMAP's errors can span several.
+            let warning = dmp.warning.iter().flat_map(|warning| warning.lines());
+            header_lines.extend(warning.map(|line| Line::from(line.to_string().yellow())));
+        }
         header_lines.extend(self.status.iter().cloned().map(Line::from));
         if let Some(settings) = &self.settings {
             let choice = settings.reviewer.choice();
@@ -517,21 +564,27 @@ impl Screen {
                 format!(" from {}.", settings.url).into(),
             ]));
         }
+        let header_text = Paragraph::new(header_lines).wrap(Wrap { trim: false });
+        // By the rows it wraps to, since a warning is often wider than the screen, and the end of
+        // it says what to do.
+        let header_rows = header_text.line_count(frame.area().width.saturating_sub(2));
         let [header, body, footer] = Layout::vertical([
-            Constraint::Length(header_lines.len() as u16 + 2),
+            Constraint::Length(
+                u16::try_from(header_rows)
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(2),
+            ),
             Constraint::Fill(1),
             Constraint::Length(1),
         ])
         .areas(frame.area());
 
         frame.render_widget(
-            Paragraph::new(header_lines)
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::bordered()
-                        .border_type(BorderType::Rounded)
-                        .title(" fair-witness ".bold()),
-                ),
+            header_text.block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title(" fair-witness ".bold()),
+            ),
             header,
         );
 
@@ -669,6 +722,7 @@ fn change_line(listed: &Listed) -> Line<'static> {
 mod tests {
     use std::sync::Arc;
 
+    use fair_witness_core::dmp::{DmpOrigin, DmpVersion};
     use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::{ModelStep, Trace, Verdict};
     use fair_witness_core::watcher::Change;
@@ -693,8 +747,9 @@ mod tests {
             url: ai.url,
             api_key: None,
         };
-        let status = vec!["Comparing changes with project #7 - Sleep and screen time.".to_string()];
-        Screen::new(root, status, Some(settings), true)
+        let status = "Comparing changes with project #7 - Sleep and screen time.".to_string();
+        let dmp = Dmp::from_madmp(&json!({}), DmpOrigin::Downloaded, status).unwrap();
+        Screen::new(root, Some(&dmp), Vec::new(), Some(settings), true)
     }
 
     /// Three change sets: one in line with the DMP, one that contradicts it after the model
@@ -722,6 +777,14 @@ mod tests {
                 since_last_run: false,
             },
             Event::Reviewing { set: 1 },
+            Event::Trace {
+                set: 1,
+                trace: Trace::DmpVersion(DmpVersion {
+                    origin: DmpOrigin::Downloaded,
+                    modified: Some("2026-10-20T08:15:00.000+00:00".to_string()),
+                    hash: "44136fa355b3".to_string(),
+                }),
+            },
             Event::Trace {
                 set: 1,
                 trace: Trace::Setup {
@@ -862,6 +925,46 @@ mod tests {
     #[test]
     fn draws_the_changes_and_their_verdicts() {
         assert_screen!("changes", drawn(&mut reviewed(), 80, 24));
+    }
+
+    /// The screen after `Event::DmpStatus` with `warning`, for a DMP of version `hash`.
+    fn dmp_status(screen: &mut Screen, hash: &str, warning: Option<&str>) {
+        let event = Event::DmpStatus {
+            status: "Comparing changes with project #7 - Sleep and screen time.".to_string(),
+            version: DmpVersion {
+                origin: DmpOrigin::Downloaded,
+                modified: None,
+                hash: hash.to_string(),
+            },
+            warning: warning.map(str::to_string),
+        };
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
+        screen.apply(Update::Session(Record { time, event }));
+    }
+
+    #[test]
+    fn says_in_the_header_that_the_dmp_changed_and_then_that_it_cannot_be_downloaded() {
+        let mut screen = screen();
+
+        // Only the text decides whether it changed, not a warning that comes and goes.
+        dmp_status(&mut screen, "44136fa355b3", Some("Warning: one"));
+        assert_eq!(screen.dmp.as_ref().unwrap().changed, None);
+        dmp_status(&mut screen, "44136fa355b3", None);
+        assert_eq!(screen.dmp.as_ref().unwrap().warning, None);
+
+        dmp_status(&mut screen, "9f86d081884c", None);
+        dmp_status(
+            &mut screen,
+            "9f86d081884c",
+            Some(
+                "Warning: could not download the DMP, so changes are checked against the last \
+                 version downloaded: could not reach https://damap.example.org: request to \
+                 /api/config failed\nIs DAMAP running? To use a different URL, run \
+                 `fair-witness setup`.",
+            ),
+        );
+
+        assert_screen!("dmp_changed_and_out_of_date", drawn(&mut screen, 80, 16));
     }
 
     #[test]

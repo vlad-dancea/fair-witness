@@ -66,7 +66,7 @@ mod tests {
     use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::{ModelStep, Trace};
     use fair_witness_core::session::Session;
-    use fair_witness_core::testing::{failure, fake_model};
+    use fair_witness_core::testing::{empty_dmp, failure, fake_model};
 
     use super::*;
 
@@ -88,7 +88,7 @@ mod tests {
         let reviewer = ModelStep::new(&ai, Some("sk-test".to_string())).unwrap();
         let mut records = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .reviewing(empty_dmp(), vec![Arc::new(reviewer)])
             .start()
             .unwrap();
         fs::write(root.path().join("notes.txt"), "Ask about consent").unwrap();

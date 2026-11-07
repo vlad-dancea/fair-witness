@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod damap;
+pub mod dmp;
 pub mod escape;
 pub mod model;
 pub mod net;

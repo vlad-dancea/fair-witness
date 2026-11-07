@@ -56,9 +56,17 @@ pub async fn log_in(
             let refresh_token = saved
                 .refresh_token_for(damap.url(), oidc.issuer())
                 .map_err(|e| anyhow!("{e}; log in with `fair-witness setup`"))?;
-            oidc.refresh(refresh_token)
+            let tokens = oidc
+                .refresh(refresh_token)
                 .await
-                .context("the DAMAP login has expired; log in again with `fair-witness setup`")?
+                .context("the DAMAP login has expired; log in again with `fair-witness setup`")?;
+            // A run refreshes during a `setup` or `logout` in another terminal, and the session
+            // or the absence of one that those saved while the login server answered wins.
+            if project.credentials()?.damap.as_ref() != Some(saved) {
+                damap.set_access_token(tokens.access_token);
+                return Ok(damap);
+            }
+            tokens
         }
         Login::Ask(prompts) | Login::AskToStay(prompts) => {
             let refreshed = match saved {
@@ -124,7 +132,7 @@ fn save_login(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
     use std::thread::JoinHandle;
 
     use serde_json::{Value, json};
@@ -138,12 +146,12 @@ mod tests {
     #[derive(Default)]
     struct Person {
         stay: bool,
-        notices: RefCell<Vec<String>>,
+        notices: Mutex<Vec<String>>,
     }
 
     impl Notices for Person {
         fn notice(&self, message: &str) {
-            self.notices.borrow_mut().push(message.to_string());
+            self.notices.lock().unwrap().push(message.to_string());
         }
     }
 
@@ -245,7 +253,7 @@ mod tests {
         let (failed, session, token_endpoint, requests) =
             log_in_with(vec![expired()], Login::SavedOnly(&headless)).await;
         assert_eq!(
-            (failed, session, headless.notices.into_inner()),
+            (failed, session, headless.notices.into_inner().unwrap()),
             (
                 Some(format!(
                     "the DAMAP login has expired; log in again with `fair-witness setup`: {}",
@@ -261,7 +269,7 @@ mod tests {
         let (failed, session, token_endpoint, requests) =
             log_in_with(vec![expired(), tokens("new")], Login::Ask(&screen)).await;
         assert_eq!(
-            (failed, session, screen.notices.into_inner()),
+            (failed, session, screen.notices.into_inner().unwrap()),
             (
                 None,
                 "new".to_string(),
@@ -280,10 +288,59 @@ mod tests {
         )
         .await;
         assert_eq!(
-            (failed, session, setup.notices.into_inner()),
+            (failed, session, setup.notices.into_inner().unwrap()),
             (None, "new".to_string(), vec![connected])
         );
         assert_eq!(grants(requests), both);
+    }
+
+    #[tokio::test]
+    async fn leaves_the_session_another_command_saved_while_it_refreshed_the_old_one() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let (token_server, _) = fake_model(vec![tokens("refreshed")]);
+        let (issuer, _) = fake_model(vec![json!({
+            "token_endpoint": format!("{token_server}/token"),
+        })]);
+        let saved = DamapLogin {
+            url: "https://damap.example.org".to_string(),
+            login_server: Some(issuer.clone()),
+            refresh_token: "saved".to_string(),
+        };
+        let credentials = |refresh_token: &str| Credentials {
+            damap: Some(DamapLogin {
+                refresh_token: refresh_token.to_string(),
+                ..saved.clone()
+            }),
+            ai: None,
+        };
+        project.save_credentials(&credentials("saved")).unwrap();
+        let instance = InstanceConfig {
+            issuer,
+            client_id: "damap".to_string(),
+            scope: "openid".to_string(),
+            app_title: None,
+        };
+        let damap = Damap::new(&saved.url).unwrap();
+        let person = Person::default();
+        let logging_in = log_in(
+            &project,
+            damap,
+            &instance,
+            Some(&saved),
+            Login::SavedOnly(&person),
+        );
+        // Runs as soon as the login first waits for its server.
+        let other_command = async {
+            project
+                .save_credentials(&credentials("from setup"))
+                .unwrap();
+        };
+
+        let (logged_in, ()) = tokio::join!(logging_in, other_command);
+
+        logged_in.unwrap();
+        assert_eq!(project.credentials().unwrap(), credentials("from setup"));
     }
 
     #[tokio::test]
@@ -317,7 +374,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            person.notices.into_inner(),
+            person.notices.into_inner().unwrap(),
             [
                 "The login server issued no refresh token; you will have to log in again next \
                  time."

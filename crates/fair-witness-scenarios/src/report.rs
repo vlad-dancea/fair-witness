@@ -311,6 +311,8 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ru
             }
             // Only a folder that is set up gets a log and a saved state.
             Event::LogStopped { .. } | Event::StateProblem { .. } => continue,
+            // A scenario's DMP stays as it is, and its reviews use the one they have regardless.
+            Event::DmpStatus { .. } => continue,
         };
         match set.checked_sub(1).and_then(|index| sets.get_mut(index)) {
             Some(outcome) => outcome.add(record),

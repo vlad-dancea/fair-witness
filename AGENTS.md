@@ -186,8 +186,9 @@ disagrees with it.
   each of which decides or hands on to the next, and `mod.rs` holds the `Verdict` and `Trace`
   that every step shares. The model is the last step, `ModelStep`, with the tool loop in `agent.rs`, the system prompt in `prompt.md`, the
   first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's
-  tools in `tools.rs`. `watcher/` is the folder watcher, `damap/` the DAMAP API client and the
-  login to it, `auth.rs` the OIDC login, `project.rs` the project folder and its
+  tools in `tools.rs`. `dmp.rs` is the DMP a session reviews against and the file or DAMAP it asks
+  for it before each review, without ever prompting, `watcher/` the folder watcher, `damap/` the
+  DAMAP API client and the login to it, `auth.rs` the OIDC login, `project.rs` the project folder and its
   `.fair-witness/`, `model.rs` the model and effort that `setup` saves and the model panel
   changes, `secret.rs` hides the API key in what an API answered, and `net.rs`
   decides which servers get secrets over plain HTTP and which are reached without a proxy.
