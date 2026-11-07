@@ -1,6 +1,6 @@
 ---
 name: full-stop
-description: Use when the user says "full stop". Takes the current work to a pull request that is ready to merge, babysits it through CI and CodeRabbit, and never merges.
+description: Use when the user says "full stop". Takes the current work to a pull request that is ready to merge, babysits it through CI and any CodeRabbit review, and never merges.
 ---
 
 # Full stop
@@ -21,7 +21,8 @@ going. Everything else follows `AGENTS.md`, which wins over this skill when the 
 3. Commit in small commits that each pass `mise run check`, push, and open the pull request
    against `main` as described in `AGENTS.md`. Never open a draft, because CodeRabbit skips
    drafts. If a pull request already exists for the branch, use it, and mark a draft ready with
-   `gh pr ready <number>`.
+   `gh pr ready <number>`. Request a CodeRabbit review after this push and after each later one,
+   as `AGENTS.md` describes.
 4. Link the pull request to the thread with `link_pull_request`. If it already existed, check
    the whole pull request as in step 5 first, including the bodies of reviews already posted,
    because only new comments wake you. Then call `watch_pull_request` and end your turn. T3 Code
@@ -33,12 +34,14 @@ going. Everything else follows `AGENTS.md`, which wins over this skill when the 
    - A failed check: find why it differs from the local check before retrying. Retry only a
      failure you can show is infrastructure, not code.
    - CodeRabbit and other review comments, including findings in the body of a review: handle
-     them as `AGENTS.md` describes. Push the fixes and wait for the next review.
+     them as `AGENTS.md` describes. Push the fixes and request a review of that push.
+   - CodeRabbit's answer to a request: act on it as `AGENTS.md` describes. A limited answer means
+     going ahead without a review.
    - `main` moved: merge `origin/main` into the branch, run `mise run check` and push.
 6. The pull request is ready when:
    - the `check` job and dist's `plan` job pass on the latest commit
-   - `gh pr checks <number>` shows the `CodeRabbit` check passing with "Review completed" for the
-     latest commit
+   - `gh pr checks <number>` shows the `CodeRabbit` check passing for the latest commit, or the
+     request for that commit came back limited
    - every review thread is resolved, or answered with a reason and left for the maintainer
    - every finding in the body of a review is fixed, or answered with a reason in a comment
    - the branch contains the latest `main`
@@ -52,6 +55,7 @@ Write the report so it can be read in one pass:
 - the pull request link
 - one line on what changed and how it was verified
 - whether merging it publishes a release, by the paths in `AGENTS.md`
-- the sol loop and CodeRabbit findings with what happened to each, as a short table
+- the sol loop and CodeRabbit findings with what happened to each, as a short table, or that no
+  CodeRabbit review ran because its request came back limited
 - what is left for the maintainer to decide, if anything
 - the next step: "Ready to merge. Say full send or merge it yourself."
