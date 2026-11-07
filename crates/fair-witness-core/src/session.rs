@@ -5,15 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use jiff::{Timestamp, Unit};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
+use crate::dmp::{Dmp, DmpSource, DmpVersion, kept_warning};
 use crate::project::{self, Project};
-use crate::review::{self, Refused, Step, Trace, Verdict};
+use crate::review::{self, Refused, Step, Trace, Verdict, spoken};
 use crate::watcher::{self, Change, Filter, FolderWatcher, WatchError};
 
 /// How long a change set whose review failed waits before each further attempt. Its reviews have
@@ -26,6 +27,10 @@ pub const RETRY_WAITS: [Duration; 5] = [
     Duration::from_secs(15 * 60),
     Duration::from_secs(15 * 60),
 ];
+
+/// How long asking for the DMP may hold up a review, for all its requests together, since each has
+/// a limit of 15 s of its own.
+const DMP_WITHIN: Duration = Duration::from_secs(20);
 
 /// Something that happened while watching, with the number of the change set it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +88,15 @@ pub enum Event {
     LogStopped {
         error: String,
     },
+    /// Which DMP the reviews use from here on, when that or what is wrong with it changed. A
+    /// `warning` says what went wrong, such as that the DMP could not be fetched and the last one
+    /// stands, and comes again only when it changes. Without one, all is well again.
+    DmpStatus {
+        status: String,
+        version: DmpVersion,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
 }
 
 fn first_attempt() -> usize {
@@ -113,13 +127,14 @@ pub struct Session {
     project: Project,
     debounce: Duration,
     review: Option<ReviewSettings>,
+    dmp_source: Option<Arc<dyn DmpSource>>,
     retry_waits: Vec<Duration>,
     another_model: Arc<Notify>,
     log: Option<PathBuf>,
 }
 
 struct ReviewSettings {
-    dmp: String,
+    dmp: Dmp,
     steps: Vec<Arc<dyn Step>>,
 }
 
@@ -130,6 +145,7 @@ impl Session {
             project,
             debounce: watcher::DEBOUNCE,
             review: None,
+            dmp_source: None,
             retry_waits: RETRY_WAITS.to_vec(),
             another_model: Arc::default(),
             log: None,
@@ -142,9 +158,18 @@ impl Session {
     }
 
     /// Reviews each change set against `dmp`, running `steps` in order until one decides.
-    pub fn reviewing(self, dmp: String, steps: Vec<Arc<dyn Step>>) -> Self {
+    pub fn reviewing(self, dmp: Dmp, steps: Vec<Arc<dyn Step>>) -> Self {
         Self {
             review: Some(ReviewSettings { dmp, steps }),
+            ..self
+        }
+    }
+
+    /// Asks `source` for the DMP before each review, and goes on with the one it has when that
+    /// fails.
+    pub fn following(self, source: Arc<dyn DmpSource>) -> Self {
+        Self {
+            dmp_source: Some(source),
             ..self
         }
     }
@@ -234,6 +259,7 @@ impl Session {
             return;
         };
         let mut failed = FailedSets::new(self.retry_waits.clone());
+        let mut dmp = settings.dmp.clone();
         let mut more_to_come = true;
         loop {
             // A model chosen during the last review counts before the next one starts, or a set
@@ -268,7 +294,7 @@ impl Session {
                 }
             };
             match self
-                .review_set(settings, set, &undecided.changes, filter, events)
+                .review_set(settings, &mut dmp, set, &undecided.changes, filter, events)
                 .await
             {
                 Ok(verdict) => {
@@ -283,24 +309,45 @@ impl Session {
     async fn review_set(
         &self,
         settings: &ReviewSettings,
+        dmp: &mut Dmp,
         set: usize,
         changes: &[Change],
         filter: &Filter,
         events: &Events,
     ) -> Result<Verdict> {
         events.send(Event::Reviewing { set });
+        if let Some(source) = &self.dmp_source {
+            bring_up_to_date(dmp, source.as_ref(), events).await;
+        }
         let trace = |trace| events.send(Event::Trace { set, trace });
+        trace(Trace::DmpVersion(dmp.version.clone()));
         let root = self.project.root();
-        review::run_steps(
-            &settings.steps,
-            root,
-            filter,
-            &settings.dmp,
-            changes,
-            &trace,
-        )
-        .await
+        review::run_steps(&settings.steps, root, filter, &dmp.text, changes, &trace).await
     }
+}
+
+/// Asks `source` for the DMP as it is now and reports what that changes for the reviews. When it
+/// gives none, `dmp` stands, since a DMP that cannot be fetched never fails a review.
+async fn bring_up_to_date(dmp: &mut Dmp, source: &dyn DmpSource, events: &Events) {
+    let fetched = tokio::time::timeout(DMP_WITHIN, source.fetch())
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("no answer within {}", spoken(DMP_WITHIN))));
+    let next = fetched.unwrap_or_else(|e| {
+        let warning = kept_warning(dmp.version.origin, &e);
+        tracing::warn!("{warning}");
+        Dmp {
+            warning: Some(warning),
+            ..dmp.clone()
+        }
+    });
+    if next.version != dmp.version || next.status != dmp.status || next.warning != dmp.warning {
+        events.send(Event::DmpStatus {
+            status: next.status.clone(),
+            version: next.version.clone(),
+            warning: next.warning.clone(),
+        });
+    }
+    *dmp = next;
 }
 
 /// Resolves at `due`, and without one never.
@@ -548,10 +595,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::dmp::{DamapDmp, DmpFuture, DmpOrigin};
     use crate::model::{Effort, ModelChoice};
-    use crate::project::AiConfig;
+    use crate::project::{AiConfig, Credentials, DamapLogin};
     use crate::review::{Input, ModelStep, StepFuture, StepOutcome};
-    use crate::testing::{Reply, fake_model, held, no_answer, too_many_requests, tool_call};
+    use crate::testing::{
+        Download, Reply, empty_dmp, fake_damap, fake_model, held, no_answer, too_many_requests,
+        tool_call,
+    };
 
     /// Long enough for the watcher to wait out its debounce and the review to finish.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -606,6 +657,9 @@ mod tests {
             Event::Changes { set, changes } => format!("#{set} changes {changes:?}"),
             Event::Reviewing { set } => format!("#{set} reviewing"),
             Event::Trace { set, trace } => match trace {
+                Trace::DmpVersion(version) => {
+                    format!("#{set} DMP {:?} {}", version.origin, version.hash)
+                }
                 Trace::Setup { dmp, .. } => format!("#{set} setup with DMP {dmp}"),
                 Trace::Model(choice) => format!("#{set} model {}", choice.model),
                 Trace::Prompt(text) => {
@@ -645,6 +699,14 @@ mod tests {
             Event::WatchErrors { set, errors } => format!("#{set} watch errors: {errors:?}"),
             Event::WatchStopped { error } => format!("watching stopped: {error}"),
             Event::LogStopped { error } => format!("log stopped: {error}"),
+            Event::DmpStatus {
+                status,
+                version,
+                warning,
+            } => format!(
+                "DMP {:?} {}: {status} {warning:?}",
+                version.origin, version.hash
+            ),
         }
     }
 
@@ -688,7 +750,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(Panics)])
+            .reviewing(empty_dmp(), vec![Arc::new(Panics)])
             .start()
             .unwrap();
 
@@ -704,7 +766,11 @@ mod tests {
 
         assert_eq!(
             seen,
-            [r#"#1 changes [Created("results.csv")]"#, "#1 reviewing"]
+            [
+                r#"#1 changes [Created("results.csv")]"#,
+                "#1 reviewing",
+                "#1 DMP File 44136fa355b3",
+            ]
         );
     }
 
@@ -724,7 +790,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let mut events = Session::new(Project::new(root.clone()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(Stalls)])
+            .reviewing(empty_dmp(), vec![Arc::new(Stalls)])
             .start()
             .unwrap();
 
@@ -748,6 +814,7 @@ mod tests {
             [
                 r#"#1 changes [Created("results.csv")]"#,
                 "#1 reviewing",
+                "#1 DMP File 44136fa355b3",
                 "watching stopped: the project folder was moved or deleted, so it is no longer \
                  watched; start `fair-witness run` again in its new place",
             ]
@@ -769,7 +836,7 @@ mod tests {
         ]);
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .reviewing(empty_dmp(), vec![reviewer(endpoint)])
             .start()
             .unwrap();
         let results = root.path().join("results.csv");
@@ -798,6 +865,7 @@ mod tests {
             [
                 r#"#1 changes [Created("results.csv")]"#,
                 "#1 reviewing",
+                "#1 DMP File 44136fa355b3",
                 "#1 setup with DMP {}",
                 "#1 model test",
                 "#1 prompt created: results.csv",
@@ -807,11 +875,13 @@ mod tests {
                 "#1 reply 1: report_verdict",
                 "#1 verdict: contradicts false (None): Results, as planned.",
                 "#2 reviewing",
+                "#2 DMP File 44136fa355b3",
                 "#2 prompt changed: results.csv (gone since, so it can no longer be read)",
                 "#2 request 1",
                 "#2 reply 1: report_verdict",
                 "#2 verdict: contradicts false (None): New results, as planned.",
                 "#3 reviewing",
+                "#3 DMP File 44136fa355b3",
                 "#3 prompt deleted: results.csv",
                 "#3 request 1",
                 "#3 reply 1: report_verdict",
@@ -844,7 +914,7 @@ mod tests {
         let log = project.run_log().unwrap().events;
         let mut events = Session::new(project)
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .reviewing(empty_dmp(), vec![reviewer(endpoint)])
             .logging_to(log.clone())
             .start()
             .unwrap();
@@ -861,6 +931,7 @@ mod tests {
             [
                 r#"#1 changes [Created("notes.txt")]"#,
                 "#1 reviewing",
+                "#1 DMP File 44136fa355b3",
                 "#1 setup with DMP {}",
                 "#1 model test",
                 "#1 prompt created: notes.txt",
@@ -869,6 +940,7 @@ mod tests {
                 "#1 verdict: contradicts false (None): Notes are not data.",
                 r#"#2 changes [Created("patients.csv")]"#,
                 "#2 reviewing",
+                "#2 DMP File 44136fa355b3",
                 "#2 prompt created: patients.csv",
                 "#2 request 1",
                 "#2 reply 1: read_file",
@@ -894,7 +966,7 @@ mod tests {
             first,
             json!({ "event": "changes", "set": 1, "changes": [{ "created": "notes.txt" }] })
         );
-        let mut reply = serde_json::to_value(&seen[6].event).unwrap();
+        let mut reply = serde_json::to_value(&seen[7].event).unwrap();
         reply["trace"]["reply"]
             .as_object_mut()
             .unwrap()
@@ -940,7 +1012,7 @@ mod tests {
         .unwrap();
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![Arc::new(reviewer)])
+            .reviewing(empty_dmp(), vec![Arc::new(reviewer)])
             .start()
             .unwrap();
 
@@ -956,6 +1028,7 @@ mod tests {
             [
                 r#"#1 changes [Created("notes.txt")]"#,
                 "#1 reviewing",
+                "#1 DMP File 44136fa355b3",
                 "#1 setup with DMP {}",
                 "#1 model test",
                 "#1 prompt created: notes.txt",
@@ -965,6 +1038,7 @@ mod tests {
                 "#1 attempt 1 failed, again in 60000 ms: the model test gave no verdict within 2 s",
                 r#"#2 changes [Created("survey.csv")]"#,
                 "#2 reviewing",
+                "#2 DMP File 44136fa355b3",
                 "#2 prompt created: survey.csv",
                 "#2 request 1",
                 "#2 reply 1: report_verdict",
@@ -1005,7 +1079,7 @@ mod tests {
         ]);
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .reviewing(empty_dmp(), vec![reviewer(endpoint)])
             .start()
             .unwrap();
 
@@ -1025,6 +1099,7 @@ mod tests {
             [
                 r#"#1 changes [Created("notes.txt")]"#.to_string(),
                 "#1 reviewing".to_string(),
+                "#1 DMP File 44136fa355b3".to_string(),
                 "#1 setup with DMP {}".to_string(),
                 "#1 model test".to_string(),
                 "#1 prompt created: notes.txt".to_string(),
@@ -1034,11 +1109,13 @@ mod tests {
                 format!("#1 attempt 1 failed, again in 60000 ms: {OUT_OF_QUOTA}"),
                 r#"#2 changes [Created("survey.csv")]"#.to_string(),
                 "#2 reviewing".to_string(),
+                "#2 DMP File 44136fa355b3".to_string(),
                 "#2 prompt created: survey.csv".to_string(),
                 "#2 request 1".to_string(),
                 "#2 reply 1: report_verdict".to_string(),
                 "#2 verdict: contradicts false (None): Survey answers, as planned.".to_string(),
                 "#1 reviewing".to_string(),
+                "#1 DMP File 44136fa355b3".to_string(),
                 "#1 prompt created: notes.txt".to_string(),
                 "#1 request 1".to_string(),
                 "#1 reply 1: report_verdict".to_string(),
@@ -1058,7 +1135,7 @@ mod tests {
         ]);
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .reviewing(empty_dmp(), vec![reviewer(endpoint)])
             .start()
             .unwrap();
         let results = root.path().join("results.csv");
@@ -1087,6 +1164,7 @@ mod tests {
             [
                 r#"#3 changes [Created("notes.txt")]"#,
                 "#3 reviewing",
+                "#3 DMP File 44136fa355b3",
                 "#3 prompt created: notes.txt",
                 "#3 request 1",
                 "#3 reply 1: report_verdict",
@@ -1106,7 +1184,7 @@ mod tests {
         ]);
         let mut events = Session::new(Project::new(root.path().to_path_buf()))
             .debounce(Duration::from_millis(50))
-            .reviewing("{}".to_string(), vec![reviewer(endpoint)])
+            .reviewing(empty_dmp(), vec![reviewer(endpoint)])
             .start()
             .unwrap();
         let results = root.path().join("results.csv");
@@ -1249,7 +1327,7 @@ mod tests {
             let (sender, reported) = mpsc::unbounded_channel();
             Self {
                 session: Session::new(Project::new(root.path().to_path_buf()))
-                    .reviewing("{}".to_string(), vec![step]),
+                    .reviewing(empty_dmp(), vec![step]),
                 filter: Filter::new(root.path()).unwrap(),
                 events: Events::new(sender, None),
                 reported,
@@ -1440,7 +1518,7 @@ mod tests {
         let mut reviews = Reviews::new(step.clone());
         reviews.session = reviews
             .session
-            .reviewing("{}".to_string(), vec![Arc::new(chooses)])
+            .reviewing(empty_dmp(), vec![Arc::new(chooses)])
             .trying_again_on(another_model);
         let (queue, queued) = mpsc::unbounded_channel();
         queue.send(created(1, "a.csv")).unwrap();
@@ -1486,6 +1564,249 @@ mod tests {
             step.since_first()[6],
             DAY,
             "goes again as soon as the model is chosen"
+        );
+    }
+
+    /// A source that gives `answers` in turn, and then the last DMP it gave.
+    struct ScriptedDmp {
+        answers: Mutex<VecDeque<Result<Dmp>>>,
+    }
+
+    impl DmpSource for ScriptedDmp {
+        fn fetch(&self) -> DmpFuture<'_> {
+            let answer = self.answers.lock().unwrap().pop_front();
+            Box::pin(async { answer.unwrap_or_else(|| Ok(plan("the last"))) })
+        }
+    }
+
+    /// A DMP with the plan `text`.
+    fn plan(text: &str) -> Dmp {
+        let status = format!("Comparing changes with {text}.");
+        Dmp::from_madmp(&json!({ "plan": text }), DmpOrigin::Downloaded, status).unwrap()
+    }
+
+    /// A step that decides each set is fine and notes the DMP it was given.
+    #[derive(Default)]
+    struct NotesDmp {
+        given: Mutex<Vec<String>>,
+    }
+
+    impl Step for NotesDmp {
+        fn decide<'a>(
+            &'a self,
+            input: &'a Input<'a>,
+            _: &'a (dyn Fn(Trace) + Sync),
+        ) -> StepFuture<'a> {
+            self.given.lock().unwrap().push(input.dmp.to_string());
+            Box::pin(async { Ok(StepOutcome::Decided(fine()?)) })
+        }
+    }
+
+    /// Reviews `sets` new change sets with `source` behind the DMP `first`, and gives back the
+    /// DMP each review was given and all that was reported, in paused time.
+    async fn review_with(
+        first: Dmp,
+        source: Arc<dyn DmpSource>,
+        sets: usize,
+    ) -> (Vec<String>, Vec<Record>) {
+        let root = tempfile::tempdir().unwrap();
+        let step = Arc::new(NotesDmp::default());
+        let session = Session::new(Project::new(root.path().to_path_buf()))
+            .reviewing(first, vec![step.clone()])
+            .following(source);
+        let filter = Filter::new(root.path()).unwrap();
+        let (sender, mut reported) = mpsc::unbounded_channel();
+        let events = Events::new(sender, None);
+        let (queue, queued) = mpsc::unbounded_channel();
+        for set in 1..=sets {
+            queue.send(created(set, "a.csv")).unwrap();
+        }
+        drop(queue);
+
+        session.review_queued(queued, &filter, &events).await;
+
+        let mut records = Vec::new();
+        while let Ok(record) = reported.try_recv() {
+            records.push(record);
+        }
+        let given = step.given.lock().unwrap().clone();
+        (given, records)
+    }
+
+    /// What `DmpStatus` events said, as `(status, warning)`.
+    fn statuses(records: &[Record]) -> Vec<(String, Option<String>)> {
+        records
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::DmpStatus {
+                    status, warning, ..
+                } => Some((status.clone(), warning.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_the_last_dmp_and_says_so_once_for_each_reason_until_it_works_again() {
+        let why = |reason: &str| Err(anyhow!("{reason}"));
+        let source = ScriptedDmp {
+            answers: Mutex::new(VecDeque::from([
+                why("DAMAP is down"),
+                why("DAMAP is down"),
+                why("the login expired"),
+                Ok(plan("one")),
+                Ok(plan("two")),
+            ])),
+        };
+
+        let (given, records) = review_with(plan("one"), Arc::new(source), 5).await;
+
+        let warning = |reason: &str| {
+            Some(format!(
+                "Warning: could not download the DMP, so changes are checked against the last \
+                 version downloaded: {reason}"
+            ))
+        };
+        assert_eq!(
+            given,
+            [
+                plan("one").text,
+                plan("one").text,
+                plan("one").text,
+                plan("one").text,
+                plan("two").text,
+            ]
+        );
+        assert_eq!(
+            statuses(&records),
+            [
+                (plan("one").status, warning("DAMAP is down")),
+                (plan("one").status, warning("the login expired")),
+                (plan("one").status, None),
+                (plan("two").status, None),
+            ]
+        );
+    }
+
+    /// A source that never answers, as a server that keeps taking requests without answering.
+    struct NeverAnswers;
+
+    impl DmpSource for NeverAnswers {
+        fn fetch(&self) -> DmpFuture<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gives_up_on_the_dmp_after_twenty_seconds_and_tries_again_at_the_next_review() {
+        let started = Instant::now();
+
+        let (given, records) = review_with(plan("one"), Arc::new(NeverAnswers), 2).await;
+
+        assert_eq!(given, [plan("one").text, plan("one").text]);
+        assert_eq!(started.elapsed(), DMP_WITHIN * 2);
+        assert_eq!(
+            statuses(&records),
+            [(
+                plan("one").status,
+                Some(
+                    "Warning: could not download the DMP, so changes are checked against the \
+                     last version downloaded: no answer within 20 s"
+                        .to_string()
+                )
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn reviews_each_set_against_the_plan_as_damap_has_it_then() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        let before = json!({
+            "project": [{ "title": "Soil samples" }],
+            "dataset": [{ "personal_data": "no" }],
+        });
+        let after = json!({
+            "project": [{ "title": "Soil samples" }],
+            "dataset": [{ "personal_data": "yes" }],
+            "modified": "2026-11-07T10:00:00.000+00:00",
+        });
+        let damap = fake_damap(vec![
+            Download::Gives("first", before.clone()),
+            Download::Gives("second", after.clone()),
+        ]);
+        project
+            .save_credentials(&Credentials {
+                damap: Some(DamapLogin {
+                    url: damap.url.clone(),
+                    login_server: Some(damap.login_server.clone()),
+                    refresh_token: "saved".to_string(),
+                }),
+                ai: None,
+            })
+            .unwrap();
+        let (endpoint, server) = fake_model(vec![
+            in_line("Against the plan before the edit."),
+            in_line("Against the plan after the edit."),
+        ]);
+        let first = Dmp::from_madmp(
+            &before,
+            DmpOrigin::Downloaded,
+            "Comparing changes with project #3 - Soil samples.".to_string(),
+        )
+        .unwrap();
+        let mut events = Session::new(project.clone())
+            .debounce(Duration::from_millis(50))
+            .reviewing(first.clone(), vec![reviewer(endpoint)])
+            .following(Arc::new(DamapDmp::new(project, damap.url.clone(), 3)))
+            .start()
+            .unwrap();
+
+        fs::write(root.path().join("notes.txt"), "Ask about consent").unwrap();
+        let mut seen = until_decided(&mut events).await;
+        fs::write(root.path().join("survey.csv"), "age\n42\n").unwrap();
+        seen.extend(until_decided(&mut events).await);
+
+        let requests = server.join().unwrap();
+        let prompt = |index: usize| requests[index].1["messages"][1]["content"].to_string();
+        assert!(
+            prompt(0).contains(r#"\"personal_data\": \"no\""#),
+            "{}",
+            prompt(0)
+        );
+        assert!(
+            prompt(1).contains(r#"\"personal_data\": \"yes\""#),
+            "{}",
+            prompt(1)
+        );
+        let new = Dmp::from_madmp(&after, DmpOrigin::Downloaded, String::new()).unwrap();
+        let versions: Vec<&DmpVersion> = seen
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::Trace {
+                    trace: Trace::DmpVersion(version),
+                    ..
+                } => Some(version),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(versions, [&first.version, &new.version]);
+        assert_eq!(statuses(&seen), [(first.status.clone(), None)]);
+        let setups: Vec<&str> = seen
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::Trace {
+                    trace: Trace::Setup { dmp, .. },
+                    ..
+                } => Some(dmp.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(setups, [first.text.as_str(), new.text.as_str()]);
+        assert_eq!(
+            damap.token_requests.join().unwrap().len(),
+            2,
+            "refreshes once before each review"
         );
     }
 

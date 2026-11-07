@@ -1,5 +1,5 @@
-//! A fake model that answers like an OpenAI-compatible API, for tests here and in the crates
-//! that enable the `testing` feature.
+//! A fake model that answers like an OpenAI-compatible API and a fake DAMAP, for tests here and in
+//! the crates that enable the `testing` feature.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -7,6 +7,8 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 
 use serde_json::{Value, json};
+
+use crate::dmp::{Dmp, DmpOrigin};
 
 /// The head and the body of a request the fake model received, as JSON or else as a string,
 /// such as for a form.
@@ -248,4 +250,69 @@ pub fn fake_model(replies: Vec<impl Into<Reply>>) -> (String, thread::JoinHandle
         requests
     });
     (url, server)
+}
+
+/// An empty maDMP that nothing keeps up to date, for a session under test.
+pub fn empty_dmp() -> Dmp {
+    let status = "Comparing changes with the DMP in the test.".to_string();
+    Dmp::from_madmp(&json!({}), DmpOrigin::File, status).unwrap()
+}
+
+/// What happens to one download from a fake DAMAP.
+pub enum Download {
+    /// The session refreshes to the given token and the download gets the given maDMP.
+    Gives(&'static str, Value),
+    /// The login server answers the refresh with the given reply, so the download ends there.
+    Refused(Reply),
+    /// DAMAP hangs up at the first request.
+    Down,
+}
+
+/// A DAMAP with its login server, each answering in the order of its `Download`s.
+pub struct FakeDamap {
+    pub url: String,
+    pub login_server: String,
+    pub token_endpoint: String,
+    /// What its token endpoint was asked, once it has answered every request it has a reply for.
+    pub token_requests: thread::JoinHandle<Vec<Request>>,
+}
+
+/// A fake DAMAP for `downloads`, one after another.
+pub fn fake_damap(downloads: Vec<Download>) -> FakeDamap {
+    let mut tokens = Vec::new();
+    let mut discoveries = 0;
+    // With `None` for the instance config, which names the login server that does not run yet.
+    let mut damap = Vec::new();
+    for download in downloads {
+        match download {
+            Download::Gives(refresh_token, madmp) => {
+                let reply = json!({ "access_token": "access", "refresh_token": refresh_token });
+                tokens.push(reply.into());
+                discoveries += 1;
+                damap.extend([None, Some(madmp.into())]);
+            }
+            Download::Refused(reply) => {
+                tokens.push(reply);
+                discoveries += 1;
+                damap.push(None);
+            }
+            Download::Down => damap.push(Some(hang_up())),
+        }
+    }
+    let (token_server, token_requests) = fake_model(tokens);
+    let token_endpoint = format!("{token_server}/token");
+    let discovery = json!({ "token_endpoint": token_endpoint });
+    let (login_server, _) = fake_model(vec![discovery; discoveries]);
+    let instance = json!({ "issuer": login_server, "clientID": "damap", "scope": "openid" });
+    let replies: Vec<Reply> = damap
+        .into_iter()
+        .map(|reply| reply.unwrap_or_else(|| instance.clone().into()))
+        .collect();
+    let (url, _) = fake_model(replies);
+    FakeDamap {
+        url,
+        login_server,
+        token_endpoint,
+        token_requests,
+    }
 }

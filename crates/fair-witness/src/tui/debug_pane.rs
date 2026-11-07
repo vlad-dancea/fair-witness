@@ -1,3 +1,4 @@
+use fair_witness_core::dmp::{DmpOrigin, DmpVersion};
 use fair_witness_core::model::ModelChoice;
 use fair_witness_core::review::{Trace, Verdict, first_message};
 use fair_witness_core::session::{Event, Record};
@@ -23,6 +24,8 @@ enum Entry {
         set: usize,
         time: String,
     },
+    /// Which version of the DMP the review uses.
+    Dmp(DmpVersion),
     /// The system prompt and the tools the AI may call.
     Instructions {
         text: String,
@@ -160,6 +163,7 @@ impl DebugPane {
 
     fn add_trace(&mut self, trace: Trace) {
         match trace {
+            Trace::DmpVersion(version) => self.push(Entry::Dmp(version)),
             Trace::Setup { system, dmp, tools } => {
                 self.setup = Some(Setup { system, dmp, tools });
             }
@@ -331,6 +335,16 @@ fn render(entry: &Entry, width: usize, collapsed: bool, lines: &mut Vec<Line<'st
     let indent = [Span::raw(INDENT)];
     match entry {
         Entry::Review { set, time } => lines.push(rule(*set, time, width)),
+        Entry::Dmp(version) => {
+            let origin = match version.origin {
+                DmpOrigin::Downloaded => "downloaded",
+                DmpOrigin::SavedCopy => "saved copy",
+                DmpOrigin::File => "file",
+            };
+            let mut details = vec![origin, version.hash.as_str()];
+            details.extend(version.modified.as_deref());
+            lines.push(badge("DMP", Color::Cyan, &details.join(" · ")));
+        }
         Entry::Instructions { text, tools } => {
             lines.push(badge(
                 "SYSTEM PROMPT",
@@ -744,7 +758,7 @@ mod tests {
     use fair_witness_core::project::{AiConfig, Project};
     use fair_witness_core::review::ModelStep;
     use fair_witness_core::session::Session;
-    use fair_witness_core::testing::{fake_model, tool_call};
+    use fair_witness_core::testing::{empty_dmp, fake_model, tool_call};
     use jiff::Timestamp;
     use serde_json::json;
 
@@ -973,6 +987,37 @@ mod tests {
         assert_eq!(texts(&mut pane, 80).last().unwrap(), "    │ file10");
     }
 
+    #[test]
+    fn names_the_version_of_the_dmp_each_review_used() {
+        let mut pane = DebugPane::default();
+        let version = |origin, modified: Option<&str>, hash: &str| {
+            Trace::DmpVersion(DmpVersion {
+                origin,
+                modified: modified.map(str::to_string),
+                hash: hash.to_string(),
+            })
+        };
+
+        pane.add_trace(version(DmpOrigin::SavedCopy, None, "44136fa355b3"));
+        pane.add_trace(version(
+            DmpOrigin::Downloaded,
+            Some("2026-11-07T10:00:00.000+00:00"),
+            "9f86d081884c",
+        ));
+        pane.add_trace(version(DmpOrigin::File, None, "9f86d081884c"));
+
+        assert_eq!(
+            texts(&mut pane, 80),
+            [
+                " DMP   saved copy · 44136fa355b3",
+                "",
+                " DMP   downloaded · 9f86d081884c · 2026-11-07T10:00:00.000+00:00",
+                "",
+                " DMP   file · 9f86d081884c",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn shows_a_logged_run_as_it_showed_it_live() {
         let root = tempfile::tempdir().unwrap();
@@ -999,7 +1044,7 @@ mod tests {
         let mut records = Session::new(project)
             .debounce(Duration::from_millis(50))
             .reviewing(
-                "{}".to_string(),
+                empty_dmp(),
                 vec![Arc::new(ModelStep::new(&ai, None).unwrap())],
             )
             .logging_to(log.clone())

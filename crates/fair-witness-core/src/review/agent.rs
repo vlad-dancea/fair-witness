@@ -606,6 +606,7 @@ mod tests {
         let kinds: Vec<String> = traces
             .iter()
             .map(|trace| match trace {
+                Trace::DmpVersion(version) => format!("DMP {}", version.hash),
                 Trace::Setup { tools, .. } => format!("setup with {}", tools.join(", ")),
                 Trace::Model(choice) => format!("model {}", choice.model),
                 Trace::Prompt(text) => format!("prompt {}", text.lines().nth(1).unwrap_or("")),

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fair_witness_core::auth::Notices;
-use fair_witness_core::damap::{self, Login};
+use fair_witness_core::damap::Login;
+use fair_witness_core::dmp::{DamapDmp, Dmp, DmpSource, FileDmp};
 use fair_witness_core::model::{Effort, ModelChoice};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
 use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
@@ -114,6 +115,8 @@ pub struct Args {
 struct Start {
     project: Project,
     records: UnboundedReceiver<Record>,
+    /// The DMP as the session started with it, which the session's events then take over from.
+    dmp: Option<Dmp>,
     status: Vec<String>,
     settings: Option<ModelSettings>,
 }
@@ -129,13 +132,6 @@ struct Ai {
     api_key: Option<String>,
     /// Why the saved API key is not sent, when it is for another API than the saved one.
     key_not_sent: Option<String>,
-}
-
-/// The DMP to check changes against, the header line that names it and a warning about it.
-struct Dmp {
-    json: String,
-    status: String,
-    warning: Option<String>,
 }
 
 pub async fn run(here: &Path, args: Args) -> Result<(), Failure> {
@@ -187,6 +183,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     }
     let mut status = Vec::new();
     let mut settings = None;
+    let mut started_with = None;
     let dmp_given = args.dmp_file.is_some() || args.dmp.is_some();
     let source = match (args.dmp_file, args.dmp.or(saved_dmp)) {
         (Some(file), _) => Some(Source::File(file)),
@@ -206,20 +203,34 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
                     anyhow!("{e:#}{}", why.unwrap_or_default())
                 })?
             };
-            let dmp = match source {
-                Source::File(file) => read_dmp(&file)?,
-                Source::Damap(id) => download_dmp(&project, id, args.headless).await?,
+            let (dmp, source): (Dmp, Arc<dyn DmpSource>) = match source {
+                Source::File(file) => {
+                    let file = FileDmp::new(here, &file);
+                    (file.read()?, Arc::new(file))
+                }
+                Source::Damap(id) => {
+                    let url = project.config()?.context(NOT_SET_UP)?.damap.frontend_url;
+                    let damap = DamapDmp::new(project.clone(), url, id);
+                    (
+                        first_download(&damap, args.headless).await?,
+                        Arc::new(damap),
+                    )
+                }
             };
             session = session
-                .reviewing(dmp.json, vec![reviewer.clone()])
+                .reviewing(dmp.clone(), vec![reviewer.clone()])
+                .following(source)
                 .trying_again_on(reviewer.choice_changed());
             tracing::info!("{}", dmp.status);
-            status.push(dmp.status);
+            started_with = Some(dmp);
             status.extend(ai.key_not_sent);
-            for warning in [unchecked, dmp.warning].into_iter().flatten() {
-                // The screen draws each header line as one, and DAMAP's errors span several.
-                status.extend(warning.lines().map(str::to_string));
-            }
+            // The screen draws each header line as one, and these errors can span several.
+            status.extend(
+                unchecked
+                    .iter()
+                    .flat_map(|warning| warning.lines())
+                    .map(str::to_string),
+            );
             settings = Some(ModelSettings {
                 project: project.clone(),
                 reviewer,
@@ -245,6 +256,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     Ok(Start {
         project,
         records,
+        dmp: started_with,
         status,
         settings,
     })
@@ -333,71 +345,25 @@ fn ai(project: &Project, config: Option<&Config>, args: &Args) -> Result<Option<
     }))
 }
 
-fn read_dmp(path: &Path) -> Result<Dmp> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read {}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("{} is not a maDMP JSON file", path.display()))?;
-    Ok(Dmp {
-        json: serde_json::to_string_pretty(&json)?,
-        status: format!("Comparing changes with the DMP in {}.", path.display()),
-        warning: None,
-    })
-}
-
-/// Downloads DMP `id` and keeps a copy of the one chosen in `setup`, which stands in for it,
-/// with a warning, when DAMAP cannot be reached.
-async fn download_dmp(project: &Project, id: i64, headless: bool) -> Result<Dmp> {
-    let config = project.config()?.context(NOT_SET_UP)?.damap;
-    let downloaded = async {
-        let (damap, instance) = damap::reach(&config.frontend_url).await?;
-        let login = if headless {
-            Login::SavedOnly(&ErrorOutput)
-        } else {
-            Login::Ask(&TerminalPrompts)
-        };
-        let saved = project.credentials()?.damap;
-        let damap = damap::log_in(project, damap, &instance, saved.as_ref(), login).await?;
-        let name = damap
-            .list_dmps()
-            .await?
-            .into_iter()
-            .find(|listed| listed.id == id)
-            .and_then(|listed| listed.name().map(str::to_string))
-            .unwrap_or_else(|| "(untitled)".to_string());
-        anyhow::Ok((name, damap.madmp(id).await?))
+/// Downloads the DMP before anything else happens, the only time a person can log in, with the
+/// copy saved before standing in for it, with a warning, when DAMAP cannot be reached.
+async fn first_download(damap: &DamapDmp, headless: bool) -> Result<Dmp> {
+    let login = if headless {
+        Login::SavedOnly(&ErrorOutput)
+    } else {
+        Login::Ask(&TerminalPrompts)
     };
-    match downloaded.await {
-        Ok((name, madmp)) => {
-            let mut warning = None;
-            // The DMP is downloaded, so a copy that cannot be saved only costs the fallback.
-            if config.dmp_id == Some(id)
-                && let Err(e) = project.save_madmp(&config.frontend_url, id, &madmp)
-            {
-                warning = Some(format!("Warning: could not save a copy of the DMP: {e:#}"));
-            }
-            Ok(Dmp {
-                json: serde_json::to_string_pretty(&madmp)?,
-                status: format!("Comparing changes with project #{id} - {name}."),
-                warning,
-            })
-        }
-        Err(e) => {
-            let Some(json) = project.madmp(&config.frontend_url, id)? else {
-                return Err(e);
-            };
-            let warning = format!(
-                "Warning: could not download the DMP, so changes are checked against the copy \
-                 saved before: {e:#}"
-            );
-            tracing::warn!("{warning}");
-            Ok(Dmp {
-                json,
-                status: format!("Comparing changes with the saved copy of project #{id}."),
-                warning: Some(warning),
-            })
-        }
+    let why = match damap.download(login).await {
+        Ok(dmp) => return Ok(dmp),
+        Err(why) => why,
+    };
+    let Some(dmp) = damap.saved_copy(&why)? else {
+        return Err(why);
+    };
+    if let Some(warning) = &dmp.warning {
+        tracing::warn!("{warning}");
     }
+    Ok(dmp)
 }
 
 /// Writes the login's notices to stderr, keeping stdout for events.
@@ -413,6 +379,7 @@ async fn show_events(start: Start) -> Result<()> {
     let Start {
         project,
         mut records,
+        dmp,
         status,
         settings,
     } = start;
@@ -425,7 +392,7 @@ async fn show_events(start: Start) -> Result<()> {
             }
         }
     });
-    Screen::new(project.root(), status, settings)
+    Screen::new(project.root(), dmp.as_ref(), status, settings)
         .run(received)
         .await
 }
@@ -456,12 +423,19 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
     let Start {
         project,
         records,
+        dmp,
         status,
         ..
     } = start;
     eprintln!("Watching {}", project.root().display());
+    if let Some(dmp) = &dmp {
+        eprintln!("{}", dmp.status);
+    }
     for line in &status {
         eprintln!("{line}");
+    }
+    if let Some(warning) = dmp.and_then(|dmp| dmp.warning) {
+        eprintln!("{warning}");
     }
     write_events(records, io::stdout(), stopped, READ_WITHIN).await
 }
