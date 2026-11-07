@@ -116,13 +116,21 @@ created: data/patients.csv                                       #1
 
 - **`in line with the DMP`** (green): nothing to do.
 - **`contradicts the DMP`** (red): the AI names the DMP field it clashes with and explains why. You also get a **desktop notification**, so you see it even when the terminal is in the background.
-- **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it.
+- **`review failed`**: the model could not be reached, or gave no verdict. The reason is shown next to it, and so is what comes next, as [When a review fails](#when-a-review-fails) describes.
 
 Changes you make while the AI checks a set show up right away as sets of their own, and the AI checks them in turn, each verdict under its own set. A file that is gone by the time the AI gets to its set stays listed, and the AI is told that it can no longer be read.
 
 To check its verdict, the AI only gets the DMP and the list of changed paths. When the names alone are not enough, it can list folders, 200 entries at a time, and read the first 16 KB of files. It cannot look outside the project folder or at what `run` ignores, such as `.fair-witness/`, as described in [What is ignored](configuration.md#what-is-ignored).
 
 What you do about a contradiction is up to you. Either undo the change, or, if the plan has changed, update the DMP in DAMAP and restart `run` so it picks up the new version.
+
+#### When a review fails
+
+A set whose review failed is kept and reviewed again under its own number, and the line under it says when. The attempts come after 1, 2, 5, 15 and 15 minutes, the oldest set first, and newer sets are checked in the meantime. Any verdict shows that the API works again, so the waiting sets go at once. Each failing set gives one desktop notification, however many attempts it takes.
+
+After the last attempt, or at once when the API refuses the request with a `4xx` status other than `408`, `409` or `429`, such as `401`, `403` or `404`, the line says that no more attempts come in this run unless you pick another model. Picking a model with `m`, also the same one, sends every waiting set again and starts its waits over. Quitting `run` drops the waiting sets, so their changes stay unchecked until the files change again.
+
+A review reads the folder as it is then, so a verdict on a newer set also covers its paths in an older failed set. Those paths are not reviewed again, and when none are left, the older set says which verdict covers it. Sets never merge, so each number gets one verdict at most.
 
 ### 4. See what the AI did
 
@@ -140,7 +148,7 @@ Press `m` to change the model without restarting:
 
 - Type to filter the model list, and use `↑↓` to choose.
 - `Tab` switches to the **effort** column for models that support reasoning effort: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. `default` sends no effort, so the model uses its own, and `none` asks for no reasoning, which some models ignore. Each model takes only some of these names, and its API refuses, ignores or rounds the others. The list also holds an effort given with `--effort` that it does not offer.
-- `Enter` first asks the API once whether it takes the model and effort, as `run` does when it starts. If the API refuses them, the panel stays open with its message, which often names the efforts the model takes. Otherwise the choice is used from the next change set on and saved to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. When the check cannot tell, such as when the API answers `429 Too Many Requests`, the Changes pane says so. `Esc` cancels, also while the panel checks.
+- `Enter` first asks the API once whether it takes the model and effort, as `run` does when it starts. If the API refuses them, the panel stays open with its message, which often names the efforts the model takes. Otherwise the choice is used from the next review on, sets that wait after a failed review go again with it, and it is saved to `config.toml`, unless `--ai-url` named another API than the one chosen in `setup`. When the check cannot tell, such as when the API answers `429 Too Many Requests`, the Changes pane says so. `Esc` cancels, also while the panel checks.
 
 To use a different API or key, quit and run `fair-witness setup`.
 
@@ -148,7 +156,7 @@ To use a different API or key, quit and run `fair-witness setup`.
 
 Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right away.
 
-`run` also stops watching when the project folder or a folder above it is moved, renamed, deleted or replaced, and says so in the header and the Changes pane. Reviews still running or waiting are dropped, since they could no longer read the folder. To watch it again, start `fair-witness run` where the folder is now, or once a deleted folder is back.
+`run` also stops watching when the project folder or a folder above it is moved, renamed, deleted or replaced, and says so in the header and the Changes pane. Reviews still running or waiting, also of failed sets, are dropped, since they could no longer read the folder. To watch it again, start `fair-witness run` where the folder is now, or once a deleted folder is back.
 
 ## Keys
 

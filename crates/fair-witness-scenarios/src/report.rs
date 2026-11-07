@@ -1,3 +1,5 @@
+use std::mem;
+
 use fair_witness_core::escape;
 use fair_witness_core::model::Effort;
 use fair_witness_core::review::{Trace, Verdict};
@@ -42,7 +44,7 @@ pub struct RunOutcome {
     pub sets: Vec<SetOutcome>,
 }
 
-/// How one change set went.
+/// How one change set went: its last attempt, which is what counts, and the earlier ones apart.
 #[derive(Debug, Serialize)]
 pub struct SetOutcome {
     pub expected: Expected,
@@ -53,11 +55,20 @@ pub struct SetOutcome {
     /// Whether the verdict is the expected one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correct: Option<bool>,
+    /// Why the last attempt failed, if nothing came after it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_failed: Option<String>,
+    /// The newer set whose verdict covers this failed one, so that it needs none of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_by: Option<usize>,
+    /// How many reviews of the set ended, with a verdict or a failure.
+    pub attempts: usize,
+    /// The attempts that failed before the last, with what they took.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub earlier_attempts: Vec<FailedAttempt>,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    /// From the start of the review to its verdict or failure.
+    /// From the start of the last attempt to its verdict or failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_ms: Option<i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -67,6 +78,16 @@ pub struct SetOutcome {
     /// The tool calls that failed, with why.
     #[serde(skip)]
     failed_calls: Vec<String>,
+}
+
+/// A review of a change set that failed before a later attempt or a newer set's verdict.
+#[derive(Debug, Serialize)]
+pub struct FailedAttempt {
+    pub error: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_ms: Option<i64>,
 }
 
 /// How often a model at one effort gave the expected verdict, and what a review took.
@@ -82,11 +103,16 @@ pub struct Accuracy {
     /// Sets whose verdict finds the expected contradiction but names a field that `dmp_field`
     /// does not accept.
     pub wrong_field: usize,
-    /// Sets without a verdict, since the review failed or never ended.
+    /// Sets without a verdict, since the last attempt failed or never ended.
     pub failed: usize,
-    /// The share of the sets with the expected verdict.
+    /// Sets that failed and then needed no verdict of their own, as a newer set's covers them.
+    pub settled: usize,
+    /// The share of the sets with the expected verdict, of those that a verdict could be expected
+    /// of, so all but the settled ones.
     pub accuracy: f64,
-    /// The means of the reviews that ended, with a verdict or a failure.
+    /// How many reviews of its sets ended, so more than `sets` when some went again.
+    pub attempts: usize,
+    /// The means of the last attempts that ended, with a verdict or a failure.
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub review_ms: u64,
@@ -113,6 +139,9 @@ impl SetOutcome {
             verdict: None,
             correct: None,
             review_failed: None,
+            settled_by: None,
+            attempts: 0,
+            earlier_attempts: Vec::new(),
             tokens_in: 0,
             tokens_out: 0,
             review_ms: None,
@@ -129,7 +158,10 @@ impl SetOutcome {
     fn add(&mut self, record: &Record) {
         match &record.event {
             Event::Changes { changes, .. } => self.changes = Some(changes.clone()),
-            Event::Reviewing { .. } => self.reviewing = Some(record.time),
+            Event::Reviewing { .. } => {
+                self.set_aside_failure();
+                self.reviewing = Some(record.time);
+            }
             Event::Trace {
                 trace:
                     Trace::Reply {
@@ -144,11 +176,17 @@ impl SetOutcome {
             }
             Event::Verdict { verdict, .. } => {
                 self.verdict = Some(verdict.clone());
+                self.attempts += 1;
                 self.review_ms = self.since_reviewing(record.time);
             }
             Event::ReviewFailed { error, .. } => {
                 self.review_failed = Some(error.clone());
+                self.attempts += 1;
                 self.review_ms = self.since_reviewing(record.time);
+            }
+            Event::Settled { by, .. } => {
+                self.set_aside_failure();
+                self.settled_by = Some(*by);
             }
             Event::Trace {
                 trace:
@@ -164,6 +202,18 @@ impl SetOutcome {
                     .push(format!("the tool call {name} failed: {error}"));
             }
             _ => {}
+        }
+    }
+
+    /// Moves what the last attempt came to among the earlier ones, since something came after it.
+    fn set_aside_failure(&mut self) {
+        if let Some(error) = self.review_failed.take() {
+            self.earlier_attempts.push(FailedAttempt {
+                error,
+                tokens_in: mem::take(&mut self.tokens_in),
+                tokens_out: mem::take(&mut self.tokens_out),
+                review_ms: self.review_ms.take(),
+            });
         }
     }
 
@@ -184,7 +234,8 @@ impl SetOutcome {
             self.problems.append(&mut self.failed_calls);
         }
         let expected = &self.expected;
-        let decided = self.verdict.is_some() || self.review_failed.is_some();
+        let decided =
+            self.verdict.is_some() || self.review_failed.is_some() || self.settled_by.is_some();
         match (&expected.changes, &self.changes) {
             (Some(want), Some(got)) if !same_changes(want, got) => {
                 self.problems.push(format!(
@@ -196,8 +247,26 @@ impl SetOutcome {
             (_, None) if finished || decided => self.problems.push("no change set".to_string()),
             _ => {}
         }
-        if fake && let Some(error) = &self.review_failed {
-            self.problems.push(format!("the review failed: {error}"));
+        if fake {
+            let failed = self.earlier_attempts.len();
+            if failed != expected.fake_failures {
+                let errors: Vec<&str> = self
+                    .earlier_attempts
+                    .iter()
+                    .map(|attempt| attempt.error.as_str())
+                    .collect();
+                self.problems.push(format!(
+                    "expected {} attempts to fail first, but saw {failed}: {errors:?}",
+                    expected.fake_failures
+                ));
+            }
+            if let Some(error) = &self.review_failed {
+                self.problems.push(format!("the review failed: {error}"));
+            }
+            if let Some(by) = self.settled_by {
+                self.problems
+                    .push(format!("the verdict on change set {by} settled it"));
+            }
         }
         let Some(verdict) = &self.verdict else {
             if finished && !decided && self.changes.is_some() {
@@ -230,7 +299,8 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ru
             | Event::Reviewing { set }
             | Event::Trace { set, .. }
             | Event::Verdict { set, .. }
-            | Event::ReviewFailed { set, .. } => *set,
+            | Event::ReviewFailed { set, .. }
+            | Event::Settled { set, .. } => *set,
             Event::WatchErrors { errors, .. } => {
                 problems.push(format!("watching failed: {}", errors.join("; ")));
                 continue;
@@ -300,6 +370,8 @@ pub fn accuracy(outcomes: &[RunOutcome]) -> Vec<Accuracy> {
             let wrong_field = count(|set, verdict| {
                 set.correct == Some(false) && verdict.contradicts == set.expected.contradicts
             });
+            let settled = sets.iter().filter(|set| set.settled_by.is_some()).count();
+            let judged = sets.len() - settled;
             let reviewed: Vec<&SetOutcome> = sets
                 .iter()
                 .copied()
@@ -312,12 +384,14 @@ pub fn accuracy(outcomes: &[RunOutcome]) -> Vec<Accuracy> {
                 correct,
                 wrong,
                 wrong_field,
-                failed: sets.len() - correct - wrong - wrong_field,
-                accuracy: if sets.is_empty() {
+                failed: judged - correct - wrong - wrong_field,
+                settled,
+                accuracy: if judged == 0 {
                     0.0
                 } else {
-                    correct as f64 / sets.len() as f64
+                    correct as f64 / judged as f64
                 },
+                attempts: sets.iter().map(|set| set.attempts).sum(),
                 tokens_in: mean(reviewed.iter().map(|set| set.tokens_in)),
                 tokens_out: mean(reviewed.iter().map(|set| set.tokens_out)),
                 review_ms: mean(
@@ -377,7 +451,7 @@ fn describe(contradicts: bool, fields: &[String]) -> String {
 mod tests {
     use fair_witness_core::model::ModelChoice;
     use fair_witness_core::project::AiConfig;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::fixtures::{expected, record, review, review_failed, scenario, verdict};
@@ -582,13 +656,177 @@ mod tests {
                 wrong: 0,
                 wrong_field: 1,
                 failed: 1,
+                settled: 0,
                 accuracy: 4.0 / 6.0,
+                attempts: 6,
                 // (100 + 300 + 50 + 3 * 100) / 6 and (10 + 30 + 5 + 3 * 10) / 6, rounded
                 tokens_in: 125,
                 tokens_out: 13,
                 // (2 + 4 + 1 + 3 * 1) seconds / 6
                 review_ms: 1667,
             }]
+        );
+    }
+
+    fn real_model() -> Model {
+        Model::Real(AiConfig {
+            url: "https://api.example.org/v1".to_string(),
+            choice: ModelChoice {
+                model: "large".to_string(),
+                effort: Effort::default(),
+            },
+        })
+    }
+
+    /// `failed`, as a review of `set` ends when it goes again.
+    fn goes_again(mut failed: Value, wait_ms: u64) -> Value {
+        failed["attempt"] = json!(1);
+        failed["retry_in_ms"] = json!(wait_ms);
+        failed
+    }
+
+    /// A second review of `set` from second `start` to `end`, without the change set.
+    fn again(set: usize, start: u32, end: u32, tokens: (u32, u32), last: Value) -> Vec<Record> {
+        review(set, start, end, tokens, last).split_off(1)
+    }
+
+    #[test]
+    fn counts_the_last_outcome_of_a_set_and_shows_its_attempts_apart() {
+        let scenario = scenario(
+            "patients",
+            vec![
+                expected(None, false, None),
+                expected(None, false, None),
+                expected(None, false, None),
+            ],
+        );
+        let down = goes_again(review_failed("down"), 60_000);
+        // The first set fails and then gets its verdict, the second fails twice, and the third
+        // gets its verdict at once.
+        let mut records = review(1, 0, 10, (500, 50), down.clone());
+        records.extend(again(1, 20, 22, (100, 10), verdict(false, None)));
+        records.extend(review(2, 30, 31, (0, 0), down));
+        records.extend(again(2, 40, 41, (300, 30), review_failed("still down")));
+        records.extend(review(3, 50, 53, (100, 10), verdict(false, None)));
+
+        let outcome = judge(
+            &scenario,
+            &real_model(),
+            1,
+            &Ran {
+                records,
+                error: None,
+            },
+        );
+
+        assert!(outcome.passed, "{outcome:?}");
+        let first = &outcome.sets[0];
+        assert_eq!(first.correct, Some(true));
+        assert_eq!(first.review_failed, None);
+        assert_eq!(first.attempts, 2);
+        // What counts is the attempt that gave the verdict.
+        assert_eq!((first.tokens_in, first.tokens_out), (100, 10));
+        assert_eq!(first.review_ms, Some(2000));
+        assert_eq!(
+            serde_json::to_value(&first.earlier_attempts).unwrap(),
+            json!([{ "error": "down", "tokens_in": 500, "tokens_out": 50, "review_ms": 10000 }])
+        );
+        let second = &outcome.sets[1];
+        assert_eq!(second.review_failed.as_deref(), Some("still down"));
+        assert_eq!(second.attempts, 2);
+        assert_eq!(second.earlier_attempts.len(), 1);
+        assert_eq!(
+            accuracy(&[outcome]),
+            [Accuracy {
+                model: "large".to_string(),
+                effort: Effort::default(),
+                sets: 3,
+                correct: 2,
+                wrong: 0,
+                wrong_field: 0,
+                failed: 1,
+                settled: 0,
+                accuracy: 2.0 / 3.0,
+                attempts: 5,
+                // (100 + 300 + 100) / 3 and (10 + 30 + 10) / 3, rounded
+                tokens_in: 167,
+                tokens_out: 17,
+                // (2 + 1 + 3) seconds / 3
+                review_ms: 2000,
+            }]
+        );
+    }
+
+    #[test]
+    fn counts_a_settled_set_neither_as_failed_nor_as_wrong() {
+        let scenario = scenario(
+            "patients",
+            vec![expected(None, false, None), expected(None, false, None)],
+        );
+        let mut records = review(
+            1,
+            0,
+            10,
+            (500, 50),
+            goes_again(review_failed("down"), 60_000),
+        );
+        records.extend(review(2, 20, 22, (100, 10), verdict(false, None)));
+        records.push(record(json!({ "event": "settled", "set": 1, "by": 2 })));
+
+        let outcome = judge(
+            &scenario,
+            &real_model(),
+            1,
+            &Ran {
+                records,
+                error: None,
+            },
+        );
+
+        assert!(outcome.passed, "{outcome:?}");
+        let first = &outcome.sets[0];
+        assert_eq!(first.settled_by, Some(2));
+        assert_eq!(first.review_failed, None);
+        assert_eq!(first.attempts, 1);
+        assert_eq!(first.earlier_attempts.len(), 1);
+        let totals = &accuracy(std::slice::from_ref(&outcome))[0];
+        assert_eq!(
+            (
+                totals.correct,
+                totals.failed,
+                totals.settled,
+                totals.accuracy
+            ),
+            (1, 0, 1, 1.0)
+        );
+    }
+
+    #[test]
+    fn takes_a_failure_the_fake_model_did_not_script_as_a_problem() {
+        let mut scripted = expected(None, false, None);
+        scripted.fake_failures = 1;
+        let scenario = scenario("patients", vec![scripted, expected(None, false, None)]);
+        let failed = review_failed("Too many requests.");
+        let mut records = review(1, 0, 1, (0, 0), failed.clone());
+        records.extend(again(1, 1, 2, (1, 1), verdict(false, None)));
+        records.extend(review(2, 2, 3, (0, 0), failed));
+        records.extend(again(2, 3, 4, (1, 1), verdict(false, None)));
+
+        let outcome = judge(
+            &scenario,
+            &Model::Fake,
+            1,
+            &Ran {
+                records,
+                error: None,
+            },
+        );
+
+        assert!(!outcome.passed);
+        assert_eq!(outcome.sets[0].problems, Vec::<String>::new());
+        assert_eq!(
+            outcome.sets[1].problems,
+            ["expected 0 attempts to fail first, but saw 1: [\"Too many requests.\"]"]
         );
     }
 }

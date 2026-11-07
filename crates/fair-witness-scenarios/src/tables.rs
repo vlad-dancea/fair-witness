@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::report::{Accuracy, Refused, RunOutcome};
+use crate::report::{Accuracy, Refused, RunOutcome, SetOutcome};
 
 /// Names the run of a scenario. `one_each` says that each scenario ran once.
 pub fn label(outcome: &RunOutcome, fake: bool, one_each: bool) -> String {
@@ -58,7 +58,9 @@ pub fn accuracy(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
             "wrong",
             "wrong field",
             "failed",
+            "settled",
             "accuracy",
+            "attempts",
             "tokens in",
             "tokens out",
             "seconds",
@@ -75,16 +77,33 @@ pub fn accuracy(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
             row.wrong.to_string(),
             row.wrong_field.to_string(),
             row.failed.to_string(),
+            row.settled.to_string(),
             format!("{:.0}%", row.accuracy * 100.0),
+            row.attempts.to_string(),
             row.tokens_in.to_string(),
             row.tokens_out.to_string(),
             format!("{:.1}", row.review_ms as f64 / 1000.0),
         ]);
     }
     let mut text = columns(&rows, 2);
-    text.push_str("Tokens and seconds are means per review.\n\n");
+    text.push_str(
+        "Attempts are reviews that ended, more than the sets when some went again. A set's last \
+         attempt counts, and tokens and seconds are its means per set.\n\n",
+    );
     text.push_str(&sets(outcomes, accuracy));
-    text.push_str(&failed_reviews(outcomes));
+    text.push_str(&failed_reviews(outcomes, "Failed reviews", |set| {
+        set.review_failed.iter().map(String::as_str).collect()
+    }));
+    text.push_str(&failed_reviews(
+        outcomes,
+        "Attempts that failed before a later outcome",
+        |set| {
+            set.earlier_attempts
+                .iter()
+                .map(|attempt| attempt.error.as_str())
+                .collect()
+        },
+    ));
     text
 }
 
@@ -152,7 +171,8 @@ fn sets(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
                 sets.len() - 1
             });
             let cell = &mut sets[row].cells[column];
-            cell.runs += 1;
+            // As in the accuracy, a settled set was not judged.
+            cell.runs += usize::from(set.settled_by.is_none());
             cell.right += usize::from(set.correct == Some(true));
             if set.verdict.is_some() || set.review_failed.is_some() {
                 cell.reviewed += 1;
@@ -180,9 +200,13 @@ fn sets(outcomes: &[RunOutcome], accuracy: &[Accuracy]) -> String {
         }
         columns(&rows, 1)
     };
-    let mut text = table(|cell| format!("{} of {}", cell.right, cell.runs));
+    let mut text = table(|cell| match cell.runs {
+        0 => "-".to_string(),
+        runs => format!("{} of {runs}", cell.right),
+    });
     text.push_str(
-        "\nTokens in, tokens out and seconds of each change set, as means per review:\n\n",
+        "\nTokens in, tokens out and seconds of the last attempt at each change set, as means per \
+         run:\n\n",
     );
     text.push_str(&table(SetCell::costs));
     text
@@ -197,16 +221,17 @@ struct Failed<'a> {
     alike: bool,
 }
 
-/// Why reviews failed, once for each model, effort and kind of error, such as a wrong API key.
-fn failed_reviews(outcomes: &[RunOutcome]) -> String {
+/// Why reviews failed, as `errors` gives it for each set under `title`, once for each model, effort
+/// and kind of error, such as a wrong API key.
+fn failed_reviews<'a>(
+    outcomes: &'a [RunOutcome],
+    title: &str,
+    errors: fn(&'a SetOutcome) -> Vec<&'a str>,
+) -> String {
     let mut failed: Vec<Failed> = Vec::new();
     for outcome in outcomes {
         let model = format!("{} {}", outcome.model, outcome.effort.name());
-        for error in outcome
-            .sets
-            .iter()
-            .filter_map(|set| set.review_failed.as_deref())
-        {
+        for error in outcome.sets.iter().flat_map(errors) {
             let shape = without_numbers(error);
             match failed
                 .iter_mut()
@@ -228,7 +253,7 @@ fn failed_reviews(outcomes: &[RunOutcome]) -> String {
     }
     let mut text = String::new();
     if !failed.is_empty() {
-        text.push_str("\nFailed reviews:\n");
+        let _ = writeln!(text, "\n{title}:");
     }
     for kind in failed {
         let times = match (kind.times, kind.alike) {
@@ -332,9 +357,10 @@ fn indent(problem: &str) -> String {
 mod tests {
     use fair_witness_core::model::ModelChoice;
     use fair_witness_core::project::AiConfig;
+    use serde_json::json;
 
     use super::*;
-    use crate::fixtures::{expected, review, review_failed, scenario, verdict};
+    use crate::fixtures::{expected, record, review, review_failed, scenario, verdict};
     use crate::report::{self, Refused, judge};
     use crate::run::{Model, Ran};
 
@@ -405,17 +431,17 @@ mod tests {
         assert_eq!(
             accuracy(&outcomes, &report::accuracy(&outcomes)),
             "\
-model  effort   sets  right  wrong  wrong field  failed  accuracy  tokens in  tokens out  seconds
-large  high        3      2      1            0       0       67%       1100          53      3.0
-small  default     3      0      0            1       2        0%        800          10      1.0
-Tokens and seconds are means per review.
+model  effort   sets  right  wrong  wrong field  failed  settled  accuracy  attempts  tokens in  tokens out  seconds
+large  high        3      2      1            0       0        0       67%         3       1100          53      3.0
+small  default     3      0      0            1       2        0        0%         3        800          10      1.0
+Attempts are reviews that ended, more than the sets when some went again. A set's last attempt counts, and tokens and seconds are its means per set.
 
 scenario       set  large high  small default
 notes            1      0 of 1         0 of 1
 clinic-export    1      1 of 1         0 of 1
 clinic-export    2      1 of 1         0 of 1
 
-Tokens in, tokens out and seconds of each change set, as means per review:
+Tokens in, tokens out and seconds of the last attempt at each change set, as means per run:
 
 scenario       set       large high   small default
 notes            1   900 / 40 / 3.0  800 / 10 / 1.0
@@ -425,6 +451,109 @@ clinic-export    2  1400 / 70 / 4.0  800 / 10 / 1.0
 Failed reviews:
   small default, 2 times, such as: 429, retry after 3s
 "
+        );
+    }
+
+    #[test]
+    fn lists_the_attempts_that_failed_before_a_set_got_its_verdict_apart_from_failed_reviews() {
+        let notes = scenario(
+            "notes",
+            vec![expected(None, false, None), expected(None, false, None)],
+        );
+        let large = Model::Real(AiConfig {
+            url: "https://api.example.org/v1".to_string(),
+            choice: ModelChoice {
+                model: "large".to_string(),
+                effort: "high".parse().unwrap(),
+            },
+        });
+        let mut records = review(1, 0, 1, (0, 0), review_failed("429, retry after 3600s"));
+        records.extend(review(1, 2, 3, (800, 10), verdict(false, None)).split_off(1));
+        records.extend(review(2, 3, 4, (0, 0), review_failed("401, wrong key")));
+        let ran = Ran {
+            records,
+            error: None,
+        };
+        let outcomes = [judge(&notes, &large, 1, &ran)];
+
+        assert_eq!(
+            accuracy(&outcomes, &report::accuracy(&outcomes)),
+            "\
+model  effort  sets  right  wrong  wrong field  failed  settled  accuracy  attempts  tokens in  tokens out  seconds
+large  high       2      1      0            0       1        0       50%         3        400           5      1.0
+Attempts are reviews that ended, more than the sets when some went again. A set's last attempt counts, and tokens and seconds are its means per set.
+
+scenario  set  large high
+notes       1      1 of 1
+notes       2      0 of 1
+
+Tokens in, tokens out and seconds of the last attempt at each change set, as means per run:
+
+scenario  set      large high
+notes       1  800 / 10 / 1.0
+notes       2     0 / 0 / 1.0
+
+Failed reviews:
+  large high, once: 401, wrong key
+
+Attempts that failed before a later outcome:
+  large high, once: 429, retry after 3600s
+"
+        );
+    }
+
+    #[test]
+    fn leaves_a_settled_set_out_of_how_often_a_set_got_it_right() {
+        let notes = scenario(
+            "notes",
+            vec![expected(None, false, None), expected(None, false, None)],
+        );
+        let large = Model::Real(AiConfig {
+            url: "https://api.example.org/v1".to_string(),
+            choice: ModelChoice {
+                model: "large".to_string(),
+                effort: "high".parse().unwrap(),
+            },
+        });
+        let settled = {
+            let mut records = review(1, 0, 1, (0, 0), review_failed("down"));
+            records.extend(review(2, 1, 2, (1, 1), verdict(false, None)));
+            records.push(record(json!({ "event": "settled", "set": 1, "by": 2 })));
+            Ran {
+                records,
+                error: None,
+            }
+        };
+        let both = {
+            let mut records = review(1, 0, 1, (1, 1), verdict(false, None));
+            records.extend(review(2, 1, 2, (1, 1), verdict(false, None)));
+            Ran {
+                records,
+                error: None,
+            }
+        };
+        let once = [judge(&notes, &large, 1, &settled)];
+        let twice = [
+            judge(&notes, &large, 1, &settled),
+            judge(&notes, &large, 2, &both),
+        ];
+
+        let rows = |outcomes: &[RunOutcome]| -> Vec<String> {
+            sets(outcomes, &report::accuracy(outcomes))
+                .lines()
+                .skip(1)
+                .take(2)
+                .map(str::to_string)
+                .collect()
+        };
+
+        assert_eq!(
+            rows(&once),
+            ["notes       1           -", "notes       2      1 of 1"]
+        );
+        assert_eq!(
+            rows(&twice),
+            ["notes       1      1 of 1", "notes       2      2 of 2"]
         );
     }
 

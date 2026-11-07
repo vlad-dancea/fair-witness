@@ -10,12 +10,13 @@ use genai::chat::{
 };
 use reqwest::StatusCode;
 use serde_json::json;
+use tokio::sync::Notify;
 
 use super::prompt::{self, SYSTEM_PROMPT};
 use super::provider::{
     asks_to_allow_effort, blip, openai_compatible, refused, timed_out, why_failed,
 };
-use super::steps::{Input, Step, StepFuture, StepOutcome};
+use super::steps::{Input, Refused, Step, StepFuture, StepOutcome};
 use super::tools::Tools;
 use super::{Trace, Verdict};
 use crate::model::{Effort, ModelChoice};
@@ -53,6 +54,7 @@ const MAX_ANSWER: usize = 1_000;
 pub struct ModelStep {
     client: Client,
     choice: Mutex<ModelChoice>,
+    choice_changed: Arc<Notify>,
     /// The models the API asked to send `allowed_openai_params` with an effort for. LiteLLM
     /// asks for each model it does not know to take an effort, and the field would make it
     /// pass an effort on raw to one it does know, such as Anthropic's, which refuses it.
@@ -92,6 +94,7 @@ impl ModelStep {
         Ok(Self {
             client: openai_compatible(&config.url, api_key.clone(), request)?,
             choice: Mutex::new(config.choice.clone()),
+            choice_changed: Arc::default(),
             allowing_effort: Mutex::default(),
             api_key,
             request_timeout: request,
@@ -108,6 +111,13 @@ impl ModelStep {
 
     pub fn set_choice(&self, choice: ModelChoice) {
         *self.choice.lock().unwrap_or_else(PoisonError::into_inner) = choice;
+        self.choice_changed.notify_one();
+    }
+
+    /// Notified each time a model and effort are chosen, also the same ones again, which is the
+    /// one way to say that a refusal may be over.
+    pub fn choice_changed(&self) -> Arc<Notify> {
+        self.choice_changed.clone()
     }
 
     pub async fn run(&self, input: &Input<'_>, trace: &(dyn Fn(Trace) + Sync)) -> Result<Verdict> {
@@ -340,7 +350,11 @@ impl ModelStep {
                 reasks += 1;
                 continue;
             }
-            return Err(anyhow!(why).context(failed));
+            let cause = match refused(&e) {
+                Some(_) => anyhow::Error::new(Refused(why)),
+                None => anyhow!(why),
+            };
+            return Err(cause.context(failed));
         }
     }
 
@@ -450,7 +464,7 @@ fn definitions() -> Vec<Tool> {
 }
 
 /// `duration` as a message says it, in minutes when it is a whole number of them.
-fn spoken(duration: Duration) -> String {
+pub fn spoken(duration: Duration) -> String {
     match duration.as_secs() {
         seconds if seconds >= 120 && seconds % 60 == 0 => format!("{} minutes", seconds / 60),
         seconds => format!("{seconds} s"),
@@ -1104,6 +1118,7 @@ mod tests {
 
             let why = format!("the API answered {status}: {message}");
             assert_eq!(format!("{e:#}"), format!("the model test failed: {why}"));
+            assert!(e.downcast_ref::<Refused>().is_some(), "{e:#}");
             assert_eq!(server.join().unwrap().len(), 1);
             let traces = traces.into_inner().unwrap();
             assert_eq!(
@@ -1422,6 +1437,7 @@ mod tests {
                      fair-witness waits (60 s)"
                 )
             );
+            assert!(e.downcast_ref::<Refused>().is_none(), "{e:#}");
             assert_eq!(server.join().unwrap().len(), 1);
         }
     }

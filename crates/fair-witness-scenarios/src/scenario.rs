@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fair_witness_core::review::Verdict;
-use fair_witness_core::testing::tool_call;
+use fair_witness_core::testing::{Reply, too_many_requests, tool_call};
 use fair_witness_core::watcher::Change;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -73,6 +73,9 @@ pub struct Expected {
     /// The tools the fake model calls before it hands in this verdict.
     #[serde(default, skip_serializing)]
     pub fake_tool_calls: Vec<ToolCall>,
+    /// How many reviews of this set the fake model fails first, as with a daily quota.
+    #[serde(default, skip_serializing)]
+    pub fake_failures: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -245,11 +248,18 @@ impl Scenario {
 
     /// What the fake model answers, one reply per request: the tool calls of each set, then
     /// its expected verdict with the first of its fields.
-    pub fn fake_replies(&self) -> Vec<Value> {
-        let mut replies = Vec::new();
+    pub fn fake_replies(&self) -> Vec<Reply> {
+        let mut replies: Vec<Reply> = Vec::new();
         for set in &self.sets {
+            for _ in 0..set.fake_failures {
+                // Longer than fair-witness waits, so that the review fails at once.
+                replies.push(too_many_requests(
+                    Some("86400"),
+                    "The daily quota of this model is used up.",
+                ));
+            }
             for call in &set.fake_tool_calls {
-                replies.push(tool_call(&call.tool, call.arguments.clone()));
+                replies.push(tool_call(&call.tool, call.arguments.clone()).into());
             }
             let mut verdict = json!({
                 "contradicts": set.contradicts,
@@ -258,7 +268,7 @@ impl Scenario {
             if let Some(field) = set.dmp_field.first() {
                 verdict["dmp_field"] = json!(field);
             }
-            replies.push(tool_call("report_verdict", verdict));
+            replies.push(tool_call("report_verdict", verdict).into());
         }
         replies
     }
@@ -296,8 +306,14 @@ mod tests {
             "#,
         );
 
+        let replies: Vec<Value> = loaded
+            .unwrap()
+            .fake_replies()
+            .iter()
+            .map(|reply| serde_json::from_str(reply.body()).unwrap())
+            .collect();
         assert_eq!(
-            loaded.unwrap().fake_replies(),
+            replies,
             [
                 tool_call(
                     "report_verdict",
@@ -317,6 +333,28 @@ mod tests {
     }
 
     #[test]
+    fn has_the_fake_model_fail_a_set_before_its_verdict_as_often_as_it_says() {
+        let (_dir, loaded) = scenario(
+            r#"
+            description = "The API is out of its daily quota at first."
+
+            [[set]]
+            contradicts = false
+            explanation = "Notes are not data."
+            fake_failures = 2
+            "#,
+        );
+
+        let replies = loaded.unwrap().fake_replies();
+
+        assert_eq!(replies.len(), 3);
+        for failure in &replies[..2] {
+            assert!(failure.body().contains("daily quota"), "{}", failure.body());
+        }
+        assert!(replies[2].body().contains("report_verdict"));
+    }
+
+    #[test]
     fn accepts_the_expected_fields_and_the_fields_inside_them() {
         let expected = Expected {
             changes: None,
@@ -327,6 +365,7 @@ mod tests {
             ],
             explanation: "Why.".to_string(),
             fake_tool_calls: Vec::new(),
+            fake_failures: 0,
         };
         let accepts = |contradicts: bool, field: Option<&str>| {
             expected.accepts(&Verdict {

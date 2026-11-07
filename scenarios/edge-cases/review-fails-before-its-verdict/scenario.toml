@@ -1,0 +1,12 @@
+description = "The API is out of its daily quota when a researcher adds a file of measurements, so its review fails twice before the change set gets its verdict under its own number. The next change set then goes through as usual."
+
+[[set]]
+changes = [{ created = "campaign-2026-05.csv" }]
+contradicts = false
+explanation = "The DMP keeps the soil measurements as CSV."
+fake_failures = 2
+
+[[set]]
+changes = [{ created = "notes.txt" }]
+contradicts = false
+explanation = "A note about the field work is not research data, so the DMP says nothing about it."

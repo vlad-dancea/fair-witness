@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self as terminal, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use fair_witness_core::model::ModelChoice;
+use fair_witness_core::review::spoken;
 use fair_witness_core::session::{Event, Record};
 use fair_witness_core::watcher::{self, Kind, Listed};
 use futures::StreamExt;
@@ -34,6 +35,14 @@ const MAX_LINES: usize = 1_000;
 pub enum Update {
     Session(Record),
     NotifyFailed(String),
+}
+
+/// What comes after a review that failed, to follow a comma, given the event's `retry_in_ms`.
+pub fn next_attempt(retry_in_ms: Option<u64>) -> String {
+    match retry_in_ms {
+        Some(wait) => format!("trying again in {}", spoken(Duration::from_millis(wait))),
+        None => "no more attempts in this run unless you pick another model (m)".to_string(),
+    }
 }
 
 /// A line in the changes pane; a changed file carries the number of its
@@ -325,7 +334,11 @@ impl Screen {
                     });
                 }
             }
-            Event::Reviewing { set } => self.reviewing = Some((set, Instant::now())),
+            // What the last attempt came to, which is about to change, gives way to the spinner.
+            Event::Reviewing { set } => {
+                self.drop_verdict(set);
+                self.reviewing = Some((set, Instant::now()));
+            }
             Event::Trace { .. } => {}
             Event::Verdict { set, verdict } if verdict.contradicts => {
                 let field = verdict
@@ -347,9 +360,22 @@ impl Screen {
                     Span::raw(format!(" {}", verdict.explanation)),
                 ],
             ),
-            Event::ReviewFailed { set, error } => {
-                self.add_verdict(set, vec![format!("review failed: {error}").red()]);
+            Event::ReviewFailed {
+                set,
+                error,
+                retry_in_ms,
+                ..
+            } => {
+                let next = next_attempt(retry_in_ms);
+                self.add_verdict(set, vec![format!("review failed, {next}: {error}").red()]);
             }
+            Event::Settled { set, by } => self.add_verdict(
+                set,
+                vec![
+                    format!("covered by the verdict on #{by}, so not checked on its own.")
+                        .add_modifier(Modifier::DIM),
+                ],
+            ),
             Event::WatchErrors { errors, .. } => {
                 for e in errors {
                     self.push_line(Line::from(format!("watch error: {e}").red()).into());
@@ -374,12 +400,19 @@ impl Screen {
     }
 
     /// Puts the verdict of `set` under the set's changes, above the sets that came while it
-    /// was reviewed.
+    /// was reviewed, in place of what an earlier attempt came to.
     fn add_verdict(&mut self, set: usize, spans: Vec<Span<'static>>) {
         self.reviewing = None;
+        self.drop_verdict(set);
         self.make_room();
         let end = self.end_of(set);
         self.changes.insert(end, ChangesLine::verdict(set, spans));
+    }
+
+    fn drop_verdict(&mut self, set: usize) {
+        self.changes
+            .retain(|line| !line.verdict || line.set != Some(set));
+        self.rendered = None;
     }
 
     /// Drops the oldest line when the pane is full, before a line is added, so that the new one
@@ -764,6 +797,8 @@ mod tests {
             Event::ReviewFailed {
                 set: 3,
                 error: "could not reach http://localhost:11434/v1/".to_string(),
+                attempt: 1,
+                retry_in_ms: Some(120_000),
             },
         ];
         let time = "2026-10-23T09:41:00Z".parse().unwrap();
@@ -1013,6 +1048,93 @@ mod tests {
                 "Older lines are no longer shown.",
                 " ↳ in line with the DMP: Results.",
                 "created: 3.csv                        #3",
+            ]
+        );
+    }
+
+    #[test]
+    fn shows_only_what_the_last_attempt_at_a_set_came_to() {
+        let mut screen = screen();
+        let time = "2026-10-23T09:41:00Z".parse().unwrap();
+        // The rows, with the spinner's frame and seconds left out.
+        let mut apply = |event| {
+            screen.apply(Update::Session(Record { time, event }));
+            screen
+                .changes_rows(80)
+                .iter()
+                .map(text)
+                .map(|row| match row.contains("checking against the DMP") {
+                    true => "spinner".to_string(),
+                    false => row,
+                })
+                .collect::<Vec<_>>()
+        };
+        let failed = |attempt, retry_in_ms| Event::ReviewFailed {
+            set: 1,
+            error: "the API is down".to_string(),
+            attempt,
+            retry_in_ms,
+        };
+        let created = format!("{:<78}#1", "created: results.csv");
+        let later = format!("{:<78}#2", "created: notes.txt");
+
+        apply(Event::Changes {
+            set: 1,
+            changes: vec![Change::Created("results.csv".into())],
+        });
+        apply(Event::Reviewing { set: 1 });
+        let waiting = apply(failed(1, Some(60_000)));
+        apply(Event::Changes {
+            set: 2,
+            changes: vec![Change::Created("notes.txt".into())],
+        });
+        apply(Event::Reviewing { set: 2 });
+        apply(Event::Verdict {
+            set: 2,
+            verdict: Verdict {
+                contradicts: false,
+                dmp_field: None,
+                explanation: "Notes.".to_string(),
+            },
+        });
+        let again = apply(Event::Reviewing { set: 1 });
+        let given_up = apply(failed(6, None));
+        let settled = apply(Event::Settled { set: 1, by: 2 });
+
+        assert_eq!(
+            waiting,
+            [
+                created.clone(),
+                " ↳ review failed, trying again in 60 s: the API is down".to_string(),
+            ]
+        );
+        assert_eq!(
+            again,
+            [
+                created.clone(),
+                "spinner".to_string(),
+                later.clone(),
+                " ↳ in line with the DMP: Notes.".to_string(),
+            ]
+        );
+        assert_eq!(
+            given_up,
+            [
+                created.clone(),
+                " ↳ review failed, no more attempts in this run unless you pick another model"
+                    .to_string(),
+                "   (m): the API is down".to_string(),
+                later.clone(),
+                " ↳ in line with the DMP: Notes.".to_string(),
+            ]
+        );
+        assert_eq!(
+            settled,
+            [
+                created,
+                " ↳ covered by the verdict on #2, so not checked on its own.".to_string(),
+                later,
+                " ↳ in line with the DMP: Notes.".to_string(),
             ]
         );
     }

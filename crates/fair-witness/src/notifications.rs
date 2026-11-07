@@ -2,10 +2,10 @@ use fair_witness_core::session::Event;
 use notify_rust::Notification;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::tui::app::Update;
+use crate::tui::app::{Update, next_attempt};
 
-/// Shows a desktop notification for a contradiction or a failed review, and tells the screen
-/// when that fails.
+/// Shows a desktop notification for a contradiction or a change set whose review failed, and tells
+/// the screen when that fails.
 pub fn show(event: &Event, updates: &UnboundedSender<Update>) {
     let Some((summary, body)) = content(event) else {
         return;
@@ -38,9 +38,18 @@ fn content(event: &Event) -> Option<(String, String)> {
                 verdict.explanation.clone(),
             ))
         }
-        // Notification daemons keep a history, so the rest of an error stays in the run's log.
-        Event::ReviewFailed { set, error } => Some((
-            format!("Could not check change set #{set}"),
+        // Only for its first attempt, so that one set gives one notification. Notification daemons
+        // keep a history, so the rest of an error stays in the run's log.
+        Event::ReviewFailed {
+            set,
+            error,
+            attempt: 1,
+            retry_in_ms,
+        } => Some((
+            format!(
+                "Could not check change set #{set}, {}",
+                next_attempt(*retry_in_ms)
+            ),
             error.lines().next().unwrap_or_default().to_string(),
         )),
         _ => None,
@@ -108,12 +117,16 @@ mod tests {
             Event::ReviewFailed {
                 set: 1,
                 error: format!("the model test failed: {why}"),
+                attempt: 1,
+                retry_in_ms: None,
             }
         );
         assert_eq!(
             content(&error),
             Some((
-                "Could not check change set #1".to_string(),
+                "Could not check change set #1, no more attempts in this run unless you pick another \
+                 model (m)"
+                    .to_string(),
                 format!("the model test failed: {why}"),
             ))
         );
@@ -124,14 +137,35 @@ mod tests {
         let failed = Event::ReviewFailed {
             set: 2,
             error: "the model test failed\nRequest Payload: {\"messages\": []}".to_string(),
+            attempt: 1,
+            retry_in_ms: Some(120_000),
         };
 
         assert_eq!(
             content(&failed),
             Some((
-                "Could not check change set #2".to_string(),
+                "Could not check change set #2, trying again in 2 minutes".to_string(),
                 "the model test failed".to_string(),
             ))
         );
+    }
+
+    #[test]
+    fn notifies_once_for_a_set_however_many_attempts_fail() {
+        let failed = |set, attempt, retry_in_ms| Event::ReviewFailed {
+            set,
+            error: "down".to_string(),
+            attempt,
+            retry_in_ms,
+        };
+        let waits = [Some(60_000), Some(120_000), Some(300_000), None];
+        let shown = |set| {
+            (1..)
+                .zip(waits)
+                .filter_map(|(attempt, wait)| content(&failed(set, attempt, wait)))
+                .count()
+        };
+
+        assert_eq!((shown(1), shown(2)), (1, 1));
     }
 }

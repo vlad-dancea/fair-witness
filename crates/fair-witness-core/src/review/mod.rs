@@ -9,11 +9,11 @@ use serde_json::Value;
 
 use crate::model::ModelChoice;
 
-pub use agent::{ChoiceCheck, ModelStep};
+pub use agent::{ChoiceCheck, ModelStep, spoken};
 pub use prompt::first_message;
 pub use provider::list_models;
 pub(crate) use provider::retry_after;
-pub use steps::{Input, Step, StepFuture, StepOutcome, run_steps};
+pub use steps::{Input, Refused, Step, StepFuture, StepOutcome, run_steps};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {

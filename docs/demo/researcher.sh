@@ -5,7 +5,8 @@
 set -euo pipefail
 
 reviews() {
-  cat .fair-witness/log/*-events.jsonl 2>/dev/null | grep -cE '"event":"(verdict|review_failed)"' || true
+  # A failed review that goes again is not the end of its change set.
+  cat .fair-witness/log/*-events.jsonl 2>/dev/null | grep -E '"event":"(verdict|settled|review_failed)"' | grep -vc '"retry_in_ms"' || true
 }
 
 # The events log appears when `run` starts.
