@@ -180,7 +180,9 @@ disagrees with it.
 
 - `fair-witness-core` holds what runs without a terminal. `session.rs` watches the folder,
   reviews each change set, keeps the sets whose reviews failed for further attempts and reports
-  all of it as a stream of `Event`s, each stamped with its time and written to the run's log. `review/` runs a review as a sequence of steps in `steps.rs`,
+  all of it as a stream of `Event`s, each stamped with its time and written to the run's log.
+  `state.rs` keeps what the folder looked like when its changes were last decided, which the next
+  run compares it with. `review/` runs a review as a sequence of steps in `steps.rs`,
   each of which decides or hands on to the next, and `mod.rs` holds the `Verdict` and `Trace`
   that every step shares. The model is the last step, `ModelStep`, with the tool loop in `agent.rs`, the system prompt in `prompt.md`, the
   first message in `prompt.rs`, the OpenAI-compatible client in `provider.rs` and the model's

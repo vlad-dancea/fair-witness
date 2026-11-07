@@ -309,8 +309,8 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ru
                 problems.push(format!("watching stopped: {error}"));
                 continue;
             }
-            // Only a folder that is set up gets a log.
-            Event::LogStopped { .. } => continue,
+            // Only a folder that is set up gets a log and a saved state.
+            Event::LogStopped { .. } | Event::StateProblem { .. } => continue,
         };
         match set.checked_sub(1).and_then(|index| sets.get_mut(index)) {
             Some(outcome) => outcome.add(record),

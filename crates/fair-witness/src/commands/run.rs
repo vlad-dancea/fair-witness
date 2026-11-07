@@ -11,6 +11,7 @@ use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
 use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
 use fair_witness_core::session::{Event, RETRY_WAITS, Record, Session};
+use fair_witness_core::state::StateKeeper;
 use fair_witness_core::watcher::DEBOUNCE;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -116,6 +117,8 @@ struct Start {
     records: UnboundedReceiver<Record>,
     status: Vec<String>,
     settings: Option<ModelSettings>,
+    /// What the folder looked like, in a folder that is set up.
+    state: Option<Arc<StateKeeper>>,
 }
 
 enum Source {
@@ -174,11 +177,15 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     let saved_dmp = config.as_ref().and_then(|config| config.damap.dmp_id);
 
     let mut session = Session::new(project.clone());
-    // A folder that never ran `setup` gets no log, since `run` writes nothing into it.
+    let mut state = None;
+    // A folder that never ran `setup` gets neither a log nor a saved state, since `run` writes
+    // nothing into it.
     if config.is_some() {
         let log = project.run_log()?;
         diagnostics::write_to(&log.diagnostics)?;
-        session = session.logging_to(log.events);
+        let keeper = Arc::new(StateKeeper::new(project.clone()));
+        session = session.logging_to(log.events).keeping_state(keeper.clone());
+        state = Some(keeper);
     }
     tracing::info!("watching {}", project.root().display());
     session = session.debounce(Duration::from_millis(args.debounce_ms));
@@ -247,6 +254,7 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
         records,
         status,
         settings,
+        state,
     })
 }
 
@@ -415,19 +423,35 @@ async fn show_events(start: Start) -> Result<()> {
         mut records,
         status,
         settings,
+        state,
     } = start;
+    let comes_back = state.is_some();
     let (updates, received) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(record) = records.recv().await {
-            notifications::show(&record.event, &updates);
+            notifications::show(&record.event, comes_back, &updates);
             if updates.send(Update::Session(record)).is_err() {
                 return;
             }
         }
     });
-    Screen::new(project.root(), status, settings)
+    let shown = Screen::new(project.root(), status, settings, comes_back)
         .run(received)
-        .await
+        .await;
+    save_state(state.as_deref());
+    shown
+}
+
+/// Saves what the folder looks like as `run` stops, here and not in a task of the session, since
+/// nothing waits for those tasks then. A state that could not be saved only reports a change again.
+fn save_state(state: Option<&StateKeeper>) {
+    if let Some(Err(e)) = state.map(StateKeeper::save) {
+        let warning = format!(
+            "Warning: could not save what the folder looks like, so the next start may report              changes again: {e:#}"
+        );
+        tracing::warn!("{warning}");
+        eprintln!("{warning}");
+    }
 }
 
 /// Resolves when stdin closes, on Ctrl+C or on SIGTERM.
@@ -457,13 +481,16 @@ async fn print_events(start: Start, stopped: impl Future<Output = ()>) -> Result
         project,
         records,
         status,
+        state,
         ..
     } = start;
     eprintln!("Watching {}", project.root().display());
     for line in &status {
         eprintln!("{line}");
     }
-    write_events(records, io::stdout(), stopped, READ_WITHIN).await
+    let written = write_events(records, io::stdout(), stopped, READ_WITHIN).await;
+    save_state(state.as_deref());
+    written
 }
 
 /// Writes each record as a line of JSON to `out` until `stopped` resolves, and fails when the

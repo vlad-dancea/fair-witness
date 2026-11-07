@@ -39,8 +39,14 @@ pub fn line(change: &Change, gone: &HashSet<PathBuf>) -> String {
 }
 
 /// What changed, with the paths that are `gone`, and what earlier steps of the review found,
-/// which the first message gives after the DMP.
-pub fn about_changes(changes: &[Change], gone: &HashSet<PathBuf>, found: &[String]) -> String {
+/// which the first message gives after the DMP. Changes made `since_last_run` can be days old, and
+/// the model is told that nobody saw them come.
+pub fn about_changes(
+    changes: &[Change],
+    since_last_run: bool,
+    gone: &HashSet<PathBuf>,
+    found: &[String],
+) -> String {
     let listed = watcher::summarize(changes);
     let lines: Vec<String> = listed
         .iter()
@@ -49,7 +55,12 @@ pub fn about_changes(changes: &[Change], gone: &HashSet<PathBuf>, found: &[Strin
             many => format!("{}: {}", many.kind().verb(), many.describe()),
         })
         .collect();
-    let mut prompt = format!("What changed in the project folder:\n{}", lines.join("\n"));
+    let heading = if since_last_run {
+        "What changed in the project folder since fair-witness last ran, while it was not watching"
+    } else {
+        "What changed in the project folder"
+    };
+    let mut prompt = format!("{heading}:\n{}", lines.join("\n"));
     if listed
         .iter()
         .any(|listed| matches!(listed, Listed::Many { .. }))
@@ -91,7 +102,7 @@ mod tests {
         ];
 
         assert_eq!(
-            about_changes(&changes, &gone(root.path(), &changes), &[]),
+            about_changes(&changes, false, &gone(root.path(), &changes), &[]),
             "What changed in the project folder:\n\
              created: two\\nlines.csv\n\
              renamed: raw\\r.csv -> data/\\u{1b}[2Jclean.csv\n\
@@ -115,12 +126,24 @@ mod tests {
         ];
 
         assert_eq!(
-            about_changes(&changes, &gone(root.path(), &changes), &[]),
+            about_changes(&changes, false, &gone(root.path(), &changes), &[]),
             "What changed in the project folder:\n\
              changed: notes.txt\n\
              changed: results.csv (gone since, so it can no longer be read)\n\
              created: data (gone since, so it can no longer be read)\n\
              renamed: draft.csv -> final.csv (gone since, so it can no longer be read)\n\
+             deleted: old.csv"
+        );
+    }
+
+    #[test]
+    fn says_when_the_changes_were_made_while_nothing_watched() {
+        let changes = [Change::Deleted("old.csv".into())];
+
+        assert_eq!(
+            about_changes(&changes, true, &HashSet::new(), &[]),
+            "What changed in the project folder since fair-witness last ran, while it was not \
+             watching:\n\
              deleted: old.csv"
         );
     }

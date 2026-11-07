@@ -248,6 +248,7 @@ fn prints_the_events_of_a_folder_that_was_never_set_up() {
     assert!(requests[1].1.to_string().contains("Soil samples"));
     assert_eq!(requests[1].1["reasoning_effort"], "ultra");
     assert_eq!(run.stop(), Some(0));
+    assert!(!project.join(".fair-witness").exists());
 }
 
 #[test]
@@ -559,6 +560,8 @@ fn exits_with_1_when_the_project_folder_is_deleted() {
     // Started outside the project folder, since Windows deletes no folder a process is in.
     let mut run = Run::start(parent.path(), &["--project", "project"]);
     run.stderr_until("Changes are not checked.");
+    // Saved in the background, and a folder that is being written to may not delete in one go.
+    until_state_is_saved(&root);
 
     std::fs::remove_dir_all(&root).unwrap();
 
@@ -984,6 +987,161 @@ fn stops_when_its_events_are_not_read_while_it_runs() {
     assert_eq!(
         run.stderr_until("error:").pop().unwrap(),
         "error: stopped, since stdout was not read fast enough for 30s"
+    );
+}
+
+/// A folder that is set up, with a DMP file to check its changes against, and the arguments of a
+/// run in it that asks the model at `endpoint`.
+fn set_up_folder_with_a_dmp() -> (tempfile::TempDir, String) {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    Project::new(root.path().to_path_buf())
+        .save_config(&Config {
+            damap: DamapConfig {
+                frontend_url: "https://damap.example.org".to_string(),
+                dmp_id: None,
+            },
+            ai: None,
+        })
+        .unwrap();
+    (root, dmp_file)
+}
+
+/// Waits for the first run in `root` to save the folder's state.
+fn until_state_is_saved(root: &Path) -> std::path::PathBuf {
+    let state = root.join(".fair-witness/state.json");
+    for _ in 0..PATIENCE.as_millis() / 20 {
+        if state.exists() {
+            return state;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no saved state in time");
+}
+
+fn in_line(explanation: &str) -> Reply {
+    tool_call(
+        "report_verdict",
+        json!({ "contradicts": false, "explanation": explanation }),
+    )
+    .into()
+}
+
+#[test]
+fn reports_what_changed_while_it_was_stopped_once_and_tells_the_model() {
+    let (root, dmp_file) = set_up_folder_with_a_dmp();
+    let root = root.path();
+    std::fs::write(root.join("edited.csv"), "old").unwrap();
+    std::fs::write(root.join("deleted.csv"), "old").unwrap();
+    let (endpoint, server) = fake_model(vec![in_line("All as planned."), in_line("Later too.")]);
+    let arguments = [
+        "--dmp-file",
+        &dmp_file,
+        "--ai-url",
+        &endpoint,
+        "--model",
+        "test",
+        "--skip-model-check",
+    ];
+
+    // The first run has nothing to compare with, and reports nothing.
+    let run = Run::start(root, &arguments);
+    let state = until_state_is_saved(root);
+    assert_eq!(run.stop(), Some(0));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&state).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert!(
+        std::fs::read_to_string(root.join(".fair-witness/.gitignore"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "state.json")
+    );
+
+    std::fs::write(root.join("created.csv"), "new").unwrap();
+    std::fs::write(root.join("edited.csv"), "edited").unwrap();
+    std::fs::remove_file(root.join("deleted.csv")).unwrap();
+    let run = Run::start(root, &arguments);
+    let events = run.events_until_verdict();
+    assert_eq!(run.stop(), Some(0));
+    assert_eq!(
+        events[0],
+        json!({
+            "event": "changes",
+            "set": 1,
+            "changes": [
+                { "deleted": "deleted.csv" },
+                { "created": "created.csv" },
+                { "changed": "edited.csv" }
+            ],
+            "since_last_run": true
+        })
+    );
+
+    // Its verdict moved the state, so the next start has nothing to report.
+    let run = Run::start(root, &arguments);
+    run.stderr_until("Comparing");
+    std::fs::write(root.join("later.csv"), "new").unwrap();
+    let events = run.events_until_verdict();
+    assert_eq!(run.stop(), Some(0));
+    assert_eq!(
+        events[0],
+        json!({ "event": "changes", "set": 1, "changes": [{ "created": "later.csv" }] })
+    );
+    let requests = server.join().unwrap();
+    let prompt = requests[0].1["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        prompt.contains("since fair-witness last ran, while it was not watching:"),
+        "{prompt}"
+    );
+    let prompt = requests[1].1["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        prompt.ends_with("in the project folder:\ncreated: later.csv"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn loses_nothing_when_it_is_killed() {
+    let (root, dmp_file) = set_up_folder_with_a_dmp();
+    let root = root.path();
+    let (endpoint, _server) = fake_model(vec![
+        in_line("Decided, but not saved yet."),
+        in_line("Decided again."),
+    ]);
+    let arguments = [
+        "--dmp-file",
+        &dmp_file,
+        "--ai-url",
+        &endpoint,
+        "--model",
+        "test",
+        "--skip-model-check",
+    ];
+    let mut run = Run::start(root, &arguments);
+    until_state_is_saved(root);
+    std::fs::write(root.join("reviewed.csv"), "a").unwrap();
+    run.events_until_verdict();
+    std::fs::write(root.join("not-reviewed.csv"), "b").unwrap();
+
+    // SIGKILL, where `run` can save nothing.
+    run.child.kill().unwrap();
+    run.child.wait().unwrap();
+
+    // The verdict came within the minute the state is not saved for, so it is reported again.
+    let run = Run::start(root, &arguments);
+    let events = run.events_until_verdict();
+    assert_eq!(run.stop(), Some(0));
+    assert_eq!(
+        events[0],
+        json!({
+            "event": "changes",
+            "set": 1,
+            "changes": [{ "created": "not-reviewed.csv" }, { "created": "reviewed.csv" }],
+            "since_last_run": true
+        })
     );
 }
 

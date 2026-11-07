@@ -100,6 +100,6 @@ pub enum Trace {
     Failed(String),
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !value
 }

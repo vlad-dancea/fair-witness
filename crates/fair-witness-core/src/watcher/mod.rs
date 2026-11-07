@@ -29,6 +29,8 @@ pub use filter::Filter;
 use set::{Held, LOOKS, extend_set, take_under, written_at};
 pub use summary::{Listed, summarize};
 
+use crate::state::FolderState;
+
 /// How long the folder stays quiet before its changes count as one change set, unless a
 /// caller asks for another time.
 pub const DEBOUNCE: Duration = Duration::from_secs(2);
@@ -111,6 +113,8 @@ pub struct FolderWatcher {
     /// place since.
     root_id: FileId,
     known: BTreeSet<PathBuf>,
+    /// How the paths in `known` looked when watching started, until `take_first_look`.
+    first_look: FolderState,
     /// What a batch left open about the known paths, until a later event or the time settles it.
     doubts: BTreeMap<PathBuf, Doubt>,
     filter: Filter,
@@ -132,7 +136,13 @@ impl FolderWatcher {
         let debouncer = start(root, debounce, sender.clone()).map_err(|e| not_started(e, root))?;
         let watched = Instant::now();
         let mut known = BTreeSet::new();
-        walk(root, &filter, &mut |path| {
+        let mut first_look = FolderState::default();
+        walk(root, &filter, &mut |path, metadata| {
+            if let Ok(relative) = path.strip_prefix(root)
+                && !relative.as_os_str().is_empty()
+            {
+                first_look.add(relative.to_path_buf(), metadata);
+            }
             known.insert(path);
         });
         Ok(Self {
@@ -145,6 +155,7 @@ impl FolderWatcher {
             root: root.to_path_buf(),
             root_id,
             known,
+            first_look,
             doubts: BTreeMap::new(),
             filter,
             pending: Vec::new(),
@@ -155,6 +166,18 @@ impl FolderWatcher {
     /// What the watcher leaves out as not research data.
     pub fn filter(&self) -> &Filter {
         &self.filter
+    }
+
+    /// The id of the project folder when watching started, from before its first look.
+    pub(crate) fn root_id(&self) -> FileId {
+        self.root_id
+    }
+
+    /// How the folder looked when watching started, once the watches were up, so that any later
+    /// change comes as an event. The walk that finds the known paths gives this without another
+    /// look at each path, which can take a while on a network drive.
+    pub fn take_first_look(&mut self) -> FolderState {
+        mem::take(&mut self.first_look)
     }
 
     fn apply(&mut self, event: &DebouncedEvent, changes: &mut Vec<Change>) {
@@ -206,7 +229,7 @@ impl FolderWatcher {
     }
 
     fn discover(&mut self, path: &Path, changes: &mut Vec<Change>) {
-        walk(path, &self.filter, &mut |found| {
+        walk(path, &self.filter, &mut |found, _| {
             if self.known.insert(found.clone()) {
                 changes.push(Change::Created(found));
             }
@@ -530,7 +553,7 @@ impl FolderWatcher {
     /// `rescan` says, and knows the paths it found from then on.
     fn look_again(&mut self, since: Instant) -> Vec<Change> {
         let mut found = BTreeSet::new();
-        walk(&self.root, &self.filter, &mut |path| {
+        walk(&self.root, &self.filter, &mut |path, _| {
             found.insert(path);
         });
         let mut changes = Vec::new();
@@ -791,7 +814,7 @@ fn children(paths: &BTreeSet<PathBuf>, folder: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether `error`, from looking at a path, says that nothing is there.
-fn missing(error: &io::Error) -> bool {
+pub(crate) fn missing(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
@@ -895,14 +918,14 @@ fn can_change(kind: &EventKind) -> bool {
         && (kind.is_create() || kind.is_remove() || kind.is_modify())
 }
 
-fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf)) {
+pub(crate) fn walk(path: &Path, filter: &Filter, visit: &mut impl FnMut(PathBuf, &fs::Metadata)) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };
     if filter.skips(path, metadata.is_dir()) {
         return;
     }
-    visit(path.to_path_buf());
+    visit(path.to_path_buf(), &metadata);
     if !metadata.is_dir() {
         return;
     }
