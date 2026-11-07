@@ -24,9 +24,12 @@ use crate::scenario::{DMP, FILES, Kind, SCRIPT, Scenario};
 /// Generous, so that a slow CI machine still makes it, while a scenario that hangs fails.
 const STARTUP: Duration = Duration::from_secs(20);
 const FAKE_REVIEW: Duration = Duration::from_secs(20);
-/// Generous, since a real model's review can take up to 12 replies at a high effort from a busy
-/// API, while a review that hangs still fails.
-const REAL_REVIEW: Duration = Duration::from_secs(10 * 60);
+/// Longer than the 10 minutes fair-witness gives a review, whose failure the run measures, while a
+/// review that hangs still fails.
+const REAL_REVIEW: Duration = Duration::from_secs(12 * 60);
+/// How long a failed set waits for its next attempt with the fake model, whose runs a real wait
+/// would slow down. With a real model the waits are as a researcher gets them.
+const FAKE_RETRY_WAIT: Duration = Duration::from_millis(100);
 /// Generous, since a realistic task such as a long copy or a script written over a few minutes
 /// runs at a researcher's pace, while a script that hangs still fails.
 const SCRIPT_STEP: Duration = Duration::from_secs(5 * 60);
@@ -272,6 +275,9 @@ fn witness_command(
             "--debounce-ms={}",
             settings.debounce_for(scenario).as_millis()
         ));
+    if *model == Model::Fake {
+        command.arg(format!("--retry-wait-ms={}", FAKE_RETRY_WAIT.as_millis()));
+    }
     match (model, &settings.api_key) {
         (Model::Real(_), Some(key)) => command.env(API_KEY, key),
         // A key meant for a real model must not go to the fake one.
@@ -438,16 +444,32 @@ impl Process {
         }
     }
 
-    /// Reads events until change set `set` has its verdict or its review failed, for at most
-    /// `review`.
+    /// Reads events until change set `set` has its last outcome: a verdict, a newer set's verdict
+    /// that settles it, or a failed review after which no attempt comes by itself. Each attempt
+    /// gets at most `review` to end, and the next starts after its wait.
     fn until_decided(
         &mut self,
         set: usize,
         review: Duration,
         records: &mut Vec<Record>,
     ) -> Result<()> {
-        let deadline = Instant::now() + review;
-        let mut changed = false;
+        // A newer set can get there first, while a failed one waits for its next attempt.
+        if records
+            .iter()
+            .any(|record| is_last_outcome(&record.event, set))
+        {
+            return Ok(());
+        }
+        // Its last attempt may have failed while the runner waited for an older set.
+        let given = records
+            .iter()
+            .rev()
+            .find_map(|record| patience(&record.event, set, review))
+            .unwrap_or(review);
+        let mut deadline = Instant::now() + given;
+        let mut changed = records
+            .iter()
+            .any(|record| matches!(record.event, Event::Changes { set: of, .. } if of == set));
         loop {
             let record = match self.next_record(deadline)? {
                 Some(record) => record,
@@ -457,14 +479,11 @@ impl Process {
                      within {review:?}"
                 ),
             };
-            let decided = match &record.event {
-                Event::Changes { set: of, .. } => {
-                    changed |= *of == set;
-                    false
-                }
-                Event::Verdict { set: of, .. } | Event::ReviewFailed { set: of, .. } => *of == set,
-                _ => false,
-            };
+            changed |= matches!(record.event, Event::Changes { set: of, .. } if of == set);
+            if let Some(given) = patience(&record.event, set, review) {
+                deadline = Instant::now() + given;
+            }
+            let decided = is_last_outcome(&record.event, set);
             records.push(record);
             if decided {
                 return Ok(());
@@ -560,6 +579,30 @@ impl Drop for Process {
     }
 }
 
+/// How long change set `set` may take to get further after `event`, if the event starts or ends an
+/// attempt at it: `review` for an attempt, after the wait for it.
+fn patience(event: &Event, set: usize, review: Duration) -> Option<Duration> {
+    match event {
+        Event::Reviewing { set: of } if *of == set => Some(review),
+        Event::ReviewFailed {
+            set: of,
+            retry_in_ms: Some(wait),
+            ..
+        } if *of == set => Some(Duration::from_millis(*wait) + review),
+        _ => None,
+    }
+}
+
+/// Whether `event` is the last that change set `set` gets by itself: a verdict, a newer set's
+/// verdict that settles it, or a failed review after which no attempt comes.
+fn is_last_outcome(event: &Event, set: usize) -> bool {
+    let failed_for_good = matches!(
+        event,
+        Event::ReviewFailed { set: of, retry_in_ms: None, .. } if *of == set
+    );
+    failed_for_good || event.decided_set() == Some(set)
+}
+
 /// The lines of `output`, with `secret` hidden in them.
 fn lines(output: impl Read + Send + 'static, secret: Option<String>) -> Receiver<String> {
     let (sender, receiver) = mpsc::channel();
@@ -629,6 +672,90 @@ mod tests {
             .map(|(_, value)| value.map(|value| value.to_str().unwrap()))
     }
 
+    /// A stand-in for fair-witness that prints `events`, and `later` after a pause, and stays
+    /// until it is stopped.
+    fn printing_with_pause(events: &[&str], later: &str) -> Process {
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg("printf '%s\n' \"${@:2}\"; sleep 0.3; printf '%s\n' \"$1\"; cat >/dev/null");
+        command.arg("--").arg(later).args(events);
+        Process::start("stand-in", &mut command, None).unwrap()
+    }
+
+    /// A stand-in for fair-witness that prints `events` and stays until it is stopped.
+    fn printing(events: &[&str]) -> Process {
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg("printf '%s\n' \"$@\"; cat >/dev/null");
+        command.arg("--").args(events);
+        Process::start("stand-in", &mut command, None).unwrap()
+    }
+
+    #[test]
+    fn waits_through_the_attempts_at_a_set_also_when_a_newer_set_gets_there_first() {
+        let mut stand_in = printing(&[
+            r#"{"time":"2026-11-07T10:00:00Z","event":"changes","set":1,"changes":[]}"#,
+            r#"{"time":"2026-11-07T10:00:00Z","event":"changes","set":2,"changes":[]}"#,
+            r#"{"time":"2026-11-07T10:00:00Z","event":"review_failed","set":1,"error":"down","attempt":1,"retry_in_ms":60000}"#,
+            r#"{"time":"2026-11-07T10:00:01Z","event":"verdict","set":2,"verdict":{"contradicts":false,"explanation":"Fine."}}"#,
+            r#"{"time":"2026-11-07T10:00:02Z","event":"verdict","set":1,"verdict":{"contradicts":false,"explanation":"Fine."}}"#,
+        ]);
+        let mut records = Vec::new();
+
+        stand_in
+            .until_decided(1, Duration::from_secs(5), &mut records)
+            .unwrap();
+        assert_eq!(records.len(), 5);
+        // Its verdict has come already.
+        stand_in
+            .until_decided(2, Duration::from_millis(1), &mut records)
+            .unwrap();
+        assert_eq!(records.len(), 5);
+    }
+
+    #[test]
+    fn counts_the_wait_of_a_set_that_failed_while_the_runner_waited_for_an_older_one() {
+        let mut stand_in = printing_with_pause(
+            &[
+                r#"{"time":"2026-11-07T10:00:00Z","event":"review_failed","set":2,"error":"down","attempt":1,"retry_in_ms":5000}"#,
+                r#"{"time":"2026-11-07T10:00:00Z","event":"verdict","set":1,"verdict":{"contradicts":false,"explanation":"Fine."}}"#,
+            ],
+            r#"{"time":"2026-11-07T10:00:01Z","event":"verdict","set":2,"verdict":{"contradicts":false,"explanation":"Fine."}}"#,
+        );
+        let mut records = Vec::new();
+
+        stand_in
+            .until_decided(1, Duration::from_secs(5), &mut records)
+            .unwrap();
+        // Well under the 300 milliseconds until the verdict, which the wait of set 2 makes up for.
+        stand_in
+            .until_decided(2, Duration::from_millis(1), &mut records)
+            .unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn stops_waiting_for_a_set_once_no_attempt_comes_by_itself() {
+        let mut stand_in = printing(&[
+            r#"{"time":"2026-11-07T10:00:00Z","event":"review_failed","set":1,"error":"down","attempt":1,"retry_in_ms":1}"#,
+            r#"{"time":"2026-11-07T10:00:00Z","event":"review_failed","set":1,"error":"down","attempt":2}"#,
+            r#"{"time":"2026-11-07T10:00:00Z","event":"review_failed","set":2,"error":"down","attempt":1,"retry_in_ms":1}"#,
+            r#"{"time":"2026-11-07T10:00:01Z","event":"settled","set":2,"by":3}"#,
+        ]);
+        let mut records = Vec::new();
+
+        stand_in
+            .until_decided(1, Duration::from_secs(5), &mut records)
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        stand_in
+            .until_decided(2, Duration::from_secs(5), &mut records)
+            .unwrap();
+        assert_eq!(records.len(), 4);
+    }
+
     #[test]
     fn hands_the_api_key_to_fair_witness_alone_and_only_for_a_real_model() {
         let settings = Settings {
@@ -684,6 +811,7 @@ mod tests {
         );
         assert_eq!(api_key(&witness), Some(Some("sk-secret")));
         assert_eq!(api_key(&fake), Some(None));
+        assert_eq!(fake.get_args().last().unwrap(), "--retry-wait-ms=100");
         assert_eq!(api_key(&script_command(&scenario(), folder)), Some(None));
     }
 

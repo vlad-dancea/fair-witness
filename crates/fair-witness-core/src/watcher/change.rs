@@ -74,6 +74,14 @@ impl Change {
         }
     }
 
+    /// Every path the change names: both names of a renamed path.
+    pub fn paths(&self) -> Vec<&Path> {
+        match self {
+            Change::Created(path) | Change::Changed(path) | Change::Deleted(path) => vec![path],
+            Change::Renamed { from, to } => vec![from, to],
+        }
+    }
+
     pub(crate) fn relative_to(self, root: &Path) -> Self {
         let relative = |path: PathBuf| match path.strip_prefix(root) {
             Ok(rest) => rest.to_path_buf(),

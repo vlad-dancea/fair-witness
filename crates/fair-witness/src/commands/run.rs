@@ -10,7 +10,7 @@ use fair_witness_core::model::{Effort, ModelChoice};
 use fair_witness_core::net::{api_key_unencrypted, in_the_clear, web_url};
 use fair_witness_core::project::{AiConfig, Config, NOT_SET_UP, Project};
 use fair_witness_core::review::{ChoiceCheck, ModelStep};
-use fair_witness_core::session::{Event, Record, Session};
+use fair_witness_core::session::{Event, RETRY_WAITS, Record, Session};
 use fair_witness_core::watcher::DEBOUNCE;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -100,6 +100,14 @@ pub struct Args {
                 already, such as the scenario runner"
     )]
     skip_model_check: bool,
+    #[arg(
+        long,
+        hide = true,
+        value_name = "MS",
+        help = "Wait this long before each further attempt at a failed change set, instead of 1, 2, \
+                5, 15 and 15 minutes, for a caller that cannot wait, such as the scenario runner"
+    )]
+    retry_wait_ms: Option<u64>,
 }
 
 /// What `run` watches with, once it has everything it needs.
@@ -174,6 +182,9 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
     }
     tracing::info!("watching {}", project.root().display());
     session = session.debounce(Duration::from_millis(args.debounce_ms));
+    if let Some(wait) = args.retry_wait_ms {
+        session = session.retry_waits(vec![Duration::from_millis(wait); RETRY_WAITS.len()]);
+    }
     let mut status = Vec::new();
     let mut settings = None;
     let dmp_given = args.dmp_file.is_some() || args.dmp.is_some();
@@ -199,7 +210,9 @@ async fn start(here: &Path, args: Args) -> Result<Start> {
                 Source::File(file) => read_dmp(&file)?,
                 Source::Damap(id) => download_dmp(&project, id, args.headless).await?,
             };
-            session = session.reviewing(dmp.json, vec![reviewer.clone()]);
+            session = session
+                .reviewing(dmp.json, vec![reviewer.clone()])
+                .trying_again_on(reviewer.choice_changed());
             tracing::info!("{}", dmp.status);
             status.push(dmp.status);
             status.extend(ai.key_not_sent);
@@ -798,6 +811,7 @@ mod tests {
             effort: effort.map(|name| name.parse().unwrap()),
             debounce_ms: DEBOUNCE.as_millis() as u64,
             skip_model_check: false,
+            retry_wait_ms: None,
         }
     }
 

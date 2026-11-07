@@ -25,6 +25,7 @@ pub fn expected(changes: Option<Vec<Change>>, contradicts: bool, field: Option<&
         dmp_field: field.into_iter().map(str::to_string).collect(),
         explanation: "Why.".to_string(),
         fake_tool_calls: Vec::new(),
+        fake_failures: 0,
     }
 }
 

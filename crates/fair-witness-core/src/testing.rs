@@ -63,6 +63,13 @@ pub struct Reply {
     held: Option<Receiver<()>>,
 }
 
+impl Reply {
+    /// What it answers with, as the API would send it.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
 impl From<Value> for Reply {
     fn from(body: Value) -> Self {
         answer("200 OK", body)

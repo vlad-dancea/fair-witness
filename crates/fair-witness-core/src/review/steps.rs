@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -26,6 +27,19 @@ pub enum StepOutcome {
     /// Hands the change set on to the next step, with what this one found, if anything.
     Undecided(Option<String>),
 }
+
+/// The error of a step that the API refused and would refuse again until another model is chosen,
+/// so that trying again later would change nothing.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 pub type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<StepOutcome>> + Send + 'a>>;
 

@@ -13,7 +13,8 @@ use fair_witness_core::project::{
     AiConfig, ApiKey, Config, Credentials, DamapConfig, DamapLogin, Project,
 };
 use fair_witness_core::testing::{
-    EFFORT_REFUSED, Reply, asking_to_wait, bad_request, failure, fake_model, one_token, tool_call,
+    EFFORT_REFUSED, Reply, asking_to_wait, bad_request, failure, fake_model, one_token,
+    too_many_requests, tool_call,
 };
 use serde_json::{Value, json};
 
@@ -984,4 +985,64 @@ fn stops_when_its_events_are_not_read_while_it_runs() {
         run.stderr_until("error:").pop().unwrap(),
         "error: stopped, since stdout was not read fast enough for 30s"
     );
+}
+
+#[test]
+fn says_in_the_failed_event_when_a_set_goes_again_and_ends_with_its_verdict() {
+    let (root, dmp_file) = unset_folder_with_a_dmp();
+    let replies: Vec<Reply> = vec![
+        one_token().into(),
+        too_many_requests(Some("86400"), "Daily quota exceeded."),
+        tool_call(
+            "report_verdict",
+            json!({ "contradicts": false, "explanation": "Soil samples, as planned." }),
+        )
+        .into(),
+    ];
+    let (endpoint, server) = fake_model(replies);
+
+    let run = Run::start(
+        root.path(),
+        &[
+            "--dmp-file",
+            &dmp_file,
+            "--ai-url",
+            &endpoint,
+            "--model",
+            "test",
+            "--retry-wait-ms=20",
+        ],
+    );
+    run.stderr_until("Comparing");
+    std::fs::write(root.path().join("samples.csv"), "ph\n6.5\n").unwrap();
+    let events = run.events_until_verdict();
+
+    let of_the_set: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["event"] != "trace")
+        .collect();
+    assert_eq!(
+        of_the_set,
+        [
+            &json!({ "event": "changes", "set": 1, "changes": [{ "created": "samples.csv" }] }),
+            &json!({ "event": "reviewing", "set": 1 }),
+            &json!({
+                "event": "review_failed",
+                "set": 1,
+                "error": "the model test answered 429 Too Many Requests and asks to wait 86400 s, \
+                          longer than fair-witness waits (60 s): the API answered 429 Too Many \
+                          Requests: Daily quota exceeded.",
+                "attempt": 1,
+                "retry_in_ms": 20
+            }),
+            &json!({ "event": "reviewing", "set": 1 }),
+            &json!({
+                "event": "verdict",
+                "set": 1,
+                "verdict": { "contradicts": false, "explanation": "Soil samples, as planned." }
+            }),
+        ]
+    );
+    assert_eq!(server.join().unwrap().len(), 3);
+    assert_eq!(run.stop(), Some(0));
 }
