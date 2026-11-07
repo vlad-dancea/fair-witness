@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use crate::dmp::{Dmp, DmpSource, DmpVersion, kept_warning};
 use crate::project::{self, Project};
 use crate::review::{self, Refused, Step, Trace, Verdict, spoken};
+use crate::state::{FolderState, StateKeeper};
 use crate::watcher::{self, Change, Filter, FolderWatcher, WatchError};
 
 /// How long a change set whose review failed waits before each further attempt. Its reviews have
@@ -41,6 +42,10 @@ pub enum Event {
     Changes {
         set: usize,
         changes: Vec<Change>,
+        /// Whether these changes were made since the last run, while nothing watched the folder,
+        /// and found by comparing it with the saved state when this run started.
+        #[serde(default, skip_serializing_if = "review::is_false")]
+        since_last_run: bool,
     },
     Reviewing {
         set: usize,
@@ -55,7 +60,7 @@ pub enum Event {
     },
     /// A review of the set failed, and the set stays undecided. With `retry_in_ms` it goes again
     /// after that long, or sooner once any set gets a verdict. Without it, it goes again only when
-    /// another model is chosen.
+    /// another model is chosen, or as part of the next run's first set where the state is kept.
     ReviewFailed {
         set: usize,
         error: String,
@@ -86,6 +91,11 @@ pub enum Event {
     },
     /// The log could not be written, so it holds no events from here on, not even this one.
     LogStopped {
+        error: String,
+    },
+    /// The saved state of the folder could not be read or written, and watching goes on. The error
+    /// says what that costs.
+    StateProblem {
         error: String,
     },
     /// Which DMP the reviews use from here on, when that or what is wrong with it changed. A
@@ -131,6 +141,7 @@ pub struct Session {
     retry_waits: Vec<Duration>,
     another_model: Arc<Notify>,
     log: Option<PathBuf>,
+    state: Option<Arc<StateKeeper>>,
 }
 
 struct ReviewSettings {
@@ -149,6 +160,7 @@ impl Session {
             retry_waits: RETRY_WAITS.to_vec(),
             another_model: Arc::default(),
             log: None,
+            state: None,
         }
     }
 
@@ -199,20 +211,33 @@ impl Session {
         }
     }
 
+    /// Reports what changed since the last run as a first set of its own, and has `state` move
+    /// past each set once it is decided. The caller saves `state` when it stops, since the session
+    /// only saves it now and then.
+    pub fn keeping_state(self, state: Arc<StateKeeper>) -> Self {
+        Self {
+            state: Some(state),
+            ..self
+        }
+    }
+
     /// Starts watching. The session runs until the receiver is dropped or watching stops, and
-    /// drops the review in progress and the failed sets then.
+    /// drops the review in progress and the failed sets then. Where the state is kept, they come
+    /// back at the next start, since it has not moved past them.
     pub fn start(self) -> Result<UnboundedReceiver<Record>> {
-        let watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
+        let mut watcher = FolderWatcher::new(self.project.root(), self.debounce)?;
         // The rules the watcher read when it started, so that the model may read exactly what
         // the watcher reports.
         let filter = watcher.filter().clone();
+        // Only a state has any use for it, and it can be large.
+        let first_look = self.state.is_some().then_some(watcher.take_first_look());
         let log = self
             .log
             .as_deref()
             .map(project::append_private)
             .transpose()?;
         let (sender, received) = mpsc::unbounded_channel();
-        let events = Arc::new(Events::new(sender, log));
+        let events = Arc::new(Events::new(sender, log).keeping(self.state.clone()));
         let (queue, queued) = mpsc::unbounded_channel();
         let reviews = tokio::spawn({
             let events = events.clone();
@@ -220,6 +245,7 @@ impl Session {
                 tokio::select! {
                     () = self.review_queued(queued, &filter, &events) => {}
                     () = events.sender.closed() => {}
+                    () = events.save_state_when_due() => {}
                 }
             }
         });
@@ -228,13 +254,16 @@ impl Session {
         // which may be gone by the time the review ends.
         tokio::spawn(async move {
             let stopped = tokio::select! {
-                stopped = watch(watcher, &events, &queue) => stopped,
+                stopped = watch(watcher, first_look, &events, &queue) => stopped,
                 () = events.sender.closed() => None,
                 // The reviews are gone only after a panic, and then the session ends at once
                 // rather than look as if it still reviewed.
                 () = queue.closed() => None,
             };
             if let Some(error) = stopped {
+                if let Some(state) = &events.state {
+                    state.stop_saving();
+                }
                 // No review can read the folder any more, and why watching stopped comes last.
                 reviews.abort();
                 let _ = reviews.await;
@@ -250,12 +279,18 @@ impl Session {
     // so the sets in `queued` always get their turn.
     async fn review_queued(
         &self,
-        mut queued: UnboundedReceiver<(usize, Vec<Change>)>,
+        mut queued: UnboundedReceiver<(usize, Undecided)>,
         filter: &Filter,
         events: &Events,
     ) {
         let Some(settings) = &self.review else {
-            while queued.recv().await.is_some() {}
+            // With no review to wait for, the state moves as soon as a set is reported.
+            while let Some((set, undecided)) = queued.recv().await {
+                if let Some(state) = &events.state {
+                    state.before_review(set, &undecided.changes, filter).await;
+                    state.decided(set);
+                }
+            }
             return;
         };
         let mut failed = FailedSets::new(self.retry_waits.clone());
@@ -284,7 +319,7 @@ impl Session {
                         }
                         () = sleep_until(next_due) => continue,
                         next = queued.recv(), if more_to_come => match next {
-                            Some((set, changes)) => (set, Undecided::new(changes)),
+                            Some(next) => next,
                             None => {
                                 more_to_come = false;
                                 continue;
@@ -294,7 +329,7 @@ impl Session {
                 }
             };
             match self
-                .review_set(settings, &mut dmp, set, &undecided.changes, filter, events)
+                .review_set(settings, &mut dmp, set, &undecided, filter, events)
                 .await
             {
                 Ok(verdict) => {
@@ -311,10 +346,13 @@ impl Session {
         settings: &ReviewSettings,
         dmp: &mut Dmp,
         set: usize,
-        changes: &[Change],
+        undecided: &Undecided,
         filter: &Filter,
         events: &Events,
     ) -> Result<Verdict> {
+        if let Some(state) = &events.state {
+            state.before_review(set, &undecided.changes, filter).await;
+        }
         events.send(Event::Reviewing { set });
         if let Some(source) = &self.dmp_source {
             bring_up_to_date(dmp, source.as_ref(), events).await;
@@ -322,7 +360,16 @@ impl Session {
         let trace = |trace| events.send(Event::Trace { set, trace });
         trace(Trace::DmpVersion(dmp.version.clone()));
         let root = self.project.root();
-        review::run_steps(&settings.steps, root, filter, &dmp.text, changes, &trace).await
+        review::run_steps(
+            &settings.steps,
+            root,
+            filter,
+            &dmp.text,
+            &undecided.changes,
+            undecided.since_last_run,
+            &trace,
+        )
+        .await
     }
 }
 
@@ -362,6 +409,8 @@ async fn sleep_until(due: Option<Instant>) {
 struct Undecided {
     /// What is left of it, without what a newer set's verdict covered.
     changes: Vec<Change>,
+    /// Whether the changes were made since the last run, as the model is told.
+    since_last_run: bool,
     /// How many of its reviews failed.
     failures: usize,
     /// How many of the waits it has had.
@@ -371,9 +420,10 @@ struct Undecided {
 }
 
 impl Undecided {
-    fn new(changes: Vec<Change>) -> Self {
+    fn new(changes: Vec<Change>, since_last_run: bool) -> Self {
         Self {
             changes,
+            since_last_run,
             failures: 0,
             waited: 0,
             due: None,
@@ -469,10 +519,36 @@ impl FailedSets {
 /// the error that stopped watching, if one did.
 async fn watch(
     mut watcher: FolderWatcher,
+    first_look: Option<FolderState>,
     events: &Events,
-    queue: &UnboundedSender<(usize, Vec<Change>)>,
+    queue: &UnboundedSender<(usize, Undecided)>,
 ) -> Option<String> {
     let mut set = 0;
+    if let (Some(state), Some(first_look)) = (&events.state, first_look) {
+        // In the background, since the session is up by now, and a large state on a slow drive
+        // takes a while to read. Later changes wait as events, so that nothing falls in between.
+        let (state, filter, root_id) = (state.clone(), watcher.filter().clone(), watcher.root_id());
+        let started =
+            tokio::task::spawn_blocking(move || state.start(first_look, &filter, root_id)).await;
+        let started = started.unwrap_or_default();
+        for error in started.problems {
+            events.send(Event::StateProblem { error });
+        }
+        if !started.changes.is_empty() {
+            set += 1;
+            events.send(Event::Changes {
+                set,
+                changes: started.changes.clone(),
+                since_last_run: true,
+            });
+            if queue
+                .send((set, Undecided::new(started.changes, true)))
+                .is_err()
+            {
+                return None;
+            }
+        }
+    }
     while let Some(batch) = watcher.next().await {
         let changes = match batch {
             Ok(changes) => changes,
@@ -493,8 +569,9 @@ async fn watch(
         events.send(Event::Changes {
             set,
             changes: changes.clone(),
+            since_last_run: false,
         });
-        if queue.send((set, changes)).is_err() {
+        if queue.send((set, Undecided::new(changes, false))).is_err() {
             return None;
         }
     }
@@ -508,6 +585,7 @@ struct Events {
     log: Mutex<Option<File>>,
     last_setup: Mutex<Option<Trace>>,
     last_model: Mutex<Option<Trace>>,
+    state: Option<Arc<StateKeeper>>,
 }
 
 impl Events {
@@ -517,12 +595,32 @@ impl Events {
             log: Mutex::new(log),
             last_setup: Mutex::new(None),
             last_model: Mutex::new(None),
+            state: None,
+        }
+    }
+
+    /// Moves `state` past each set that an event says is decided.
+    fn keeping(self, state: Option<Arc<StateKeeper>>) -> Self {
+        Self { state, ..self }
+    }
+
+    /// Saves the state now and then, and says when that fails. It never ends.
+    async fn save_state_when_due(&self) {
+        match &self.state {
+            Some(state) => {
+                let report = |error| self.send(Event::StateProblem { error });
+                state.clone().save_when_due(report).await;
+            }
+            None => std::future::pending().await,
         }
     }
 
     fn send(&self, event: Event) {
         if self.repeats(&event) {
             return;
+        }
+        if let (Some(state), Some(set)) = (&self.state, event.decided_set()) {
+            state.decided(set);
         }
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         // Taken under the lock, so that the events of the watcher and of a review, which send
@@ -654,7 +752,14 @@ mod tests {
 
     fn describe(event: &Event) -> String {
         match event {
-            Event::Changes { set, changes } => format!("#{set} changes {changes:?}"),
+            Event::Changes {
+                set,
+                changes,
+                since_last_run: false,
+            } => format!("#{set} changes {changes:?}"),
+            Event::Changes { set, changes, .. } => {
+                format!("#{set} changes since the last run {changes:?}")
+            }
             Event::Reviewing { set } => format!("#{set} reviewing"),
             Event::Trace { set, trace } => match trace {
                 Trace::DmpVersion(version) => {
@@ -699,6 +804,7 @@ mod tests {
             Event::WatchErrors { set, errors } => format!("#{set} watch errors: {errors:?}"),
             Event::WatchStopped { error } => format!("watching stopped: {error}"),
             Event::LogStopped { error } => format!("log stopped: {error}"),
+            Event::StateProblem { error } => format!("state problem: {error}"),
             Event::DmpStatus {
                 status,
                 version,
@@ -1221,7 +1327,7 @@ mod tests {
         let mut failed = FailedSets::new(Vec::new());
         failed.add(
             2,
-            Undecided::new(vec![renamed.clone()]),
+            Undecided::new(vec![renamed.clone()], false),
             &anyhow::anyhow!("down"),
         );
 
@@ -1307,8 +1413,11 @@ mod tests {
     }
 
     /// Change set `set`, which creates `path`.
-    fn created(set: usize, path: &str) -> (usize, Vec<Change>) {
-        (set, vec![Change::Created(path.into())])
+    fn created(set: usize, path: &str) -> (usize, Undecided) {
+        (
+            set,
+            Undecided::new(vec![Change::Created(path.into())], false),
+        )
     }
 
     /// What the reviews of a session report and what feeds them, without a watcher, so that a test
@@ -1339,7 +1448,7 @@ mod tests {
         /// only the waits can decide what goes next.
         async fn run(
             &self,
-            queued: UnboundedReceiver<(usize, Vec<Change>)>,
+            queued: UnboundedReceiver<(usize, Undecided)>,
             meanwhile: impl Future<Output = ()>,
         ) {
             tokio::select! {
@@ -1564,6 +1673,311 @@ mod tests {
             step.since_first()[6],
             DAY,
             "goes again as soon as the model is chosen"
+        );
+    }
+
+    /// A folder that is set up, as a session that keeps its state needs.
+    fn set_up_folder() -> (tempfile::TempDir, Project) {
+        let root = tempfile::tempdir().unwrap();
+        let project = Project::new(root.path().to_path_buf());
+        project.create().unwrap();
+        (root, project)
+    }
+
+    /// A session of `project` that keeps its state, with `steps` to review if there are any.
+    fn keeping_session(
+        project: &Project,
+        steps: Vec<Arc<dyn Step>>,
+    ) -> (Arc<StateKeeper>, UnboundedReceiver<Record>) {
+        let state = Arc::new(StateKeeper::new(project.clone()));
+        let mut session = Session::new(project.clone())
+            .debounce(Duration::from_millis(50))
+            .keeping_state(state.clone());
+        if !steps.is_empty() {
+            session = session.reviewing(empty_dmp(), steps);
+        }
+        (state, session.start().unwrap())
+    }
+
+    /// Stops a session as `run` does.
+    fn stop(state: &StateKeeper, events: UnboundedReceiver<Record>) {
+        drop(events);
+        state.save().unwrap();
+    }
+
+    /// Runs a session long enough to save its first state, with nothing to report, and stops it.
+    async fn first_run(project: &Project) {
+        let (state, events) = keeping_session(project, Vec::new());
+        tokio::time::timeout(PATIENCE, async {
+            while !matches!(project.folder_state(), Ok(Some(_))) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no first state in time");
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn reports_what_changed_between_two_sessions_once_as_a_set_of_its_own() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        for path in ["same.csv", "edited.csv", "deleted.csv"] {
+            fs::write(root.join(path), "old").unwrap();
+        }
+        first_run(&project).await;
+
+        fs::write(root.join("created.csv"), "new").unwrap();
+        fs::write(root.join("edited.csv"), "edited").unwrap();
+        fs::remove_file(root.join("deleted.csv")).unwrap();
+        let (endpoint, server) = fake_model(vec![in_line("All as planned.")]);
+        let (state, mut events) = keeping_session(&project, vec![reviewer(endpoint)]);
+        let seen = until(
+            &mut events,
+            "#1 verdict: contradicts false (None): All as planned.",
+        )
+        .await;
+        stop(&state, events);
+
+        assert_eq!(
+            seen.iter()
+                .map(|record| describe(&record.event))
+                .filter(|event| event.contains("changes") || event.contains("prompt"))
+                .collect::<Vec<_>>(),
+            [
+                r#"#1 changes since the last run [Deleted("deleted.csv"), Created("created.csv"), Changed("edited.csv")]"#,
+                "#1 prompt deleted: deleted.csv",
+            ]
+        );
+        let requests = server.join().unwrap();
+        let prompt = requests[0].1["messages"][1]["content"].as_str().unwrap();
+        assert!(
+            prompt.ends_with(
+                "What changed in the project folder since fair-witness last ran, while it was \
+                 not watching:\n\
+                 deleted: deleted.csv\n\
+                 created: created.csv\n\
+                 changed: edited.csv"
+            ),
+            "{prompt}"
+        );
+
+        // Nothing changed since, so the next change is the first thing to report.
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("later.csv"), "new").unwrap();
+        until(&mut events, r#"#1 changes [Created("later.csv")]"#).await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn reports_nothing_the_first_time_and_nothing_new_in_a_set_with_no_review_to_wait_for() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        fs::write(root.join("there-before.csv"), "old").unwrap();
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("first.csv"), "new").unwrap();
+        // There is no earlier state to differ from, so the first thing to report is this.
+        until(&mut events, r#"#1 changes [Created("first.csv")]"#).await;
+        tokio::time::timeout(PATIENCE, async {
+            // The look at a set's paths comes right after the set, with no review to wait for.
+            while !state.has_moved_past(Path::new("first.csv")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the state did not move");
+        stop(&state, events);
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("second.csv"), "new").unwrap();
+        until(&mut events, r#"#1 changes [Created("second.csv")]"#).await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn brings_back_a_set_whose_review_failed_at_the_next_start() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        first_run(&project).await;
+
+        let (state, mut events) =
+            keeping_session(&project, vec![Scripted::new([refused()]) as Arc<dyn Step>]);
+        fs::write(root.join("a.csv"), "a").unwrap();
+        until_decided(&mut events).await;
+        stop(&state, events);
+
+        let (state, mut events) =
+            keeping_session(&project, vec![Scripted::new([fine()]) as Arc<dyn Step>]);
+        let seen = until(&mut events, "#1 verdict: contradicts false (None): Fine.").await;
+        stop(&state, events);
+
+        assert_eq!(
+            describe(&seen[0].event),
+            r#"#1 changes since the last run [Created("a.csv")]"#
+        );
+        // Decided now, so that the next start has nothing left to report.
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("later.csv"), "new").unwrap();
+        until(&mut events, r#"#1 changes [Created("later.csv")]"#).await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn brings_back_the_set_under_review_and_the_sets_queued_behind_it_as_one() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        first_run(&project).await;
+
+        let (state, mut events) = keeping_session(&project, vec![Arc::new(Stalls)]);
+        fs::write(root.join("under-review.csv"), "a").unwrap();
+        until(&mut events, "#1 reviewing").await;
+        fs::write(root.join("queued.csv"), "b").unwrap();
+        until(&mut events, r#"#2 changes [Created("queued.csv")]"#).await;
+        stop(&state, events);
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        until(
+            &mut events,
+            r#"#1 changes since the last run [Created("queued.csv"), Created("under-review.csv")]"#,
+        )
+        .await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn sees_an_edit_during_a_review_as_new_at_the_next_start() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        first_run(&project).await;
+
+        let (release, released) = std::sync::mpsc::channel();
+        let (endpoint, _server) = fake_model(vec![held(in_line("Results, as planned."), released)]);
+        let (state, mut events) = keeping_session(&project, vec![reviewer(endpoint)]);
+        let results = root.join("results.csv");
+        fs::write(&results, "a").unwrap();
+        until(&mut events, "#1 request 1").await;
+        fs::write(&results, "edited during the review").unwrap();
+        release.send(()).unwrap();
+        until(
+            &mut events,
+            "#1 verdict: contradicts false (None): Results, as planned.",
+        )
+        .await;
+        stop(&state, events);
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        until(
+            &mut events,
+            r#"#1 changes since the last run [Changed("results.csv")]"#,
+        )
+        .await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn moves_past_a_settled_set_with_the_verdict_that_covered_it() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        first_run(&project).await;
+
+        let results = root.join("results.csv");
+        let step = Scripted::new([down(), fine()]);
+        let (state, mut events) = keeping_session(&project, vec![step as Arc<dyn Step>]);
+        fs::write(&results, "a").unwrap();
+        until_decided(&mut events).await;
+        fs::write(&results, "b").unwrap();
+        until(&mut events, "#1 settled by #2").await;
+        stop(&state, events);
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("later.csv"), "new").unwrap();
+        until(&mut events, r#"#1 changes [Created("later.csv")]"#).await;
+        stop(&state, events);
+    }
+
+    #[tokio::test]
+    async fn warns_about_a_state_it_cannot_read_and_starts_over() {
+        let (root, project) = set_up_folder();
+        let root = root.path();
+        fs::write(root.join(".fair-witness/state.json"), "not json").unwrap();
+        fs::write(root.join("there-before.csv"), "old").unwrap();
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        let warned = tokio::time::timeout(PATIENCE, events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        fs::write(root.join("later.csv"), "new").unwrap();
+        until(&mut events, r#"#1 changes [Created("later.csv")]"#).await;
+        stop(&state, events);
+
+        let Event::StateProblem { error } = warned.event else {
+            panic!("{warned:?}");
+        };
+        assert!(
+            error.starts_with(
+                "could not read what the folder looked like when `run` last stopped, so what \
+                 changed since then is not reported and this run starts over: "
+            ),
+            "{error}"
+        );
+        assert!(matches!(project.folder_state(), Ok(Some(_))));
+    }
+
+    #[tokio::test]
+    async fn saves_nothing_over_a_folder_that_took_the_place_of_the_one_watched() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("project");
+        let project = Project::new(root.clone());
+        project.create().unwrap();
+        first_run(&project).await;
+        let saved = fs::read(root.join(".fair-witness/state.json")).unwrap();
+
+        let (state, mut events) = keeping_session(&project, Vec::new());
+        fs::write(root.join("a.csv"), "a").unwrap();
+        until(&mut events, r#"#1 changes [Created("a.csv")]"#).await;
+        fs::rename(&root, parent.path().join("moved")).unwrap();
+        project.create().unwrap();
+        while let Some(record) = tokio::time::timeout(PATIENCE, events.recv())
+            .await
+            .expect("the session went on after its folder moved")
+        {
+            let _ = record;
+        }
+        state.save().unwrap();
+
+        assert!(!root.join(".fair-witness/state.json").exists());
+        assert_eq!(
+            fs::read(parent.path().join("moved/.fair-witness/state.json")).unwrap(),
+            saved
+        );
+    }
+
+    #[test]
+    fn reads_changes_from_a_log_of_before_any_were_since_the_last_run() {
+        let line = r#"{"time":"2026-11-07T10:00:00Z","event":"changes","set":1,"changes":[]}"#;
+
+        let record: Record = serde_json::from_str(line).unwrap();
+
+        let earlier = Event::Changes {
+            set: 1,
+            changes: Vec::new(),
+            since_last_run: false,
+        };
+        assert_eq!(record.event, earlier);
+        assert_eq!(
+            serde_json::to_value(&earlier).unwrap(),
+            json!({ "event": "changes", "set": 1, "changes": [] })
+        );
+        assert_eq!(
+            serde_json::to_value(Event::Changes {
+                set: 1,
+                changes: Vec::new(),
+                since_last_run: true,
+            })
+            .unwrap(),
+            json!({ "event": "changes", "set": 1, "changes": [], "since_last_run": true })
         );
     }
 

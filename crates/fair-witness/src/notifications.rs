@@ -5,9 +5,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::tui::app::{Update, next_attempt};
 
 /// Shows a desktop notification for a contradiction or a change set whose review failed, and tells
-/// the screen when that fails.
-pub fn show(event: &Event, updates: &UnboundedSender<Update>) {
-    let Some((summary, body)) = content(event) else {
+/// the screen when that fails. `comes_back` says whether a failed set returns at the next start.
+pub fn show(event: &Event, comes_back: bool, updates: &UnboundedSender<Update>) {
+    let Some((summary, body)) = content(event, comes_back) else {
         return;
     };
     let updates = updates.clone();
@@ -25,7 +25,7 @@ pub fn show(event: &Event, updates: &UnboundedSender<Update>) {
 }
 
 /// The summary and body of the notification for `event`, if it gets one.
-fn content(event: &Event) -> Option<(String, String)> {
+fn content(event: &Event, comes_back: bool) -> Option<(String, String)> {
     match event {
         Event::Verdict { set, verdict } if verdict.contradicts => {
             let field = verdict
@@ -48,7 +48,7 @@ fn content(event: &Event) -> Option<(String, String)> {
         } => Some((
             format!(
                 "Could not check change set #{set}, {}",
-                next_attempt(*retry_in_ms)
+                next_attempt(*retry_in_ms, comes_back)
             ),
             error.lines().next().unwrap_or_default().to_string(),
         )),
@@ -122,10 +122,19 @@ mod tests {
             }
         );
         assert_eq!(
-            content(&error),
+            content(&error, false),
             Some((
                 "Could not check change set #1, no more attempts in this run unless you pick another \
                  model (m)"
+                    .to_string(),
+                format!("the model test failed: {why}"),
+            ))
+        );
+        assert_eq!(
+            content(&error, true),
+            Some((
+                "Could not check change set #1, no more attempts until you pick another model (m) \
+                 or start run again"
                     .to_string(),
                 format!("the model test failed: {why}"),
             ))
@@ -142,7 +151,7 @@ mod tests {
         };
 
         assert_eq!(
-            content(&failed),
+            content(&failed, true),
             Some((
                 "Could not check change set #2, trying again in 2 minutes".to_string(),
                 "the model test failed".to_string(),
@@ -162,7 +171,7 @@ mod tests {
         let shown = |set| {
             (1..)
                 .zip(waits)
-                .filter_map(|(attempt, wait)| content(&failed(set, attempt, wait)))
+                .filter_map(|(attempt, wait)| content(&failed(set, attempt, wait), true))
                 .count()
         };
 

@@ -56,7 +56,7 @@ realistic/clinic-export-with-patient-names/
   files/          the files the project folder starts with, if any
 ```
 
-The runner copies `files/` into a new folder in the system's temp folder, starts `fair-witness run --headless` on it with `dmp.json`, and runs `script.sh` there with bash.
+The runner copies `files/` into a new folder in the system's temp folder, starts `fair-witness run --headless` on it with `dmp.json`, and runs `script.sh` there with bash. The folder never ran `setup`, so fair-witness keeps no log and no saved state in it, and a scenario sees only the sets its script makes.
 
 ### script.sh
 

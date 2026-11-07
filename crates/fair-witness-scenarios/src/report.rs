@@ -309,8 +309,8 @@ pub fn judge(scenario: &Scenario, model: &Model, repeat: usize, ran: &Ran) -> Ru
                 problems.push(format!("watching stopped: {error}"));
                 continue;
             }
-            // Only a folder that is set up gets a log.
-            Event::LogStopped { .. } => continue,
+            // Only a folder that is set up gets a log and a saved state.
+            Event::LogStopped { .. } | Event::StateProblem { .. } => continue,
             // A scenario's DMP stays as it is, and its reviews use the one they have regardless.
             Event::DmpStatus { .. } => continue,
         };

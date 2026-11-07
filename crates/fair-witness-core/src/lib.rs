@@ -11,6 +11,7 @@ pub mod project;
 pub mod review;
 pub mod secret;
 pub mod session;
+pub mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod watcher;

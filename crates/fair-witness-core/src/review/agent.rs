@@ -149,7 +149,8 @@ impl ModelStep {
         // it would keep the review's timeout from firing.
         let (root, changes) = (input.root.to_path_buf(), input.changes.to_vec());
         let gone = tokio::task::spawn_blocking(move || prompt::gone(&root, &changes)).await?;
-        let about_changes = prompt::about_changes(input.changes, &gone, input.found);
+        let about_changes =
+            prompt::about_changes(input.changes, input.since_last_run, &gone, input.found);
         let lines = input
             .changes
             .iter()
@@ -526,6 +527,7 @@ mod tests {
             filter: Box::leak(Box::new(Filter::new(root).unwrap())),
             dmp,
             changes,
+            since_last_run: false,
             found: &[],
         }
     }

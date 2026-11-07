@@ -39,11 +39,17 @@ pub enum Update {
     NotifyFailed(String),
 }
 
-/// What comes after a review that failed, to follow a comma, given the event's `retry_in_ms`.
-pub fn next_attempt(retry_in_ms: Option<u64>) -> String {
-    match retry_in_ms {
-        Some(wait) => format!("trying again in {}", spoken(Duration::from_millis(wait))),
-        None => "no more attempts in this run unless you pick another model (m)".to_string(),
+/// What comes after a review that failed, to follow a comma, given the event's `retry_in_ms` and
+/// whether the set comes back at the next start, which it does in a folder that is set up.
+pub fn next_attempt(retry_in_ms: Option<u64>, comes_back: bool) -> String {
+    match (retry_in_ms, comes_back) {
+        (Some(wait), _) => format!("trying again in {}", spoken(Duration::from_millis(wait))),
+        (None, true) => {
+            "no more attempts until you pick another model (m) or start run again".to_string()
+        }
+        (None, false) => {
+            "no more attempts in this run unless you pick another model (m)".to_string()
+        }
     }
 }
 
@@ -165,6 +171,8 @@ pub struct Screen {
     /// Whether the session ended, which the header says, since the line in the changes pane that
     /// says why can be scrolled away.
     stopped: bool,
+    /// Whether a set with no attempts left comes back at the next start.
+    comes_back: bool,
     quit: bool,
 }
 
@@ -174,6 +182,7 @@ impl Screen {
         dmp: Option<&Dmp>,
         status: Vec<String>,
         settings: Option<ModelSettings>,
+        comes_back: bool,
     ) -> Self {
         Self {
             root: root.to_path_buf(),
@@ -196,6 +205,7 @@ impl Screen {
             settings,
             panel: None,
             stopped: false,
+            comes_back,
             quit: false,
         }
     }
@@ -349,7 +359,18 @@ impl Screen {
         self.debug.add(&record);
         let time = record.time;
         match record.event {
-            Event::Changes { set, changes } => {
+            Event::Changes {
+                set,
+                changes,
+                since_last_run,
+            } => {
+                if since_last_run {
+                    self.push_line(ChangesLine {
+                        line: Line::from("since the last run:".add_modifier(Modifier::DIM)),
+                        set: Some(set),
+                        verdict: false,
+                    });
+                }
                 for listed in watcher::summarize(&changes) {
                     self.push_line(ChangesLine {
                         line: change_line(&listed),
@@ -390,7 +411,7 @@ impl Screen {
                 retry_in_ms,
                 ..
             } => {
-                let next = next_attempt(retry_in_ms);
+                let next = next_attempt(retry_in_ms, self.comes_back);
                 self.add_verdict(set, vec![format!("review failed, {next}: {error}").red()]);
             }
             Event::Settled { set, by } => self.add_verdict(
@@ -414,6 +435,9 @@ impl Screen {
             Event::LogStopped { error } => {
                 let stopped = format!("stopped writing the log in .fair-witness/log/: {error}");
                 self.push_line(Line::from(stopped.red()).into());
+            }
+            Event::StateProblem { error } => {
+                self.push_line(Line::from(error.yellow()).into());
             }
             Event::DmpStatus {
                 status,
@@ -725,7 +749,7 @@ mod tests {
         };
         let status = "Comparing changes with project #7 - Sleep and screen time.".to_string();
         let dmp = Dmp::from_madmp(&json!({}), DmpOrigin::Downloaded, status).unwrap();
-        Screen::new(root, Some(&dmp), Vec::new(), Some(settings))
+        Screen::new(root, Some(&dmp), Vec::new(), Some(settings), true)
     }
 
     /// Three change sets: one in line with the DMP, one that contradicts it after the model
@@ -750,6 +774,7 @@ mod tests {
             Event::Changes {
                 set: 1,
                 changes: vec![Change::Created("notes.md".into())],
+                since_last_run: false,
             },
             Event::Reviewing { set: 1 },
             Event::Trace {
@@ -791,6 +816,7 @@ mod tests {
                     Change::Created("data".into()),
                     Change::Created("data/participants.csv".into()),
                 ],
+                since_last_run: false,
             },
             Event::Reviewing { set: 2 },
             Event::Trace {
@@ -855,6 +881,7 @@ mod tests {
                     },
                     Change::Deleted("old.csv".into()),
                 ],
+                since_last_run: false,
             },
             Event::Reviewing { set: 3 },
             Event::Trace {
@@ -1060,11 +1087,13 @@ mod tests {
             Event::Changes {
                 set: 1,
                 changes: vec![Change::Created("results.csv".into())],
+                since_last_run: false,
             },
             Event::Reviewing { set: 1 },
             Event::Changes {
                 set: 2,
                 changes: vec![Change::Changed("results.csv".into())],
+                since_last_run: false,
             },
         ] {
             apply(&mut screen, event);
@@ -1074,6 +1103,7 @@ mod tests {
             Event::Changes {
                 set: 3,
                 changes: vec![Change::Deleted("results.csv".into())],
+                since_last_run: false,
             },
         );
         apply(&mut screen, in_line(1));
@@ -1121,6 +1151,7 @@ mod tests {
         let created = |set: usize| Event::Changes {
             set,
             changes: vec![Change::Created(format!("{set}.csv").into())],
+            since_last_run: false,
         };
         apply(&mut screen, created(1));
         apply(&mut screen, Event::Reviewing { set: 1 });
@@ -1188,12 +1219,14 @@ mod tests {
         apply(Event::Changes {
             set: 1,
             changes: vec![Change::Created("results.csv".into())],
+            since_last_run: false,
         });
         apply(Event::Reviewing { set: 1 });
         let waiting = apply(failed(1, Some(60_000)));
         apply(Event::Changes {
             set: 2,
             changes: vec![Change::Created("notes.txt".into())],
+            since_last_run: false,
         });
         apply(Event::Reviewing { set: 2 });
         apply(Event::Verdict {
@@ -1228,9 +1261,9 @@ mod tests {
             given_up,
             [
                 created.clone(),
-                " ↳ review failed, no more attempts in this run unless you pick another model"
+                " ↳ review failed, no more attempts until you pick another model (m) or start run"
                     .to_string(),
-                "   (m): the API is down".to_string(),
+                "   again: the API is down".to_string(),
                 later.clone(),
                 " ↳ in line with the DMP: Notes.".to_string(),
             ]
@@ -1247,6 +1280,41 @@ mod tests {
     }
 
     #[test]
+    fn says_which_set_holds_what_changed_since_the_last_run() {
+        let mut screen = screen();
+
+        screen.apply(Update::Session(Record {
+            time: "2026-11-07T10:00:00Z".parse().unwrap(),
+            event: Event::Changes {
+                set: 1,
+                changes: vec![
+                    Change::Deleted("old.csv".into()),
+                    Change::Created("new.csv".into()),
+                ],
+                since_last_run: true,
+            },
+        }));
+
+        assert_eq!(
+            screen.changes_rows(80).iter().map(text).collect::<Vec<_>>(),
+            [
+                format!("{:<78}#1", "since the last run:"),
+                format!("{:<78}#1", "deleted: old.csv"),
+                format!("{:<78}#1", "created: new.csv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn says_that_a_set_stays_away_where_nothing_brings_it_back() {
+        assert_eq!(
+            next_attempt(None, false),
+            "no more attempts in this run unless you pick another model (m)"
+        );
+        assert_eq!(next_attempt(Some(60_000), false), "trying again in 60 s");
+    }
+
+    #[test]
     fn says_why_watching_stopped_instead_of_the_review_it_dropped() {
         let mut screen = screen();
         let time = "2026-10-23T09:41:00Z".parse().unwrap();
@@ -1258,6 +1326,7 @@ mod tests {
             Event::Changes {
                 set: 1,
                 changes: vec![Change::Created("results.csv".into())],
+                since_last_run: false,
             },
         );
         apply(&mut screen, Event::Reviewing { set: 1 });

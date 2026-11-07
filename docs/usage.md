@@ -132,7 +132,7 @@ Before each review, `run` downloads the DMP again, which takes a fraction of a s
 
 A set whose review failed is kept and reviewed again under its own number, and the line under it says when. The attempts come after 1, 2, 5, 15 and 15 minutes, the oldest set first, and newer sets are checked in the meantime. Any verdict shows that the API works again, so the waiting sets go at once. Each failing set gives one desktop notification, however many attempts it takes.
 
-After the last attempt, or at once when the API refuses the request with a `4xx` status other than `408`, `409` or `429`, such as `401`, `403` or `404`, the line says that no more attempts come in this run unless you pick another model. Picking a model with `m`, also the same one, sends every waiting set again and starts its waits over. Quitting `run` drops the waiting sets, so their changes stay unchecked until the files change again.
+After the last attempt, or at once when the API refuses the request with a `4xx` status other than `408`, `409` or `429`, such as `401`, `403` or `404`, the line says that no more attempts come until you pick another model or start `run` again. Picking a model with `m`, also the same one, sends every waiting set again and starts its waits over. Quitting `run` ends the attempts, and what the waiting sets held comes back at the next start, as described in [While `run` is off](#while-run-is-off). In a folder that never ran `setup`, nothing is saved, so the line says that no more attempts come in this run and the changes stay unchecked.
 
 A review reads the folder as it is then, so a verdict on a newer set also covers its paths in an older failed set. Those paths are not reviewed again, and when none are left, the older set says which verdict covers it. Sets never merge, so each number gets one verdict at most.
 
@@ -160,7 +160,32 @@ To use a different API or key, quit and run `fair-witness setup`.
 
 Press `q`, `Esc` or `Ctrl+C`. Your login is kept, so the next `run` starts right away.
 
-`run` also stops watching when the project folder or a folder above it is moved, renamed, deleted or replaced, and says so in the header and the Changes pane. Reviews still running or waiting, also of failed sets, are dropped, since they could no longer read the folder. To watch it again, start `fair-witness run` where the folder is now, or once a deleted folder is back.
+`run` also stops watching when the project folder or a folder above it is moved, renamed, deleted or replaced, and says so in the header and the Changes pane. Reviews still running or waiting, also of failed sets, are dropped, since they could no longer read the folder. To watch it again, start `fair-witness run` where the folder is now, or once a deleted folder is back. Their changes come back then.
+
+### While `run` is off
+
+`run` remembers what the folder looked like, as `state.json` in `.fair-witness/`. When it starts, it compares the folder with that, and what was created, changed or deleted since comes as a change set of its own, which the Changes pane marks:
+
+```
+since the last run:                                              #1
+deleted: data/old.csv                                            #1
+created: data/patients.csv                                       #1
+changed: notes.md                                                #1
+ ↳ contradicts the DMP (dataset[0].personal_data): The file holds
+   names and diagnoses of patients, but the DMP says the project
+   collects no personal data.
+```
+
+The AI checks it like any other set and is told that nothing watched the folder when these changes were made. The screen is up in the meantime, and the set comes when the comparison is done.
+
+- A file counts as changed when its size or its modification time differs, also when that time is older, as `cp -p` or `rsync -t` leave it. A `touch` counts too. An edit that keeps both is not seen, since reading every file at each start could take very long.
+- A file renamed while `run` is off shows up as deleted and created.
+- The first `run` in a folder has nothing to compare with and reports nothing.
+- `run` moves past a change only once its set has a verdict, so a set that failed, was still waiting or was being checked when `run` stopped comes back at the next start. All of it comes as one set, not with the old numbers. With no DMP or no model, nothing is checked, and `run` moves past a change as soon as it lists it.
+- An edit made while the AI checks a set counts as new, also at the next start.
+- `run` saves what it remembers at most once a minute and when it stops. If it is killed or the computer crashes, the next start at worst reports a change again.
+- A rule added to `.fair-witness/ignore` while `run` is off does not make the files it skips look deleted. A rule taken back makes them count as created.
+- When the saved state cannot be read, the Changes pane warns about it and `run` starts over from the folder as it is.
 
 ## Keys
 

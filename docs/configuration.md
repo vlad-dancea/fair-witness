@@ -44,13 +44,14 @@ Everything goes into a `.fair-witness/` folder at the root of the project:
 - `config.toml`: DAMAP URL, DMP id, AI URL, model and effort. Safe to commit. `setup` writes it, and `run` only when you choose a model with `m`.
 - `credentials.toml`: your DAMAP session and the API key, each with the servers it was saved for. `run` renews the session before each review and saves it here. fair-witness sends each only to those servers, so a URL changed in `config.toml`, such as by a collaborator's commit, gets neither. `run` then asks you to log in again, or with `--headless` stops and says to log in with `setup`, and warns that it sends no API key. On macOS and Linux, readable only by you. A file saved by an earlier version has no servers in it, so the first command that reads it takes them from `config.toml` and saves them there. A secret whose server `config.toml` does not name, such as an API key without an AI URL, is dropped, and `setup` asks for it again.
 - `madmp.json`: a copy of the DMP chosen in `setup`, with the DAMAP it came from, refreshed each time `run` downloads that DMP, which it does before each review. When DAMAP cannot be reached as `run` starts, `run` checks against this copy and warns that it does. It names the DMP's contributors with their e-mail addresses, so on macOS and Linux it is readable only by you.
+- `state.json`: what the folder looked like when its changes were last decided, written by `run`: each path with its size and modification time, as described in [While `run` is off](usage.md#while-run-is-off). `run` saves it at most once a minute and when it stops. File names can be personal data, so on macOS and Linux it is readable only by you. If you delete it, the next `run` starts over and reports nothing.
 - `ignore`: a commented template for paths to leave out of checks. `setup` creates it if it is missing and leaves an existing file unchanged.
-- `<file>.<random>.part`: what was left when fair-witness stopped while saving `<file>`. `config.toml`, `credentials.toml`, `madmp.json` and the `.gitignore` are written under such a name first and then renamed over the old file, so a save that fails keeps the old file whole. You can delete these.
+- `<file>.<random>.part`: what was left when fair-witness stopped while saving `<file>`. `config.toml`, `credentials.toml`, `madmp.json`, `state.json` and the `.gitignore` are written under such a name first and then renamed over the old file, so a save that fails keeps the old file whole. You can delete these.
 - `log/`: what each `run` did, written by `run`. `<start time>-events.jsonl` has one line of JSON for every change set, every step of its review and the verdict, with the time, the model and effort, the token counts and how long each reply took. To keep it short, the system prompt, the DMP and the model are written once, before the first review, and again only when they change. Each review names the version of the DMP it used: where it came from, when the plan last changed if the maDMP says, and the start of the SHA-256 of its text. `<start time>-diagnostics.log` has what happened outside the reviews, such as requests to DAMAP, folders that could not be read and notifications that failed. The `FAIR_WITNESS_LOG` environment variable sets how much it holds: `info` by default, `debug` for every request, `trace` for everything and `warn` for problems only. It takes the syntax of `RUST_LOG`, such as `warn,fair_witness_core=debug`. At every level, it leaves out the folder watcher's events below `warn`, one for each file event, and everything the AI client logs, because the client quotes the AI API's responses and those can repeat the API key. The events log has what the model answered.
 
 The log holds everything the AI read with its tools, which can be personal data from your research. Like `credentials.toml`, its files are readable only by you on macOS and Linux. Delete the logs you no longer need.
 
-A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json`, the `.part` files and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
+A `.gitignore` inside `.fair-witness/` keeps `credentials.toml`, `madmp.json`, `state.json`, the `.part` files and `log/` out of git. You can run `fair-witness` from any subfolder. It finds `.fair-witness/` by looking upwards.
 
 ## What is ignored
 
@@ -78,7 +79,7 @@ scratch/
 !venv/
 ```
 
-The file is read when `run` starts, so restart it after a change. The project's own `.gitignore` is not used, because data kept out of git is often exactly the data the DMP is about.
+The file is read when `run` starts, so restart it after a change. A new rule does not make what it skips look deleted, and a rule taken back makes those files count as created at the next start. The project's own `.gitignore` is not used, because data kept out of git is often exactly the data the DMP is about.
 
 ## Running DAMAP locally
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::model::ModelChoice;
 use crate::net::same_url;
+use crate::state::FolderState;
 
 pub const DIR_NAME: &str = ".fair-witness";
 pub const NOT_SET_UP: &str = "this folder is not set up yet; run `fair-witness setup` first";
@@ -15,6 +16,7 @@ pub const IGNORE_FILE: &str = "ignore";
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 const MADMP_FILE: &str = "madmp.json";
+const STATE_FILE: &str = "state.json";
 /// Ends the name of a file being written, which is renamed over the file it replaces. The
 /// ownCloud and Nextcloud clients skip these by default, so a client told to skip
 /// `credentials.toml` never uploads half of it either.
@@ -287,6 +289,30 @@ impl Project {
         write_file(&dir, MADMP_FILE, text.as_bytes(), true)
     }
 
+    /// What the folder looked like when its changes were last decided, as an earlier `run` saved
+    /// it, if one did.
+    pub fn folder_state(&self) -> Result<Option<FolderState>> {
+        let path = self.dir().join(STATE_FILE);
+        let text = match fs::read(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        FolderState::from_json(&text)
+            .map(Some)
+            .with_context(|| format!("{} is not valid", path.display()))
+    }
+
+    /// Replaces the saved state of the folder with `contents`. A `.fair-witness/` that is gone stays
+    /// gone, since the project folder may have moved during the run, and creating it would bring
+    /// back a folder at the old place.
+    pub(crate) fn save_folder_state(&self, contents: &[u8]) -> Result<()> {
+        let dir = self.dir();
+        write_gitignore(&dir)?;
+        // File names can be personal data.
+        write_file(&dir, STATE_FILE, contents, true)
+    }
+
     /// Names the log of a run that starts now, creating its folder and its empty events file.
     pub fn run_log(&self) -> Result<RunLog> {
         self.run_log_at(Timestamp::now())
@@ -355,8 +381,8 @@ fn write_gitignore(dir: &Path) -> Result<()> {
         dir,
         ".gitignore",
         format!(
-            "{CREDENTIALS_FILE}\n{MADMP_FILE}\n*{PARTIAL_SUFFIX}\n{OLD_MADMP_PARTIAL_FILE}\n\
-             {LOG_DIR}/\n"
+            "{CREDENTIALS_FILE}\n{MADMP_FILE}\n{STATE_FILE}\n*{PARTIAL_SUFFIX}\n\
+             {OLD_MADMP_PARTIAL_FILE}\n{LOG_DIR}/\n"
         )
         .as_bytes(),
         false,
@@ -885,7 +911,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(dir.join(".gitignore")).unwrap(),
-            "credentials.toml\nmadmp.json\n*.part\nmadmp.json.partial\nlog/\n"
+            "credentials.toml\nmadmp.json\nstate.json\n*.part\nmadmp.json.partial\nlog/\n"
         );
         project
             .save_madmp("https://a.example.org", 3, &serde_json::json!({}))

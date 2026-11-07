@@ -16,6 +16,8 @@ pub struct Input<'a> {
     pub filter: &'a Filter,
     pub dmp: &'a str,
     pub changes: &'a [Change],
+    /// Whether `changes` were made while nothing watched the folder, since the last run.
+    pub since_last_run: bool,
     /// What earlier steps found, for the later ones to take into account.
     pub found: &'a [String],
 }
@@ -60,6 +62,7 @@ pub async fn run_steps(
     filter: &Filter,
     dmp: &str,
     changes: &[Change],
+    since_last_run: bool,
     trace: &(dyn Fn(Trace) + Sync),
 ) -> Result<Verdict> {
     let mut found = Vec::new();
@@ -69,6 +72,7 @@ pub async fn run_steps(
             filter,
             dmp,
             changes,
+            since_last_run,
             found: &found,
         };
         match step.decide(&input, trace).await? {
@@ -128,7 +132,7 @@ mod tests {
         ];
 
         let filter = Filter::new(root.path()).unwrap();
-        let decided = run_steps(&steps, root.path(), &filter, "{}", &[], &|_| {}).await;
+        let decided = run_steps(&steps, root.path(), &filter, "{}", &[], false, &|_| {}).await;
 
         assert_eq!(decided.unwrap(), verdict());
         assert!(server.join().unwrap().is_empty());
@@ -152,7 +156,7 @@ mod tests {
         std::fs::write(root.path().join("survey.csv"), "name\nAnna Muster\n").unwrap();
         let changes = [Change::Created("survey.csv".into())];
         let filter = Filter::new(root.path()).unwrap();
-        run_steps(&steps, root.path(), &filter, "{}", &changes, &|_| {})
+        run_steps(&steps, root.path(), &filter, "{}", &changes, false, &|_| {})
             .await
             .unwrap();
 
