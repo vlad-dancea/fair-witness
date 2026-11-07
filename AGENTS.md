@@ -57,8 +57,8 @@ lists by name live next to the code. Leave them alone and never commit them.
   least three days old, as configured in `.github/renovate.json5`. Minor and patch updates
   share one pull request, except minor updates of 0.x crates, which Cargo treats as breaking.
   It leaves `release.yml` alone, so dist and its actions are updated by hand.
-- CodeRabbit reviews every pull request and only comments. It reads this file as its code
-  guidelines, configured in `.coderabbit.yaml`.
+- CodeRabbit reviews every pull request except Renovate's, and only comments. It reads this file
+  as its code guidelines, configured in `.coderabbit.yaml`.
 
 ## Branches, commits and pull requests
 
@@ -122,6 +122,15 @@ lists by name live next to the code. Leave them alone and never commit them.
   `gh pr merge <number> --squash --subject "<title> (#<number>)" --body-file <file>`, where
   the body follows the commit message rules. GitHub adds the number only to its own default
   title, so the subject carries it. Do not enable auto-merge unless asked.
+- A pull request authored by Renovate is the one exception to the `CodeRabbit` part of that gate.
+  CodeRabbit never reviews it, because bot-authored pull requests get no CodeRabbit review on the
+  free plan. Do not wait for that review and do not request it with `@coderabbitai`, because every
+  request spends one of the hourly reviews other pull requests need. Merge a Renovate pull request
+  only when the maintainer asks and the rest of the gate holds, with the `check` job and dist's
+  `plan` job passing on the latest commit, Sol's review (`sol-loop`) done with no open findings
+  and nothing waiting for the maintainer. Every other pull request keeps the whole gate and waits
+  for CodeRabbit, including every agent pull request, because those are opened under the
+  maintainer's account.
 - GitHub deletes the remote branch after the merge. Remove a worktree you created with
   `git worktree remove <path>`, then delete its local branch with `git branch -D <branch>`,
   because a squash-merged branch never looks merged to git. Leave a T3 Code worktree and its
