@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
-# CodeRabbit reviews every pull request and comments on it, nothing more. It never commits:
-# the history is curated by hand, so a fix it suggests is applied by a person or not at all.
+# CodeRabbit reviews a pull request when asked, if a review is available, and comments on it,
+# nothing more. It never commits: the history is curated by hand, so a fix it suggests is
+# applied by a person or not at all.
 # Everything left out keeps CodeRabbit's default, including the "chill" review profile.
 # AGENTS.md is read as the code guidelines without being listed here.
 #
@@ -16,10 +17,10 @@ tone_instructions: >-
 
 reviews:
   auto_review:
-    # Stacked pull requests target their parent branch, and full stop waits for a review of
-    # each one. By default only pull requests against main are reviewed.
+    # Stacked pull requests target their parent branch, and full stop requests a review of each
+    # one. By default only pull requests against main are reviewed.
     base_branches: [".*"]
-    # Full stop also waits for a review of every push. By default CodeRabbit pauses after five
+    # Full stop also requests a review of every push. By default CodeRabbit pauses after five
     # reviewed commits, and the next push would never get one.
     auto_pause_after_reviewed_commits: 0
   # The description already says what changed, and it belongs to its author, so CodeRabbit
